@@ -12,7 +12,7 @@ Works on **Windows, macOS, and Linux** (PowerShell 7 is cross-platform).
 
 | Backend | What you need |
 |---------|--------------|
-| **agy** (Gemini) | [Antigravity CLI](https://github.com/antigravity-cli/antigravity) installed and signed in |
+| **agy** (Gemini) | [Antigravity CLI](https://antigravity.google/download#antigravity-cli) installed and signed in |
 | **Claude CLI** | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in |
 | **opencode** | [opencode](https://github.com/anomalyco/opencode) installed with at least one provider configured |
 | **REST** (Gemini / Anthropic / DeepSeek / MiniMax) | An API key from the provider's console |
