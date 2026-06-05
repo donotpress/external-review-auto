@@ -82,8 +82,15 @@ function Test-AgenticNarrationCapture {
     # Branch 1: no heading + narration -> flag (list marker irrelevant here).
     if (-not $hasHeading -and $narration) { return $true }
 
-    # Branch 2: no heading + no list + under the length floor -> flag.
-    if (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) { return $true }
+    # Branch 2: no heading + no list + under the length floor -> flag,
+    # UNLESS the text reads like natural-language code-review prose
+    # (e.g. "No correctness issues found; the concurrency fix is sound.")
+    # which is a legitimate terse review, not agentic narration.
+    $hasProseReview = $text -match '(?im)\b(correct|incorrect|issue|sound|valid|should\s+(be|fix|work)|seems?\s+(fine|good|ok|correct|right)|looks?\s+(good|fine|correct|right)|no\s+(problems?|issues?|bugs?|concerns?|edge.cases?)|edge\s+case|suggest(|ion|ed)\b)'
+    $noNarration = -not ($text -match '(?im)(I will|I.ll|Let me|I need to|First,?\s+I)\b')
+    if ($hasProseReview -and $noNarration) {
+        # Legitimate terse review prose — let it pass even if under the floor.
+    } elseif (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) { return $true }
 
     # Branch 3: no heading + bundle-unavailable refusal -> flag.
     if (-not $hasHeading -and $bundleRefusal) { return $true }

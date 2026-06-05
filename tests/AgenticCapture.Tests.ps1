@@ -34,10 +34,16 @@ Describe 'Test-AgenticNarrationCapture — TRUE positives (must be flagged)' {
             Should -BeTrue
     }
 
-    It 'flags a 60-char response with no heading (length floor)' {
-        $resp = 'Looks fine to me overall, nothing jumped out at a glance.'  # ~57 chars, no heading/list
+    It 'flags a short non-review text with no heading and no prose vocabulary (length floor)' {
+        $resp = 'Just checking things out real quick here.'  # ~43 chars, no heading/list, no prose-review markers
         $resp.Length | Should -BeLessThan 300
         Test-AgenticNarrationCapture -Response $resp | Should -BeTrue
+    }
+
+    It 'does NOT flag a terse legitimate review under the length floor (prose-review gate)' {
+        $resp = 'No correctness issues found; the concurrency fix is sound.'
+        $resp.Length | Should -BeLessThan 300
+        Test-AgenticNarrationCapture -Response $resp | Should -BeFalse
     }
 
     It 'flags file-listing narration even when it contains a list ("I will check these:")' {

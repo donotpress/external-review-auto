@@ -276,6 +276,23 @@ function Reserve-ReviewRound {
         }
     }
 
+    # --- Orphaned claim file TTL cleanup (R6 fix) ---
+    # Remove claim files older than 24h so a hard-killed process (Ctrl-C, OOM)
+    # does not permanently block that round number for the topic. The claim file
+    # is the atomic reservation marker; a live process that created it within the
+    # last 24h is assumed to be genuinely in-flight. A stale claim older than 24h
+    # is assumed orphaned (no healthy dispatch runs that long) and is reclaimed.
+    $claimTTL = [TimeSpan]::FromHours(24)
+    $now = [DateTime]::UtcNow
+    Get-ChildItem -Path $ReviewDir -Filter 'round-*-claim.json' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^round-(\d+)-claim\.json$' } |
+        ForEach-Object {
+            if (($now - $_.LastWriteTimeUtc) -gt $claimTTL) {
+                Write-Host "[era] Reclaiming orphaned claim file: $($_.Name) (last modified $($_.LastWriteTimeUtc))."
+                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+
     $maxRetries = 50
     $attempt = 0
     $claimContent = @{
@@ -922,6 +939,13 @@ function Write-ReviewMetadata {
             # each attempt (the discarded first attempt is in $firstAttempt). Carry
             # that real spend through so a failed retry isn't shown as $0.
             $firstAttemptCost = if ($firstAttempt -and $firstAttempt.est_cost_total_usd) { [double]$firstAttempt.est_cost_total_usd } else { 0.0 }
+            # C5.2: include the final attempt's input cost in failure metadata.
+            # When retryCount>0 the first attempt and final attempt are distinct
+            # dispatches — both spent input tokens. When retryCount==0 (cap-skip
+            # or single-attempt failure) the first attempt IS the final attempt,
+            # so its $firstAttemptCost already covers the input spend.
+            $estIn = [Math]::Round(($BundleTokens / 1000000.0) * $reg.pricing.input_per_m, 4)
+            $finalInputCost = if ($retryCount -gt 0) { $estIn } else { 0.0 }
             $entry = @{
                 preset = $preset; backend = $reg.backend; model = $effectiveModelId
                 pricing_source = $pricingNote
@@ -935,9 +959,9 @@ function Write-ReviewMetadata {
                 response_chars = $respLen
                 bundle_tokens = $BundleTokens
                 est_output_tokens = if ($null -ne $r.OutputTokens) { $r.OutputTokens } else { 0 }
-                est_cost_input_usd = 0    # final-attempt input not separately billed here
+                est_cost_input_usd = $finalInputCost
                 est_cost_output_usd = 0
-                est_cost_total_usd = [Math]::Round($firstAttemptCost, 4)
+                est_cost_total_usd = [Math]::Round($firstAttemptCost + $finalInputCost, 4)
                 truncation_warning = $r.TruncationWarning
                 warnings = $r.Warnings
                 error = $r.Error
