@@ -14,7 +14,7 @@ Works on **Windows, macOS, and Linux** (PowerShell 7 is cross-platform).
 |---------|--------------|
 | **agy** (Gemini) | [Antigravity CLI](https://github.com/antigravity-cli/antigravity) installed and signed in |
 | **Claude CLI** | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and signed in |
-| **opencode** | [opencode](https://github.com/opencode-ai/opencode) installed with at least one provider configured |
+| **opencode** | [opencode](https://github.com/anomalyco/opencode) installed with at least one provider configured |
 | **REST** (Gemini / Anthropic / DeepSeek / MiniMax) | An API key from the provider's console |
 
 `/era doctor` checks everything — PowerShell 7, repomix, ThreadJob, backends — and reports exactly what's missing with install commands. If something needs installing, your TUI can do it for you.
