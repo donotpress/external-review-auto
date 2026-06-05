@@ -703,6 +703,24 @@ Be terse. If a section is empty, write "(none)".
         }
     }
 
+    # --- Expand comma-strings in -IncludeFiles BEFORE building effective include ---
+    # Fix (PR 2 D): Passing -IncludeFiles "a,b,c" (a single quoted string with commas)
+    # is the natural result of Windows command-line parsing on Windows via the Bash
+    # tool. Split any element containing a comma into separate paths.
+    if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
+        $expanded = @(
+            $IncludeFiles | ForEach-Object {
+                if ($_ -match ',') {
+                    @($_ -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                } else { $_ }
+            }
+        )
+        if ($expanded.Count -gt $IncludeFiles.Count) {
+            Write-Host "[era] -IncludeFiles: expanded $($IncludeFiles.Count) element(s) with embedded commas into $($expanded.Count) path(s)."
+            $IncludeFiles = $expanded
+        }
+    }
+
     # --- Determine effective include list ---
     $effectiveInclude = @()
     if ($IncludeFiles) { $effectiveInclude = [array]$IncludeFiles }
@@ -850,27 +868,6 @@ Be terse. If a section is empty, write "(none)".
     }
     $configJson = $configData | ConvertTo-Json -Depth 10
     $configJson | Set-Content -Path $configPath -Encoding utf8
-
-    # Fix (PR 2 D): Handle comma-strings in -IncludeFiles transparently.
-    # Passing -IncludeFiles "a,b,c" (a single quoted string with commas) is the
-    # natural result of Windows command-line parsing when the caller constructs
-    # `-IncludeFiles "a","b","c"` -- Windows sees no whitespace between the
-    # quoted elements and joins them into one argument. Instead of rejecting
-    # (which makes the skill unusable from the OpenCode Bash tool on Windows),
-    # auto-split any element containing a comma into multiple paths.
-    if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
-        $expanded = @(
-            $IncludeFiles | ForEach-Object {
-                if ($_ -match ',') {
-                    @($_ -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-                } else { $_ }
-            }
-        )
-        if ($expanded.Count -gt $IncludeFiles.Count) {
-            Write-Host "[era] -IncludeFiles: expanded $($IncludeFiles.Count) element(s) with embedded commas into $($expanded.Count) path(s)."
-            $IncludeFiles = $expanded
-        }
-    }
 
     # Fix (PR 2 C): Validate -IncludeFiles paths against Test-Path BEFORE invoking
     # repomix. repomix runs 3+ seconds before returning an empty bundle for typo'd
