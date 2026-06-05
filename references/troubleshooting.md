@@ -15,6 +15,9 @@
 7. **Orphaned claim file:** If a process was killed mid-run, `round-N-claim.json` is left behind and causes the next dispatch to skip that round number. Manual cleanup: `Remove-Item .external-reviews/<topic>/round-*-claim.json`.
 8. **`.external-reviews/` first time in repo:** Suggest adding to `.gitignore`.
 9. **Empty bundle (zero files matched):** era.ps1 aborts before dispatch with a clear message naming the `-IncludeFiles` paths that didn't match. repomix only includes files inside the repo root — absolute paths outside the repo, unexpanded tilde paths, or typo'd globs all silently produce a bundle with no `<file>` content, which the model would then "review" as "no files to review". The check counts `<file ... >` tags in the bundle XML; if zero, dispatch is skipped.
+10. **Auto-detected spec path is wrong for your repo:** The default spec glob `docs/superpowers/specs/*-design.md` only matches the superpowers project layout. Set `$env:ERA_SPEC_GLOB` to your repo's convention (e.g. `'docs/**/*-design.md'` or `'specs/**/*.md'`).
+11. **Default bundle globs don't include your language:** The out-of-box default covers ~40 extensions (`.py`, `.ts`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, etc.) but may still miss niche ones. Set `$env:ERA_DEFAULT_GLOBS` to a comma-separated list (e.g. `'**/*.nim,**/*.zig,**/*.md'`). Pass `-IncludeFiles` explicitly for one-off reviews.
+12. **agy returns a planner preamble instead of a review:** The default prompt templates now include a guard phrase instructing the model not to open files. If you're writing a custom override prompt, open with: *"All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle."* See section "agy returns a ~120-char planner preamble" below.
 
 ---
 

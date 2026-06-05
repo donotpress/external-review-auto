@@ -152,7 +152,7 @@ Pass specific files via `-IncludeFiles` to avoid bundling the whole repo. Curate
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -IncludeFiles src/file1.py,src/file2.py,docs/spec.md
 ```
 
-Without `-IncludeFiles`, era.ps1 uses broad globs (`*.md`, `*.py`, etc.) — okay for quick reviews but produces larger bundles.
+Without `-IncludeFiles`, era.ps1 uses **broad default globs** covering ~40 common extensions (`.md`, `.py`, `.ps1`, `.json`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.rb`, `.sh`, `.sql`, `.tf`, `.graphql`, `Dockerfile`, `Makefile`, etc.) — works out of the box on most repos. Narrow or override with `$env:ERA_DEFAULT_GLOBS` (comma-separated list, e.g. `'**/*.rs,**/*.toml,**/*.md'`).
 
 ### LLM-driven prompt
 
@@ -194,13 +194,22 @@ pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -TopicSlug purchase-
 # Multi-reviewer (agy + Claude + opencode)
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Reviewer gemini,opus,minimax
 
-# One-flag spec review
-pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -SpecReview docs/superpowers/specs/2026-05-28-project-b-design.md -Reviewer gemini -Model 'gemini 3.1 pro'
+# One-flag spec review (auto-detects spec via ERA_SPEC_GLOB if no path given)
+pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -SpecReview docs/my-project/specs/2026-05-28-design.md -Reviewer gemini -Model 'gemini 3.1 pro'
 ```
 
 ### CI/CD / non-interactive mode
 
 Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
+| `ERA_DEFAULT_REVIEWER` | `gemini-pro-low` | Reviewer preset for bare `/era` (no `-Reviewer`). Overrides the adaptive fallback order. |
+| `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |
+| `ERA_SPEC_GLOB` | `docs/superpowers/specs/*-design.md` | Glob for auto-detecting design spec files (topic slug, auto-detection, suggest command). Change for non-superpowers repos. Example: `'docs/**/*-design.md'` |
 
 ## Prompt templates
 

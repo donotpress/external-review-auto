@@ -91,6 +91,18 @@ if ($Doctor) {
 $repoRoot = if (Test-Path ".git") { (Get-Location).Path } else { $(& git rev-parse --show-toplevel 2>$null) }
 if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
 
+function Get-SpecGlob {
+    <#
+    .SYNOPSIS
+        Returns the glob for auto-detecting design spec files, configurable via
+        ERA_SPEC_GLOB env var. Defaults to the superpowers convention.
+    #>
+    if ($env:ERA_SPEC_GLOB) {
+        return [string]$env:ERA_SPEC_GLOB
+    }
+    return 'docs/superpowers/specs/*-design.md'
+}
+
 # --- Crash recovery: restore agy settings.json from prior aborted run ---
 # DEPRECATED (self-deprecating, keep ONE release): agy model selection no longer
 # swaps settings.json -- it passes --model per-process (concurrent-safe). No new
@@ -190,7 +202,7 @@ if ($Command -eq 'review-this') {
     $detectedSpec = $null
 
     # 1. Check for newest spec file
-    $specFiles = Get-ChildItem (Join-Path $repoRoot 'docs/superpowers/specs/*-design.md') -ErrorAction SilentlyContinue
+    $specFiles = Get-ChildItem (Join-Path $repoRoot (Get-SpecGlob)) -ErrorAction SilentlyContinue
     if ($specFiles) {
         $newestSpec = $specFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $detectedSpec = $newestSpec.FullName
@@ -241,7 +253,7 @@ if ($Command -eq 'suggest') {
     $suggestions = [System.Collections.Generic.List[string]]::new()
 
     # 1. Spec files
-    $specFiles = Get-ChildItem (Join-Path $repoRoot 'docs/superpowers/specs/*-design.md') -ErrorAction SilentlyContinue
+    $specFiles = Get-ChildItem (Join-Path $repoRoot (Get-SpecGlob)) -ErrorAction SilentlyContinue
     if ($specFiles) {
         $suggestions.Add("=== Specs (review with: /era review spec <name>) ===")
         foreach ($s in ($specFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 10)) {
@@ -356,6 +368,8 @@ if ($SpecReview) {
 You are reviewing a design spec. The spec is included in the attached bundle.
 
 Every other file in the bundle is **existing code** the implementation will touch or that provides necessary context for the design decisions.
+
+The spec and all source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 ## What to review
 
@@ -512,7 +526,7 @@ if ($Model) {
 }
 
 if (-not $TopicSlug) {
-    $specFiles = Get-ChildItem (Join-Path $repoRoot 'docs/superpowers/specs/*-design.md') -ErrorAction SilentlyContinue
+    $specFiles = Get-ChildItem (Join-Path $repoRoot (Get-SpecGlob)) -ErrorAction SilentlyContinue
     if ($specFiles) {
         $spec = $specFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
         $TopicSlug = $spec.BaseName -replace '^\d{4}-\d{2}-\d{2}-', '' -replace '-design$', ''
@@ -551,7 +565,7 @@ try {
     $configPath = Join-Path $reviewDir "round-$round-config.json"
 
     $specFile = $null
-    $specFile = Get-ChildItem (Join-Path $repoRoot "docs/superpowers/specs/*-design.md") -ErrorAction SilentlyContinue |
+    $specFile = Get-ChildItem (Join-Path $repoRoot (Get-SpecGlob)) -ErrorAction SilentlyContinue |
         Where-Object { $_.BaseName -match $TopicSlug } | Select-Object -First 1
 
     $promptTitle = if ($specFile) { $specFile.BaseName -replace '^\d{4}-\d{2}-\d{2}-', '' -replace '-design$', '' } else { $TopicSlug }
@@ -565,6 +579,8 @@ You are reviewing {{TOPIC_TITLE}}.
 ## Context
 
 The attached bundle contains the subject under review along with surrounding context files.
+
+All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 ## What to review
 
@@ -599,6 +615,8 @@ Be terse. If a section is empty, write "(none)".
 # External Review Prompt - {{TOPIC_TITLE}}
 
 You are reviewing the attached codebase bundle. Provide structured feedback.
+
+All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 ## Output format
 
@@ -692,11 +710,36 @@ Be terse. If a section is empty, write "(none)".
         $relativeSpecPath = $specFile.FullName.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
         $effectiveInclude = @($relativeSpecPath)
     } else {
-        # Recursive globs (**/*.ext) -- the top-level-only patterns (*.ext)
-        # silently missed all subdirectory files, badly truncating skill audits
-        # where code lives in backends/, runtimes/, etc. Skip ts/tsx/js as a
-        # repo-by-repo decision; add via -IncludeFiles if needed.
-        $effectiveInclude = @('**/*.md', '**/*.py', '**/*.ps1', '**/*.json', '**/*.yaml', '**/*.yml', '**/*.toml', '**/*.cfg')
+        # Default globs: configurable via ERA_DEFAULT_GLOBS (comma-separated).
+        # When unset, ships with a broad default covering scripts, config, docs,
+        # and common compiled-lang source so the skill works out of the box on
+        # most repos without -IncludeFiles. Narrow with the env var if the
+        # default is too broad for your repo.
+        $defaultGlobs = if ($env:ERA_DEFAULT_GLOBS) {
+            @($env:ERA_DEFAULT_GLOBS -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        } else {
+            @(
+                '**/*.md', '**/*.yaml', '**/*.yml', '**/*.json', '**/*.toml', '**/*.cfg', '**/*.ini',
+                '**/*.ps1', '**/*.psm1', '**/*.psd1',
+                '**/*.py', '**/*.pyi',
+                '**/*.ts', '**/*.tsx', '**/*.js', '**/*.jsx', '**/*.mjs', '**/*.cjs',
+                '**/*.go',
+                '**/*.rs',
+                '**/*.java', '**/*.kt', '**/*.kts',
+                '**/*.c', '**/*.h', '**/*.cpp', '**/*.hpp', '**/*.cc', '**/*.cxx',
+                '**/*.rb',
+                '**/*.php',
+                '**/*.swift',
+                '**/*.scala', '**/*.sc',
+                '**/*.sh', '**/*.bash', '**/*.zsh',
+                '**/*.sql',
+                '**/*.tf', '**/*.tfvars',
+                '**/Dockerfile', '**/Makefile', '**/CMakeLists.txt',
+                '**/*.graphql', '**/*.gql',
+                '**/*.proto'
+            )
+        }
+        $effectiveInclude = $defaultGlobs
     }
 
     # --- Diff mode for round 2+ ---
