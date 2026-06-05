@@ -61,13 +61,9 @@ Boolean parameters accept only Boolean values and numbers
 
 **Pre-fix symptom:** Passing `-IncludeFiles "a,b,c"` (a single quoted string with commas) parsed as a single-element array containing `"a,b,c"`. repomix found no matching path, produced an empty bundle, and the model received "no files to review."
 
-**Post-fix expectation:** era.ps1 detects any `-IncludeFiles` element that contains a comma and fails fast with a clear error:
-```
-ERROR: -IncludeFiles element(s) contain a comma: a,b,c
-Did you mean PS-array syntax 'a','b','c' (separate quoted elements) instead
-of a single comma-string 'a,b,c'? If you genuinely need a literal comma in a
-filename, escape with `, (PS grave-comma escape).
-```
+**First fix (PR 2 D):** era.ps1 detected any `-IncludeFiles` element containing a comma and failed fast with an error explaining PS-array syntax. This broke calls from OpenCode's Bash tool on Windows, where `-IncludeFiles "a","b","c"` is flattened to `"a,b,c"` by Windows command-line parsing.
+
+**Current fix:** era.ps1 **auto-splits** comma-containing elements into separate paths transparently. No error, no user-facing change — the array is expanded before repomix runs. A log line is emitted: `[era] -IncludeFiles: expanded N element(s) with embedded commas into M path(s).`
 
 ---
 

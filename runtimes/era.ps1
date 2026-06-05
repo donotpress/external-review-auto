@@ -851,19 +851,24 @@ Be terse. If a section is empty, write "(none)".
     $configJson = $configData | ConvertTo-Json -Depth 10
     $configJson | Set-Content -Path $configPath -Encoding utf8
 
-    # Fix (PR 2 D): Detect comma-strings in -IncludeFiles before repomix runs.
-    # Passing -IncludeFiles "a,b,c" (quoted) gives a single-element array with
-    # the string "a,b,c" -- repomix treats this as one literal path, finds
-    # nothing, and returns a silent empty bundle. Fail fast instead.
+    # Fix (PR 2 D): Handle comma-strings in -IncludeFiles transparently.
+    # Passing -IncludeFiles "a,b,c" (a single quoted string with commas) is the
+    # natural result of Windows command-line parsing when the caller constructs
+    # `-IncludeFiles "a","b","c"` -- Windows sees no whitespace between the
+    # quoted elements and joins them into one argument. Instead of rejecting
+    # (which makes the skill unusable from the OpenCode Bash tool on Windows),
+    # auto-split any element containing a comma into multiple paths.
     if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
-        $commaFlagged = @($IncludeFiles | Where-Object { $_ -match ',' })
-        if ($commaFlagged) {
-            throw @"
-ERROR: -IncludeFiles element(s) contain a comma: $($commaFlagged -join '; ')
-Did you mean PS-array syntax 'a','b','c' (separate quoted elements) instead
-of a single comma-string 'a,b,c'? If you genuinely need a literal comma in a
-filename, escape with `` `, `` (PS grave-comma escape).
-"@
+        $expanded = @(
+            $IncludeFiles | ForEach-Object {
+                if ($_ -match ',') {
+                    @($_ -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                } else { $_ }
+            }
+        )
+        if ($expanded.Count -gt $IncludeFiles.Count) {
+            Write-Host "[era] -IncludeFiles: expanded $($IncludeFiles.Count) element(s) with embedded commas into $($expanded.Count) path(s)."
+            $IncludeFiles = $expanded
         }
     }
 

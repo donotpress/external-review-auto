@@ -152,6 +152,8 @@ Pass specific files via `-IncludeFiles` to avoid bundling the whole repo. Curate
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -IncludeFiles src/file1.py,src/file2.py,docs/spec.md
 ```
 
+> **Windows + Bash tool quoting:** When invoking `era.ps1` via the Bash tool on Windows, `-IncludeFiles "a","b","c"` (individually-quoted elements) gets parsed by the Windows command line as a single argument `"a,b,c"`. **Use UNQUOTED comma-separated paths** as shown above — PowerShell's `[string[]]` parameter binder natively splits on commas. era.ps1 will also auto-split any element containing a comma into separate paths, so a single-quoted comma-string `"a,b,c"` also works, but the unquoted form is clearest.
+
 Without `-IncludeFiles`, era.ps1 uses **broad default globs** covering ~40 common extensions (`.md`, `.py`, `.ps1`, `.json`, `.ts`, `.tsx`, `.js`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.rb`, `.sh`, `.sql`, `.tf`, `.graphql`, `Dockerfile`, `Makefile`, etc.) — works out of the box on most repos. Narrow or override with `$env:ERA_DEFAULT_GLOBS` (comma-separated list, e.g. `'**/*.rs,**/*.toml,**/*.md'`).
 
 ### LLM-driven prompt
