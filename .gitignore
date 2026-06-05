@@ -1,0 +1,19 @@
+# Per-topic review outputs (bundles, prompts, responses, metadata) — user data.
+.external-reviews/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Tooling artifacts
+node_modules/
+*.log
+testResults.xml
+coverage.xml
+
+# Stray crash-recovery backups (should live under $HOME, never the repo)
+*.era-backup

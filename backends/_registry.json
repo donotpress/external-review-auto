@@ -1,0 +1,528 @@
+{
+  "gemini": {
+    "backend": "agy",
+    "model_id": "gemini-3.5-flash-high",
+    "agy_model_family": "gemini-3.5-flash",
+    "agy_model_tier": "high",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "agy --dangerously-skip-permissions --print. Bundle read from disk via agy tools. Model selected via --model flag (per-dispatch, concurrent-safe)."
+  },
+  "gemini-pro-high": {
+    "backend": "agy",
+    "model_id": "gemini-3.1-pro-high",
+    "agy_model_family": "gemini-3.1-pro",
+    "agy_model_tier": "high",
+    "pricing": {
+      "input_per_m": 3.5,
+      "output_per_m": 10.5
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "agy with Gemini 3.1 Pro (High) — highest context window."
+  },
+  "gemini-pro-low": {
+    "backend": "agy",
+    "model_id": "gemini-3.1-pro-low",
+    "agy_model_family": "gemini-3.1-pro",
+    "agy_model_tier": "low",
+    "pricing": {
+      "input_per_m": 1.5,
+      "output_per_m": 5.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "agy with Gemini 3.1 Pro (Low) — budget option."
+  },
+  "gemini-api": {
+    "backend": "geminiapi",
+    "model_id": "gemini-2.5-flash",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct Gemini REST API (no agy / no TTY / no console pollution). Requires $env:GEMINI_API_KEY. Override model via --model 'gemini-2.5-pro' / 'gemini-2.0-flash' / etc."
+  },
+  "gemini-api-pro": {
+    "backend": "geminiapi",
+    "model_id": "gemini-2.5-pro",
+    "pricing": {
+      "input_per_m": 1.25,
+      "output_per_m": 10.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct Gemini REST API, Pro model. Higher quality, slower, paid quota."
+  },
+  "opus-api": {
+    "backend": "anthropic",
+    "model_id": "claude-opus-4-7",
+    "pricing": {
+      "input_per_m": 15.0,
+      "output_per_m": 75.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct Anthropic Messages API (no claude CLI / no TTY / no console pollution). Requires $env:ANTHROPIC_API_KEY."
+  },
+  "sonnet-api": {
+    "backend": "anthropic",
+    "model_id": "claude-sonnet-4-6",
+    "pricing": {
+      "input_per_m": 3.0,
+      "output_per_m": 15.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct Anthropic Messages API, Sonnet 4.6. Requires $env:ANTHROPIC_API_KEY."
+  },
+  "haiku-api": {
+    "backend": "anthropic",
+    "model_id": "claude-haiku-4-5-20251001",
+    "pricing": {
+      "input_per_m": 1.0,
+      "output_per_m": 5.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct Anthropic Messages API, Haiku 4.5. Requires $env:ANTHROPIC_API_KEY."
+  },
+  "deepseek-api": {
+    "backend": "openaicompat",
+    "model_id": "deepseek-chat",
+    "api_base": "https://api.deepseek.com/v1",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "pricing": {
+      "input_per_m": 0.27,
+      "output_per_m": 1.1
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct DeepSeek API (OpenAI-compatible). Requires $env:DEEPSEEK_API_KEY. Override model via --model 'deepseek-reasoner' / etc."
+  },
+  "deepseek-reasoner-api": {
+    "backend": "openaicompat",
+    "model_id": "deepseek-reasoner",
+    "api_base": "https://api.deepseek.com/v1",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "pricing": {
+      "input_per_m": 0.55,
+      "output_per_m": 2.19
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "DeepSeek's reasoning model (deepseek-reasoner). Requires $env:DEEPSEEK_API_KEY."
+  },
+  "minimax-api": {
+    "backend": "openaicompat",
+    "model_id": "MiniMax-M2",
+    "api_base": "https://api.minimaxi.chat/v1",
+    "api_key_env": "MINIMAX_API_KEY",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Direct MiniMax API (OpenAI-compatible international endpoint). Requires $env:MINIMAX_API_KEY."
+  },
+  "opus": {
+    "backend": "claude",
+    "model_id": "claude-opus-4-7",
+    "claude_model_family": "opus",
+    "pricing": {
+      "input_per_m": 15.0,
+      "output_per_m": 75.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "claude CLI --print --model claude-opus-4-7. Bundle piped via stdin."
+  },
+  "sonnet": {
+    "backend": "claude",
+    "model_id": "claude-sonnet-4-6",
+    "claude_model_family": "sonnet",
+    "pricing": {
+      "input_per_m": 3.0,
+      "output_per_m": 15.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "claude CLI --print --model claude-sonnet-4-6. Bundle piped via stdin."
+  },
+  "haiku": {
+    "backend": "claude",
+    "model_id": "claude-haiku-4-5-20251001",
+    "claude_model_family": "haiku",
+    "pricing": {
+      "input_per_m": 1.0,
+      "output_per_m": 5.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "claude CLI --print --model claude-haiku-4-5-20251001. Bundle piped via stdin."
+  },
+  "minimax": {
+    "backend": "opencode",
+    "model_id": "minimax/MiniMax-M2.7",
+    "opencode_provider": "minimax",
+    "opencode_model_family": "minimax-m2",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode run -m minimax/MiniMax-M2.7. Requires stdin closed (pipe empty string)."
+  },
+  "deepseek": {
+    "backend": "opencode",
+    "model_id": "opencode-go/deepseek-v4-pro",
+    "opencode_provider": "opencode-go",
+    "opencode_model_family": "deepseek-v4",
+    "pricing": {
+      "input_per_m": 0.5,
+      "output_per_m": 2.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode run -m opencode-go/deepseek-v4-pro via opencode-go provider."
+  },
+  "_agy_model_map": {
+    "gemini-3.5-flash": {
+      "low": {
+        "display": "Gemini 3.5 Flash (Low)",
+        "settings_value": "Gemini 3.5 Flash (Low)"
+      },
+      "medium": {
+        "display": "Gemini 3.5 Flash (Medium)",
+        "settings_value": "Gemini 3.5 Flash (Medium)"
+      },
+      "high": {
+        "display": "Gemini 3.5 Flash (High)",
+        "settings_value": "Gemini 3.5 Flash (High)"
+      }
+    },
+    "gemini-3.1-pro": {
+      "low": {
+        "display": "Gemini 3.1 Pro (Low)",
+        "settings_value": "Gemini 3.1 Pro (Low)"
+      },
+      "high": {
+        "display": "Gemini 3.1 Pro (High)",
+        "settings_value": "Gemini 3.1 Pro (High)"
+      }
+    }
+  },
+  "_claude_model_map": {
+    "opus": {
+      "default": {
+        "display": "Claude Opus 4.7",
+        "model_id": "claude-opus-4-7"
+      }
+    },
+    "sonnet": {
+      "default": {
+        "display": "Claude Sonnet 4.6",
+        "model_id": "claude-sonnet-4-6"
+      }
+    },
+    "haiku": {
+      "default": {
+        "display": "Claude Haiku 4.5",
+        "model_id": "claude-haiku-4-5-20251001"
+      }
+    }
+  },
+  "_opencode_model_map": {
+    "minimax": {
+      "minimax-m2.1": {
+        "model_id": "minimax/MiniMax-M2.1",
+        "display": "MiniMax M2.1",
+        "variants": []
+      },
+      "minimax-m2": {
+        "model_id": "minimax/MiniMax-M2",
+        "display": "MiniMax M2",
+        "variants": []
+      },
+      "minimax-m2.5-highspeed": {
+        "model_id": "minimax/MiniMax-M2.5-highspeed",
+        "display": "MiniMax M2.5 highspeed",
+        "variants": []
+      },
+      "minimax-m2.5": {
+        "model_id": "minimax/MiniMax-M2.5",
+        "display": "MiniMax M2.5",
+        "variants": []
+      },
+      "minimax-m2.7-highspeed": {
+        "model_id": "minimax/MiniMax-M2.7-highspeed",
+        "display": "MiniMax M2.7 highspeed",
+        "variants": []
+      },
+      "minimax-m2.7": {
+        "model_id": "minimax/MiniMax-M2.7",
+        "display": "MiniMax M2.7",
+        "variants": []
+      }
+    },
+    "google": {
+      "gemini-2.0-flash": {
+        "display": "Gemini 2.0 Flash",
+        "model_id": "google/gemini-2.0-flash",
+        "variants": []
+      },
+      "gemini-2.5-flash": {
+        "display": "Gemini 2.5 Flash",
+        "model_id": "google/gemini-2.5-flash",
+        "variants": [
+          "high",
+          "max"
+        ]
+      },
+      "gemini-2.5-pro": {
+        "display": "Gemini 2.5 Pro",
+        "model_id": "google/gemini-2.5-pro",
+        "variants": [
+          "high",
+          "max"
+        ]
+      },
+      "gemini-3-flash": {
+        "display": "Gemini 3 Flash",
+        "model_id": "google/gemini-3-flash-preview",
+        "variants": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3-pro": {
+        "display": "Gemini 3 Pro",
+        "model_id": "google/gemini-3-pro-preview",
+        "variants": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3.1-flash": {
+        "display": "Gemini 3.1 Flash",
+        "model_id": "google/gemini-3.1-flash-lite-preview",
+        "variants": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3.1-pro": {
+        "display": "Gemini 3.1 Pro",
+        "model_id": "google/gemini-3.1-pro-preview",
+        "variants": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3.5-flash": {
+        "display": "Gemini 3.5 Flash",
+        "model_id": "google/gemini-3.5-flash",
+        "variants": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-flash-lite-latest": {
+        "display": "gemini flash lite latest",
+        "model_id": "google/gemini-flash-lite-latest",
+        "variants": [
+          "low",
+          "high"
+        ]
+      },
+      "gemini-embedding-001": {
+        "display": "gemini embedding 001",
+        "model_id": "google/gemini-embedding-001",
+        "variants": []
+      },
+      "gemini-2.5-flash-image": {
+        "display": "gemini 2.5 flash image",
+        "model_id": "google/gemini-2.5-flash-image",
+        "variants": [
+          "high",
+          "max"
+        ]
+      },
+      "gemma-4-26b-a4b-it": {
+        "display": "gemma 4 26b a4b it",
+        "model_id": "google/gemma-4-26b-a4b-it",
+        "variants": [
+          "low",
+          "high"
+        ]
+      },
+      "gemini-2.0-flash-lite": {
+        "display": "gemini 2.0 flash lite",
+        "model_id": "google/gemini-2.0-flash-lite",
+        "variants": []
+      },
+      "gemini-3.1-pro-preview-customtools": {
+        "display": "gemini 3.1 pro preview customtools",
+        "model_id": "google/gemini-3.1-pro-preview-customtools",
+        "variants": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3.1-flash-lite": {
+        "display": "gemini 3.1 flash lite",
+        "model_id": "google/gemini-3.1-flash-lite",
+        "variants": [
+          "minimal",
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "gemini-3.1-flash-image-preview": {
+        "display": "gemini 3.1 flash image preview",
+        "model_id": "google/gemini-3.1-flash-image-preview",
+        "variants": [
+          "minimal",
+          "high"
+        ]
+      },
+      "gemini-2.5-flash-lite": {
+        "display": "gemini 2.5 flash lite",
+        "model_id": "google/gemini-2.5-flash-lite",
+        "variants": [
+          "high",
+          "max"
+        ]
+      },
+      "gemini-2.5-pro-preview-tts": {
+        "display": "gemini 2.5 pro preview tts",
+        "model_id": "google/gemini-2.5-pro-preview-tts",
+        "variants": []
+      },
+      "gemma-4-31b-it": {
+        "display": "gemma 4 31b it",
+        "model_id": "google/gemma-4-31b-it",
+        "variants": [
+          "low",
+          "high"
+        ]
+      },
+      "gemini-2.5-flash-preview-tts": {
+        "display": "gemini 2.5 flash preview tts",
+        "model_id": "google/gemini-2.5-flash-preview-tts",
+        "variants": []
+      },
+      "gemini-flash-latest": {
+        "display": "gemini flash latest",
+        "model_id": "google/gemini-flash-latest",
+        "variants": [
+          "low",
+          "high"
+        ]
+      }
+    },
+    "opencode-go": {
+      "glm-5.1": {
+        "display": "glm 5.1",
+        "model_id": "opencode-go/glm-5.1",
+        "variants": []
+      },
+      "mimo-v2.5": {
+        "display": "mimo v2.5",
+        "model_id": "opencode-go/mimo-v2.5",
+        "variants": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "qwen3.6-plus": {
+        "display": "qwen3.6 plus",
+        "model_id": "opencode-go/qwen3.6-plus",
+        "variants": []
+      },
+      "mimo-v2.5-pro": {
+        "display": "mimo v2.5 pro",
+        "model_id": "opencode-go/mimo-v2.5-pro",
+        "variants": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "deepseek-v4-pro": {
+        "display": "deepseek v4 pro",
+        "model_id": "opencode-go/deepseek-v4-pro",
+        "variants": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      "kimi-k2.6": {
+        "display": "kimi k2.6",
+        "model_id": "opencode-go/kimi-k2.6",
+        "variants": []
+      },
+      "minimax-m2.5": {
+        "display": "minimax m2.5",
+        "model_id": "opencode-go/minimax-m2.5",
+        "variants": []
+      },
+      "qwen3.5-plus": {
+        "display": "qwen3.5 plus",
+        "model_id": "opencode-go/qwen3.5-plus",
+        "variants": []
+      },
+      "glm-5": {
+        "display": "glm 5",
+        "model_id": "opencode-go/glm-5",
+        "variants": []
+      },
+      "deepseek-v4-flash": {
+        "display": "deepseek v4 flash",
+        "model_id": "opencode-go/deepseek-v4-flash",
+        "variants": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ]
+      },
+      "kimi-k2.5": {
+        "display": "kimi k2.5",
+        "model_id": "opencode-go/kimi-k2.5",
+        "variants": []
+      },
+      "minimax-m2.7": {
+        "display": "minimax m2.7",
+        "model_id": "opencode-go/minimax-m2.7",
+        "variants": []
+      },
+      "qwen3.7-max": {
+        "variants": [],
+        "display": "Qwen3.7 Max",
+        "model_id": "opencode-go/qwen3.7-max"
+      }
+    }
+  }
+}
