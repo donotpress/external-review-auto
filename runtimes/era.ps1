@@ -644,8 +644,8 @@ Be terse. If a section is empty, write "(none)".
     if ($PromptOverrideFile) {
         if (-not (Test-Path $PromptOverrideFile)) { throw "Prompt override file not found: $PromptOverrideFile" }
         $srcResolved = (Resolve-Path $PromptOverrideFile).Path
-        $dstResolved = (Resolve-Path $promptPath -ErrorAction SilentlyContinue).Path
-        if ($srcResolved -eq $dstResolved) {
+        $dstResolved = if (Test-Path $promptPath) { (Resolve-Path $promptPath).Path } else { $null }
+        if ($null -ne $dstResolved -and $srcResolved -eq $dstResolved) {
             Write-Host "[era] Prompt already at target path, skipping copy"
         } else {
             Copy-Item -Path $PromptOverrideFile -Destination $promptPath -Force
@@ -879,8 +879,13 @@ filename, escape with `` `, `` (PS grave-comma escape).
             if ($missing) {
                 throw "ERROR: -IncludeFiles paths not found relative to repo root ($repoRoot): $($missing -join ', ')"
             }
-            # Path traversal guard: every resolved path must stay inside repoRoot
+            # Path traversal guard: every resolved path must stay inside repoRoot.
+            # Skip paths containing wildcards (*, ?, [, ]) — glob patterns match
+            # inside the repo tree by definition and can't traverse outside it.
+            # Resolve-Path on a wildcard path returns a collection, not a single
+            # PathInfo, so .StartsWith would throw.
             $traversal = @($IncludeFiles | Where-Object {
+                if ($_ -match '[*?\[\]]') { return $false }
                 $resolved = (Resolve-Path $_ -ErrorAction SilentlyContinue).Path
                 if (-not $resolved) { return $false }
                 -not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
@@ -949,7 +954,7 @@ filename, escape with `` `, `` (PS grave-comma escape).
     $perReviewerCaps = @{}
     foreach ($r in $reviewerList) {
         $pricing = $registryHash[$r].pricing
-        $estOutputTokens = [int][Math]::Min([Math]::Ceiling($tokenCount * 0.3), 10000)
+        $estOutputTokens = [int][Math]::Min([Math]::Ceiling($tokenCount * 0.3), 50000)
         $perReviewerCosts[$r] = [Math]::Round(($tokenCount / 1000000.0) * $pricing.input_per_m + ($estOutputTokens / 1000000.0) * $pricing.output_per_m, 4)
         $perReviewerCaps[$r] = Get-PerReviewerCap -Pricing $pricing
     }

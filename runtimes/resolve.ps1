@@ -433,11 +433,11 @@ if ($cleanForCmd.Count -gt 0) {
     }
 }
 
-# Explicit "<topic> use <reviewer-spec>" splitter wins. Break on the LAST "use":
-# the reviewer spec is always the tail, and a topic may legitimately contain the
-# word "use" (e.g. "fix use of deprecated api use gemini"). Splitting on the first
-# "use" would mis-route the topic remainder into reviewer resolution. Reviewer
-# specs are model tokens and never contain "use", so last-occurrence is safe.
+# Explicit "<topic> use <reviewer-spec>" splitter. Match the LAST "use" so a topic
+# containing the word (e.g. "fix use of deprecated api use gemini") keeps its full
+# slug. Only split when the tail contains at least one reviewer keyword; otherwise
+# the input is a topic whose description happens to include "use" and no reviewer
+# was intended (e.g. "fix the use of deprecated api" with no reviewer keyword).
 $useIdx = -1
 for ($i = 0; $i -lt $tokens.Count; $i++) {
     if ($tokens[$i].ToLower() -eq 'use') { $useIdx = $i }
@@ -445,20 +445,30 @@ for ($i = 0; $i -lt $tokens.Count; $i++) {
 
 $topicSlug = $null
 $reviewerTokens = $tokens
+$hasReviewerInTail = $false
+$isReviewerFirst = $false
 
 if ($useIdx -ge 0) {
-    # Everything before 'use' is the topic; everything after is the reviewer spec.
-    $beforeUse = @($tokens[0..([Math]::Max(0, $useIdx - 1))])
-    if ($useIdx -eq 0) { $beforeUse = @() }
+    # Only split on 'use' when the tail contains at least one reviewer keyword.
+    # Otherwise the topic naturally contains the word 'use' (e.g. "fix the use of
+    # deprecated api") and no reviewer was intended.
     $afterUse = if ($useIdx -lt $tokens.Count - 1) { @($tokens[($useIdx + 1)..($tokens.Count - 1)]) } else { @() }
-    # Topic candidates strip only LEADING filler (preserve interior words like
-    # the 'the' in 'fix the login bug') -- see Remove-LeadingFiller.
-    $topicCandidate = @(script:Remove-LeadingFiller -Tokens $beforeUse)
-    if ($topicCandidate.Count -gt 0) {
-        # Topic slug is the (leading-filler-stripped) text before 'use', space->dash.
-        $topicSlug = ($topicCandidate -join '-')
+    $afterLower = @($afterUse | ForEach-Object { $_.ToLower() })
+    $hasReviewerInTail = ($reviewerKeywords | Where-Object { $afterLower -contains $_ }).Count -gt 0
+    if ($hasReviewerInTail) {
+        # Everything before 'use' is the topic; everything after is the reviewer spec.
+        $beforeUse = @($tokens[0..([Math]::Max(0, $useIdx - 1))])
+        if ($useIdx -eq 0) { $beforeUse = @() }
+        # Topic candidates strip only LEADING filler (preserve interior words like
+        # the 'the' in 'fix the login bug') -- see Remove-LeadingFiller.
+        $topicCandidate = @(script:Remove-LeadingFiller -Tokens $beforeUse)
+        if ($topicCandidate.Count -gt 0) {
+            # Topic slug is the (leading-filler-stripped) text before 'use', space->dash.
+            $topicSlug = ($topicCandidate -join '-')
+        }
+        $reviewerTokens = $afterUse
     }
-    $reviewerTokens = $afterUse
+    # fall through to topic-slug-only path below when tail has no reviewer keyword
 } else {
     # No 'use' splitter. Disambiguate by the FIRST non-filler word: if it's a
     # reviewer keyword, the whole tail is a reviewer spec; otherwise it's a
@@ -489,10 +499,25 @@ if ($useIdx -ge 0) {
     }
 }
 
+# "use" found but tail had no reviewer keyword — treat as topic-slug-only.
+if ($useIdx -ge 0 -and -not $hasReviewerInTail) {
+    $topicTokens = @(script:Remove-LeadingFiller -Tokens $tokens)
+    Write-Output (script:Emit-Result -Flags @{ TopicSlug = ($topicTokens -join '-'); Reviewer = $script:DefaultReviewer })
+    return
+}
+
 # Resolve the reviewer spec.
 $spec = script:Resolve-ReviewerSpec -Tokens $reviewerTokens
 
 if ($null -eq $spec) {
+    # First token was a reviewer keyword (e.g. "api") that didn't resolve to a
+    # known preset — fall back to topic slug with default reviewer instead of
+    # emitting unresolved.
+    if ($isReviewerFirst) {
+        $topicTokens = @(script:Remove-LeadingFiller -Tokens $tokens)
+        Write-Output (script:Emit-Result -Flags @{ TopicSlug = ($topicTokens -join '-'); Reviewer = $script:DefaultReviewer })
+        return
+    }
     Write-Output (script:Emit-Unresolved -RawInput $raw)
     return
 }

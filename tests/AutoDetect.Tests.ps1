@@ -63,8 +63,9 @@ try {
 
     It '-AutoDetect + -Force skips confirmation prompt (era.ps1 source check)' {
         $src = Get-Content -Raw $script:EraPath
-        # -Force skips Read-Host; the source must check -not $Force before prompting
-        $src | Should -Match 'if \(-not \$Force\)'
+        # -Force skips Read-Host; the source must check -not $Force (via the
+        # compound guard: -not (Get-ForceMode) -and -not $Force) before prompting
+        $src | Should -Match 'if \(-not \(Get-ForceMode\) -and -not \$Force\)'
         $src | Should -Match 'AutoDetect confirmation'
     }
 

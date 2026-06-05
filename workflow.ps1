@@ -665,8 +665,11 @@ function Invoke-ReviewerDispatch {
     # value and uses it for both stall and timeout checks; Wait-Job below uses
     # it + 30s margin so the adapter has room to throw cleanly before the
     # dispatcher kills the ThreadJob (which would leak native subprocesses).
+    # Cap at 1800s (30 min) so a very large bundle doesn't tie up a threadpool
+    # slot for an unbounded period — the adapter's own stall detector kills
+    # stuck processes much earlier.
     $bundleScaledSec  = [int]($BundleTokens * 0.02)  # 20ms per token
-    $effectiveTimeoutSec = [Math]::Max($TimeoutSec, $bundleScaledSec)
+    $effectiveTimeoutSec = [Math]::Min([Math]::Max($TimeoutSec, $bundleScaledSec), 1800)
     if ($effectiveTimeoutSec -gt $TimeoutSec) {
         Write-Host "[dispatch] Scaled TimeoutSec ${TimeoutSec}s -> ${effectiveTimeoutSec}s for ${BundleTokens}-token bundle."
         $TimeoutSec = $effectiveTimeoutSec

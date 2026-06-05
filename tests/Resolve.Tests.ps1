@@ -293,10 +293,10 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
 
 # --- D.1: unmatched / ambiguous input ----------------------------------------
 Describe 'resolve.ps1 unmatched input' {
-    It 'a slug followed by an unknown model after use -> error object' {
+    It 'a slug followed by an unknown model after use -> topic slug (tail has no reviewer keyword)' {
         $r = script:Invoke-Resolve 'some-slug use wat-is-this-model'
-        $r.error | Should -BeExactly 'unresolved'
-        $r.input | Should -BeExactly 'some-slug use wat-is-this-model'
+        $r.TopicSlug | Should -BeExactly 'some-slug-use-wat-is-this-model'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-low'
     }
 }
 
