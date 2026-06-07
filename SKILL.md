@@ -108,6 +108,31 @@ digraph era_flow {
 }
 ```
 
+### Mode Selection
+
+| Condition | Mode | Flag |
+|---|---|---|
+| You have a design spec file to review | Spec review | `-SpecReview <path>` |
+| No spec; reviewing code, a conversation finding, or arbitrary files | Assessment | `-Mode assessment` |
+| Auto-detect from recent git state or newest spec | Default | (omit both) |
+
+**These modes are mutually exclusive.** `-SpecReview` implies spec mode; do not combine it with `-Mode assessment`. If neither is passed, era.ps1 auto-detects: scans for the newest spec matching `ERA_SPEC_GLOB` and uses spec-review mode if found; otherwise falls back to assessment mode with auto-detected files.
+
+### File Curation
+
+| Scenario | Approach | Rationale |
+|---|---|---|
+| Spec review | `-IncludeFiles spec.md,file1.py,file2.py,...` — spec + files it references | Focused context; reviewer sees what the implementation will touch |
+| Assessment of recent changes | `-IncludeFiles` from conversation context, or `--auto-detect` | Delta-focused; avoids reviewing unrelated code |
+| Broad repo audit | Omit `-IncludeFiles` (era.ps1 globs ~40 extensions) | Full coverage; only for small repos or when scope is unclear |
+| Round 2+ | `--diff` + `-IncludeFiles` of changed files only | 4x cheaper; reviewer focuses on fixes, not re-reading unchanged code |
+
+**`--auto-detect` vs omit:** `--auto-detect` derives the file list from `git status` + `HEAD~1` (recent changes only). Omitting `-IncludeFiles` entirely uses broad globs across the whole repo (~40 extensions). Use `--auto-detect` when reviewing recent work; omit only when the scope is genuinely repo-wide.
+
+**Repo-root constraint:** All `-IncludeFiles` paths are resolved relative to the repo root. Files outside the repo (e.g., the SKILL.md itself at `~/.claude/skills/...`) cannot be included. To review external files, copy them into the repo first or reference them in the prompt text.
+
+**Cost guidance:** Every 10K bundle tokens costs ~$0.01-0.03 depending on backend. A 70K-token bundle costs ~$0.15-0.27. Curate aggressively for iterative rounds.
+
 ## Parsing natural-language input — call `resolve.ps1` (portable, deterministic)
 
 When the user gives free-form input (e.g. `/era gemini 3.1 pro low`, `/era console-bugs use opus`) rather than typed flags, **do not interpret the rules ad hoc.** Shell out to the deterministic resolver so the resolution is **identical regardless of which model is driving** (Claude, Gemini, an opencode model, etc.):
