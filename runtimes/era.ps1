@@ -900,6 +900,11 @@ Be terse. If a section is empty, write "(none)".
         }
     }
 
+    # Convergence: slug-per-round anti-pattern detection (pre-dispatch)
+    $externalReviewsDir = Join-Path $repoRoot '.external-reviews'
+    $slugWarning = Test-SlugPerRoundPattern -ExternalReviewsDir $externalReviewsDir -TopicSlug $TopicSlug
+    if ($slugWarning) { Write-Host $slugWarning }
+
     Write-Host "Running repomix..."
     $repomixTimeoutSec = 120
     Test-ThreadJobAvailable
@@ -997,9 +1002,25 @@ Be terse. If a section is empty, write "(none)".
     Copy-PrimaryResponseAlias -ReviewDir $reviewDir -Round $round `
         -ReviewerList $approvedList -Results $results
 
+    # Convergence: compute warnings + metadata enrichment
+    $primaryResult = @($results.Values) | Where-Object { $_.ContentOk } | Select-Object -First 1
+    $currentResponseChars = if ($primaryResult) { $primaryResult.ResponseChars } else { 0 }
+    $convergenceWarnings = @(Test-ConvergenceDivergence -ReviewDir $reviewDir -Round $round -CurrentResponseChars $currentResponseChars)
+    if ($slugWarning) { $convergenceWarnings = @($slugWarning) + $convergenceWarnings }
+    foreach ($w in ($convergenceWarnings | Where-Object { $_ -and $_ -ne $slugWarning })) { Write-Host $w }
+
+    $topicRoundCount = @(Get-ChildItem -Path $reviewDir -Filter 'round-*-metadata.json' -ErrorAction SilentlyContinue).Count + 1
+    $bundleFileCount = 0
+    $manifestPath = Join-Path $reviewDir "round-$round-manifest.json"
+    if (Test-Path $manifestPath) {
+        try { $bundleFileCount = @((Get-Content -Raw $manifestPath | ConvertFrom-Json).sources).Count } catch {}
+    }
+
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
-        -ModelOverrides $modelOverrides
+        -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
+        -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
+        -TopicRoundCount $topicRoundCount
 
     $firstResult = @($results.Values) | Select-Object -First 1
     if ($firstResult -and $firstResult.WallClockSec) {

@@ -882,7 +882,11 @@ function Write-ReviewMetadata {
         # When present, the metadata records the resolved model_id rather than
         # the preset's registry default -- otherwise cost dashboards and audit
         # logs lie about which model actually ran.
-        [hashtable]$ModelOverrides = @{}
+        [hashtable]$ModelOverrides = @{},
+        [string[]]$ConvergenceWarnings = @(),
+        [string[]]$IncludeFilesList = @(),
+        [int]$BundleFileCount = 0,
+        [int]$TopicRoundCount = 0
     )
     $reviewerEntries = foreach ($preset in $Results.Keys) {
         $r = $Results[$preset]
@@ -978,6 +982,10 @@ function Write-ReviewMetadata {
         timestamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         topic_slug = $TopicSlug
         mode = $Mode
+        topic_round_count = $TopicRoundCount
+        include_files = @($IncludeFilesList)
+        bundle_file_count = $BundleFileCount
+        convergence_warnings = @($ConvergenceWarnings)
         reviewers = @($reviewerEntries)
     }
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
