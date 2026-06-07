@@ -68,6 +68,46 @@ This skill follows a **single-entry-point** architecture. When the slash command
 
 **Do not follow manual workflow steps.** Always delegate to `era.ps1`.
 
+## Default Behavior
+
+**Convergence loop (on by default):** After dispatching, the driving LLM MUST triage the response and continue dispatching rounds until the reviewer returns **0 critical issues**. This is not optional — it is the default terminal condition. The driving LLM may exit early only if: (a) the user explicitly says to stop, or (b) the reviewer is repeating previously-addressed concerns (context staleness). "0 criticals" means the reviewer's response contains no items under "Critical issues" — items under "Important" or "Minor" do not block convergence.
+
+**Always bundle relevant source code:** Every dispatch MUST include source files that give the reviewer enough context to assess the topic. For spec reviews, this means the spec file + files the spec references or modifies. For assessments, this means the files under discussion in the conversation. A prompt-only dispatch (no source bundle) is never correct — the reviewer cannot verify claims about code without seeing the code.
+
+## Invocation Workflow (follow this exactly)
+
+0. **Locate skill root** — check in order: `$env:ERA_SKILL_ROOT`, `$HOME/.claude/skills/external-review-auto/`, `$HOME/.config/opencode/skills/external-review-auto/`. All subsequent paths (`resolve.ps1`, `era.ps1`) are relative to this root. The `/era` shim is a pointer — never call scripts from the shim directory.
+1. **Resolve input** — if the user provided typed flags (`-Reviewer X -Model Y`), forward verbatim; otherwise call `<skill-root>/runtimes/resolve.ps1` with whatever the user typed (handles slugs, URLs, SIDs, model names, prose)
+2. **Select mode** — see Mode Selection below
+3. **Curate files** — see File Curation below
+4. **Write or select prompt** — `-SpecReview` for spec reviews; `-PromptOverrideFile` for custom; omit for generic
+5. **Dispatch** — `pwsh <skill-root>/runtimes/era.ps1 <flags> -Force`
+6. **Wait for completion** — era.ps1 handles polling/capture internally. If era.ps1 exits non-zero, report the error message to the user verbatim — do not retry or attempt recovery.
+7. **Triage response** — classify each claim before incorporating (see Handling the response)
+8. **Decide: done or round 2?** — if 0 critical issues, report to user (converged). Otherwise go to Round 2+ Workflow.
+
+```dot
+digraph era_flow {
+    "User says /era" -> "Locate skill root";
+    "Locate skill root" -> "Typed flags provided?";
+    "Typed flags provided?" -> "Forward typed flags" [label="yes"];
+    "Typed flags provided?" -> "Call resolve.ps1" [label="no (slug, URL, SID, model name, prose)"];
+    "Call resolve.ps1" -> "Select mode";
+    "Forward typed flags" -> "Select mode";
+    "Select mode" -> "Curate files";
+    "Curate files" -> "Write/select prompt";
+    "Write/select prompt" -> "Dispatch era.ps1";
+    "Dispatch era.ps1" -> "Wait for completion";
+    "Wait for completion" -> "Error?" [label="exit code"];
+    "Error?" -> "Report error to user" [label="non-zero"];
+    "Error?" -> "Triage response" [label="success"];
+    "Triage response" -> "0 critical issues?";
+    "0 critical issues?" -> "Report to user" [label="yes — converged"];
+    "0 critical issues?" -> "Apply fixes, write round N+1 prompt" [label="no"];
+    "Apply fixes, write round N+1 prompt" -> "Curate files" [label="loop back (Round 2+)"];
+}
+```
+
 ## Parsing natural-language input — call `resolve.ps1` (portable, deterministic)
 
 When the user gives free-form input (e.g. `/era gemini 3.1 pro low`, `/era console-bugs use opus`) rather than typed flags, **do not interpret the rules ad hoc.** Shell out to the deterministic resolver so the resolution is **identical regardless of which model is driving** (Claude, Gemini, an opencode model, etc.):
