@@ -182,6 +182,40 @@ Skip incorporation entirely when:
 
 Be willing to push back in your next round's prompt: "Round N-1 raised X, but after probing I found Y — please re-evaluate."
 
+## Round 2+ Workflow
+
+When round N's response contains critical issues:
+
+1. **Triage round N response** — classify each finding using the claim-type table above
+2. **Apply fixes** — address critical and important issues in the codebase/spec
+3. **Write round N+1 prompt** — include:
+   - A verbatim summary of round N's verdict, or include the literal string `{{PREVIOUS_ROUND}}` in your prompt file — era.ps1 auto-substitutes it with the full text of round-(N-1)'s response at bundle time
+   - What changed since round N ("Fixed critical #1 by...", "Rejected important #3 because...")
+   - Specific questions for the reviewer ("Is the fix for X correct?", "Did I introduce new issues?")
+4. **Curate round N+1 files** — pass `--diff` and `-IncludeFiles` with only changed files (4x cheaper than re-bundling everything)
+5. **Dispatch** — `pwsh <skill-root>/runtimes/era.ps1 -TopicSlug <slug> -PromptOverrideFile <path> --diff -IncludeFiles <changed-files> -Force`
+6. **Return to primary workflow step 6** — wait for completion, triage, check convergence. This closes the loop.
+
+### When to stop iterating
+
+- **Default terminal condition:** 0 critical issues in the reviewer's response. This is when convergence is reached.
+- **Early exit (user-initiated only):** the user explicitly says to stop
+- **Early exit (staleness):** the reviewer is repeating concerns you've already addressed across 2+ consecutive rounds
+- **Push back** when a finding contradicts something already validated — include the counter-evidence in the next prompt
+- **Typical convergence:** 2-4 rounds for focused specs, 5-8 for complex architectural reviews
+
+## Pitfalls (driving LLM)
+
+| Don't | Why | Do instead |
+|---|---|---|
+| Don't run repomix manually then paste | era.ps1 handles bundling, round numbering, metadata, and capture | Always dispatch via era.ps1 |
+| Don't guess the reviewer preset name | Typos fail silently or route to wrong backend | Use resolve.ps1 for natural language, or check the preset table in the Supported backends section |
+| Don't skip triage on round 3+ | Auto-pilot mode kicks in; you stop verifying claims | Validate at least one empirical claim per round |
+| Don't tell agy-backend reviewers to "read the files" | Triggers tool-use mode; response is a ~120-char planner preamble | Say "review ONLY what is in the attached bundle" (already in the -SpecReview template) |
+| Don't re-bundle everything on round 2+ | 4x more expensive; reviewer re-reads unchanged code | Use `--diff` + curated `-IncludeFiles` |
+| Don't pass absolute paths or paths outside the repo to `-IncludeFiles` | era.ps1 resolves relative to repo root; external paths fail with "not found" | Copy external files into the repo, or reference them in prompt text only |
+| Don't call `resolve.ps1` or `era.ps1` from the `/era` shim directory | The shim is a pointer; the runtime lives at the canonical skill root | Locate skill root first (Step 0 of the workflow) |
+
 ## Usage
 
 ```
