@@ -212,7 +212,7 @@ LLM reads SKILL.md → parses natural-language input → delegates to era.ps1
                                               backend adapter (CLI or REST)
 ```
 
-Single entry point. No brittle LLM-interpreted workflow steps. All deterministic work (repomix, dispatch, cost calculation) is handled by PowerShell.
+Single entry point. All deterministic work (repomix, dispatch, cost calculation) is handled by PowerShell. The SKILL.md provides structured workflow guidance (9-step checklist, decision trees, convergence loop) so any driving model follows the same invocation flow without inferring steps.
 
 ## Natural-language input
 
@@ -220,7 +220,7 @@ LLMs invoking `/era` should parse free-form input (e.g. `/era use gemini 3.1 pro
 
 ## Documentation
 
-See **[SKILL.md](SKILL.md)** for full usage, flags, prompt templates, resolver rules, and edge cases.
+See **[SKILL.md](SKILL.md)** for full usage — includes a quick-reference card, invocation workflow (9-step checklist + dot-graph), mode selection and file curation decision trees, round 2+ convergence protocol, pitfalls table, flags, prompt templates, resolver rules, and triage guidance.
 
 ## Tests
 
