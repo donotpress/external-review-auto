@@ -106,6 +106,21 @@ function Invoke-OpencodeReview {
     $errFile = [System.IO.Path]::GetTempFileName()
     $modelId = if ($ModelOverride) { $ModelOverride } else { $ModelInfo.model_id }
 
+    # --- Phase 1: First-token deadline configuration ---
+    # Default 120s; env var must be a positive integer >= 10 (poll interval = 10s).
+    # Values 1-9 clamp to 10s; non-integer/empty/negative fall back to 120s.
+    $firstTokenSec = 120
+    if ($env:ERA_OPENCODE_FIRST_TOKEN_SEC) {
+        $parsed = 0
+        if ([int]::TryParse($env:ERA_OPENCODE_FIRST_TOKEN_SEC, [ref]$parsed) -and $parsed -ge 10) {
+            $firstTokenSec = $parsed
+        } else {
+            $applied = if ($parsed -gt 0 -and $parsed -lt 10) { 10 } else { 120 }
+            Write-Host "[opencode] ERA_OPENCODE_FIRST_TOKEN_SEC='$($env:ERA_OPENCODE_FIRST_TOKEN_SEC)' is not a positive integer >= 10; falling back to ${applied}s."
+            $firstTokenSec = $applied
+        }
+    }
+
     # --- Variant resolution (registry-driven; NO state.json mutation) ---
     # Pick the strongest declared variant (max -> high -> medium -> low), else
     # 'default'. Passed via --variant and used to tune the stall threshold below.
@@ -246,6 +261,11 @@ function Invoke-OpencodeReview {
         $lastSize   = $stdoutSink.Length + $stderrSink.Length
         $lastGrowth = [System.Diagnostics.Stopwatch]::StartNew()
         $deadline   = [System.Diagnostics.Stopwatch]::StartNew()
+        $firstTokenDeadline = [System.Diagnostics.Stopwatch]::StartNew()
+        $hasSeenOutput = $false
+        # $firstTokenDeadline is a total wall-clock from process start (not a sliding
+        # window). Once $hasSeenOutput=$true, Phase 1 is permanently disabled — Phase 2
+        # takes over with its own independent stall tracking via $lastGrowth.
         $exited     = $false
 
         # Snapshot partial stdout/stderr to a debug dir + return a tail suffix, so a
@@ -276,6 +296,17 @@ function Invoke-OpencodeReview {
             if ($exited) { break }
 
             $now = $stdoutSink.Length + $stderrSink.Length
+
+            if ($now -gt 0) { $hasSeenOutput = $true }
+
+            if (-not $hasSeenOutput -and $firstTokenDeadline.Elapsed.TotalSeconds -gt $firstTokenSec) {
+                try { $opencodeProc.Kill($true) } catch {}
+                if (-not $opencodeProc.HasExited) {
+                    $null = $opencodeProc.WaitForExit(1000)
+                }
+                throw "opencode: no response within ${firstTokenSec}s — possible limit/popup block. Total captured bytes: 0."
+            }
+
             if ($now -gt $lastSize) {
                 $lastSize = $now
                 $lastGrowth.Restart()

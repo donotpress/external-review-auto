@@ -80,8 +80,54 @@ Describe 'opencode is stateless by default (opt-in variant-state insurance)' {
         $script:OC | Should -Match 'Set-OpencodeVariantEntry'
         $script:OC | Should -Match 'Restore-OpencodeVariantEntry'
     }
-    It 'still tree-kills and opens sinks shareable (carried over from the hardening)' {
+It 'still tree-kills and opens sinks shareable (carried over from the hardening)' {
         $script:OC | Should -Match '\.Kill\(\s*\$true\s*\)'
-        $script:OC | Should -Match 'FileShare\]::ReadWrite'
+        $script:OC | Should -Match 'FileShare]::ReadWrite'
+    }
+}
+
+Describe 'Phase 1 first-token watchdog env-var parsing' {
+    BeforeAll {
+        $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+    }
+
+    It 'reads ERA_OPENCODE_FIRST_TOKEN_SEC from the adapter source' {
+        $script:OC | Should -Match 'ERA_OPENCODE_FIRST_TOKEN_SEC'
+    }
+
+    It 'uses [int]::TryParse to avoid silent 0-coercion' {
+        $script:OC | Should -Match '\[int\]::TryParse'
+    }
+
+    It 'enforces minimum 10s floor (poll interval = 10s)' {
+        $script:OC | Should -Match 'parsed -ge 10'
+        $script:OC | Should -Match '\$applied.*=.*10'
+    }
+
+    It 'falls back to 120s for non-integer values' {
+        $script:OC | Should -Match 'ERA_OPENCODE_FIRST_TOKEN_SEC.*falling back'
+    }
+
+    It 'falls back to 10s for values 1-9' {
+        $script:OC | Should -Match '\$parsed -gt 0 -and \$parsed -lt 10.*\{ 10 \} else \{ 120 \}'
+    }
+
+    It 'updates $hasSeenOutput BEFORE the Phase 1 deadline check (race guard)' {
+        $script:OC | Should -Match 'if \(\$now -gt 0\) \{ \$hasSeenOutput = \$true \}[\s\S]*?if \(\-not \$hasSeenOutput -and \$firstTokenDeadline'
+    }
+}
+
+Describe 'Phase 1 post-kill exit guard' {
+    BeforeAll {
+        $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+    }
+
+    It 'waits for HasExited after Kill($true) before throwing' {
+        $script:OC | Should -Match 'if \(\-not \$opencodeProc\.HasExited\)'
+        $script:OC | Should -Match '\$opencodeProc\.WaitForExit\(1000\)'
+    }
+
+It 'Phase 1 throw message includes firstTokenSec and "possible limit/popup block"' {
+        $script:OC | Should -Match 'no response within.*possible limit/popup block'
     }
 }

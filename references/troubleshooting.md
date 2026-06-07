@@ -94,3 +94,13 @@ Boolean parameters accept only Boolean values and numbers
 **Cause:** the model emitted a tool-intent narration or a "I can't read the bundle" refusal instead of a review. The shared `Test-AgenticNarrationCapture` detector flags it so it fails honestly rather than being recorded as a successful review.
 
 **Fix:** re-dispatch (the failure is usually transient). The default `-f` attach mode makes this rare; if it persists, check `opencode` auth/provider for the model.
+
+---
+
+### opencode stalls at limit/popup — dispatch hangs for minutes instead of failing fast
+
+**Symptom:** an opencode dispatch (e.g. `deepseek` or `minimax` reviewer) produces no output for a long time, then eventually fails with a timeout error. The stall snapshot shows zero or near-zero bytes.
+
+**Cause:** the model hit a usage limit (weekly quota, balance exhausted) and the opencode TUI displayed a blocking popup dialog. This popup is rendered via direct console writes (invisible to stdout/stderr capture), so the dispatch waits naively until the global `TimeoutSec` (600–1800s) fires.
+
+**Fix:** the first-token watchdog (Phase 1) now kills the process at the `ERA_OPENCODE_FIRST_TOKEN_SEC` deadline (default 120s, min 10s) if zero output has ever been captured. This catches the popup case at ~120–130s instead of waiting 10–30 minutes. If Phase 1 misses (e.g. the popup produces at least one byte), Phase 2 catches it at the variant-aware stall threshold (120–600s). Set `ERA_OPENCODE_FIRST_TOKEN_SEC` to a lower value (e.g. `60`) to fail faster at the cost of false-positive risk on very slow models.

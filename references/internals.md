@@ -65,9 +65,15 @@ Returns a `PSCustomObject` with `Stdout`, `Stderr`, `ExitCode`, `WallClockSec`, 
 
 ---
 
-## Stall detector (opencode adapter)
+## Two-phase watchdog (opencode adapter)
 
-`opencode.ps1` polls `$stdoutSink.Length + $stderrSink.Length` every 10 s. If there's no output growth for the **variant-aware threshold** — `120 s` (default), `300 s` (`high`), `600 s` (`max`), each further widened by a bundle-size overlay (~20 ms/token) — OR the global `$TimeoutSec` elapses, the child tree is killed (`Kill($true)`), a forensic stdout/stderr snapshot is written to `%TEMP%\opencode-stall-debug\`, and the dispatch throws a structured error. The widened thresholds stop a reasoning-heavy variant that thinks silently for minutes from being killed prematurely.
+`opencode.ps1` implements two layers of stall protection inside its 10-second polling loop:
+
+**Phase 1 — First-token deadline** (default 120s, minimum 10s):
+`$firstTokenDeadline` is a total wall-clock from process start. `$hasSeenOutput` flips to `$true` on the first byte of captured output. If zero output has ever been seen when the deadline elapses, the process tree is killed (`Kill($true)`) and the dispatch throws `"opencode: no response within ${N}s — possible limit/popup block"`. This catches blocking TUI popups (e.g. usage limit dialogs) that produce no stdout/stderr. Configurable via `ERA_OPENCODE_FIRST_TOKEN_SEC` (positive integer ≥ 10; values 1–9 clamp to 10s; non-integer/empty/negative fall back to 120s).
+
+**Phase 2 — Post-first-output stall detector** (existing, unchanged):
+After the first byte is seen (`$hasSeenOutput=$true`), Phase 1 is permanently disabled and Phase 2 takes over. Polls every 10s; kills if no output growth for the variant-aware threshold — `120s` (default), `300s` (`high`), `600s` (`max`), each widened by a bundle-size overlay (~20ms/token). The widened thresholds stop a reasoning-heavy variant that thinks silently for minutes from being killed prematurely. On kill, a forensic snapshot is written to `%TEMP%\opencode-stall-debug\`.
 
 ---
 
