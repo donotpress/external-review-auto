@@ -983,5 +983,20 @@ function Write-ReviewMetadata {
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
-
-
+function Test-SlugPerRoundPattern {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ExternalReviewsDir,
+        [Parameter(Mandatory)][string]$TopicSlug
+    )
+    if (-not (Test-Path $ExternalReviewsDir)) { return $null }
+    $escaped = [regex]::Escape($TopicSlug)
+    $siblings = Get-ChildItem -Directory -Path $ExternalReviewsDir |
+        Where-Object { $_.Name -match "^${escaped}-(r|round)\d+$" } |
+        ForEach-Object { $_.Name }
+    if ($siblings.Count -gt 0) {
+        $list = $siblings -join ', '
+        return "[era] WARNING: Found related topics ($list) — this looks like a new topic per round instead of iterating within one topic. Reuse the same -TopicSlug and let era.ps1 handle round numbering."
+    }
+    return $null
+}
