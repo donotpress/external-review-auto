@@ -1000,3 +1000,55 @@ function Test-SlugPerRoundPattern {
     }
     return $null
 }
+
+function Test-ConvergenceDivergence {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ReviewDir,
+        [Parameter(Mandatory)][int]$Round,
+        [Parameter(Mandatory)][int]$CurrentResponseChars
+    )
+    $warnings = @()
+    if ($env:ERA_CONVERGENCE_WARNINGS -eq '0') { return $warnings }
+
+    # Signal A: round count
+    if ($Round -ge 5) {
+        $warnings += "[era] WARNING: Round $Round — typical convergence is 2-4 rounds for focused specs, 5-8 for complex reviews. If criticals aren't decreasing, consider stopping."
+    }
+
+    # Helper: read prior round metadata safely
+    function _ReadMeta([string]$path) {
+        if (-not (Test-Path $path)) { return $null }
+        try { return Get-Content -Raw $path | ConvertFrom-Json } catch { return $null }
+    }
+
+    # Signal B: response size vs round 1
+    if ($Round -gt 1) {
+        $r1 = _ReadMeta (Join-Path $ReviewDir 'round-1-metadata.json')
+        if ($r1) {
+            $r1Chars = ($r1.reviewers | Where-Object { $_.content_ok -eq $true } | Select-Object -First 1).response_chars
+            if ($r1Chars -and $r1Chars -gt 0) {
+                $growth = [math]::Round((($CurrentResponseChars - $r1Chars) / $r1Chars) * 100)
+                if ($growth -gt 20) {
+                    $warnings += "[era] WARNING: Response size grew ${growth}% since round 1 ($r1Chars -> $CurrentResponseChars chars). Reviewer may be finding new issues from spec expansion rather than converging."
+                }
+            }
+        }
+    }
+
+    # Signal C: response size vs prior round
+    if ($Round -gt 2) {
+        $prior = _ReadMeta (Join-Path $ReviewDir "round-$($Round - 1)-metadata.json")
+        if ($prior) {
+            $priorChars = ($prior.reviewers | Where-Object { $_.content_ok -eq $true } | Select-Object -First 1).response_chars
+            if ($priorChars -and $priorChars -gt 0) {
+                $growth = [math]::Round((($CurrentResponseChars - $priorChars) / $priorChars) * 100)
+                if ($growth -gt 10) {
+                    $warnings += "[era] WARNING: Response size grew ${growth}% since round $($Round - 1). Reviews should get shorter as issues are fixed."
+                }
+            }
+        }
+    }
+
+    return $warnings
+}
