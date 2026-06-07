@@ -131,3 +131,55 @@ It 'Phase 1 throw message includes firstTokenSec and "possible limit/popup block
         $script:OC | Should -Match 'no response within.*possible limit/popup block'
     }
 }
+
+Describe 'Convergence guardrail functions exist in workflow.ps1' {
+    BeforeAll {
+        $script:WF = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+    }
+
+    It 'Test-ConvergenceDivergence is defined' {
+        $script:WF | Should -Match 'function Test-ConvergenceDivergence'
+    }
+
+    It 'Test-SlugPerRoundPattern is defined' {
+        $script:WF | Should -Match 'function Test-SlugPerRoundPattern'
+    }
+
+    It 'Write-ReviewMetadata accepts ConvergenceWarnings parameter' {
+        $script:WF | Should -Match 'ConvergenceWarnings'
+    }
+
+    It 'Write-ReviewMetadata writes convergence_warnings to JSON' {
+        $script:WF | Should -Match 'convergence_warnings'
+    }
+
+    It 'Write-ReviewMetadata writes topic_round_count to JSON' {
+        $script:WF | Should -Match 'topic_round_count'
+    }
+
+    It 'Write-ReviewMetadata writes include_files to JSON' {
+        $script:WF | Should -Match 'include_files'
+    }
+
+    It 'Write-ReviewMetadata writes bundle_file_count to JSON' {
+        $script:WF | Should -Match 'bundle_file_count'
+    }
+}
+
+Describe 'Convergence guardrails wired in era.ps1' {
+    BeforeAll {
+        $script:ERA = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+    }
+
+    It 'calls Test-SlugPerRoundPattern before dispatch' {
+        $script:ERA | Should -Match 'Test-SlugPerRoundPattern'
+    }
+
+    It 'calls Test-ConvergenceDivergence after dispatch' {
+        $script:ERA | Should -Match 'Test-ConvergenceDivergence'
+    }
+
+    It 'passes ConvergenceWarnings to Write-ReviewMetadata' {
+        $script:ERA | Should -Match 'ConvergenceWarnings \$convergenceWarnings'
+    }
+}
