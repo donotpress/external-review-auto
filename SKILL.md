@@ -9,6 +9,12 @@ trigger: /external-review-auto
 
 # /external-review-auto
 
+## Quick Reference
+
+0. Locate skill root → 1. Resolve input → 2. Select mode → 3. Curate files → 4. Write prompt → 5. Dispatch `era.ps1` → 6. Wait → 7. Triage → 8. Converged (0 criticals)? Done. Otherwise fix, write round N+1 prompt, loop back to step 3.
+
+**Terminal condition:** 0 critical issues. **Always bundle source code.** Details in each section below.
+
 ## Prerequisites
 
 | Dependency | Required | Install |
