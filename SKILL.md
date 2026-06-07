@@ -198,7 +198,7 @@ When round N's response contains critical issues:
    - A verbatim summary of round N's verdict, or include the literal string `{{PREVIOUS_ROUND}}` in your prompt file — era.ps1 auto-substitutes it with the full text of round-(N-1)'s response at bundle time
    - What changed since round N ("Fixed critical #1 by...", "Rejected important #3 because...")
    - Specific questions for the reviewer ("Is the fix for X correct?", "Did I introduce new issues?")
-4. **Curate round N+1 files** — pass `--diff` and `-IncludeFiles` with only changed files (4x cheaper than re-bundling everything)
+4. **Curate round N+1 files** — pass `--diff` (only bundles files with uncommitted changes, skipping unchanged files) and `-IncludeFiles` with only changed files (4x cheaper than re-bundling everything)
 5. **Dispatch** — `pwsh <skill-root>/runtimes/era.ps1 -TopicSlug <slug> -PromptOverrideFile <path> --diff -IncludeFiles <changed-files> -Force`
 6. **Return to primary workflow step 6** — wait for completion, triage, check convergence. This closes the loop.
 
@@ -321,6 +321,8 @@ Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 ## Prompt templates
 
 Use these when writing custom prompts via `-PromptOverrideFile`.
+
+> **Stub variables vs auto-substituted variables:** `{{BACKGROUND_FROM_SPEC}}`, `{{DECISIONS_FROM_SPEC}}`, `{{FILE_LIST}}`, etc. are **manual placeholders** — you fill them in yourself when writing the prompt. Only `{{PREVIOUS_ROUND}}` is auto-substituted by era.ps1 at bundle time.
 
 > ### ⚠️ Agentic-backend rule: never tell the model to "read/open/view files"
 >

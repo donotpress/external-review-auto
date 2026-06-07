@@ -222,6 +222,10 @@ LLMs invoking `/era` should parse free-form input (e.g. `/era use gemini 3.1 pro
 
 See **[SKILL.md](SKILL.md)** for full usage — includes a quick-reference card, invocation workflow (9-step checklist + dot-graph), mode selection and file curation decision trees, round 2+ convergence protocol, pitfalls table, flags, prompt templates, resolver rules, and triage guidance.
 
+## Troubleshooting
+
+If invocation fails, see **[references/troubleshooting.md](references/troubleshooting.md)** for edge cases and known errors with fixes.
+
 ## Tests
 
 Pester 5 unit tests live in `tests/`. Run before merging changes to `backends/`, `workflow.ps1`, or `runtimes/era.ps1`:
