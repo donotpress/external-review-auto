@@ -55,6 +55,15 @@ param(
     [switch]$Force,
     [string[]]$IncludeFiles,
     [string]$PromptOverrideFile,
+    # 2026-06-10 hardening P2: typed channel for the calling agent's
+    # conversation distillation (goal, findings, claims to refute — see
+    # SKILL.md "Conversation context hand-off"). Read into the prompt, never
+    # bundled, so absolute paths outside the repo are fine. Injected into
+    # {{CONVERSATION_CONTEXT}} when the prompt has the placeholder; appended
+    # as '## Session context' to generated/template prompts otherwise; with a
+    # user-supplied -PromptOverrideFile it is honored ONLY via the
+    # placeholder (else warned + ignored).
+    [string]$ConversationFile,
     # NOTE: -Full was previously declared but never read by any code path.
     # Removed in 2026-05-27 cleanup. Use -Diff to opt into diff-bundling on
     # round 2+; absence of -Diff produces the full bundle (default behavior).
@@ -73,6 +82,23 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
+# 2026-06-10 hardening P5.1: accept comma-joined -IncludeFiles ("a.py,b.py").
+# `pwsh -File era.ps1 -IncludeFiles @(...)` flattens the array into positional
+# args (the 2nd element binds to -Mode and errors); the comma-string form is
+# the portable alternative for non-PowerShell-native callers.
+if ($IncludeFiles) {
+    $IncludeFiles = @($IncludeFiles |
+        ForEach-Object { "$_" -split ',' } |
+        ForEach-Object { $_.Trim().Trim('"', "'") } |
+        Where-Object { $_ })
+}
+
+# 2026-06-10 hardening P2: remember whether -PromptOverrideFile came from the
+# USER (vs being set later by the -SpecReview generator or pending-prompt
+# auto-detect) — user-supplied prompts only honor -ConversationFile via an
+# explicit {{CONVERSATION_CONTEXT}} placeholder.
+$script:UserSuppliedPromptOverride = $PSBoundParameters.ContainsKey('PromptOverrideFile')
+
 $skillRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $skillRoot 'workflow.ps1')
 # Layer-2 model-hint resolver (extracted from this script in PR-D / D.0 so the
@@ -85,6 +111,11 @@ if ($Force) { $env:ERA_FORCE = '1' }
 if ($Doctor) {
     $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     Write-Host (Format-EraDoctorReport -Checks (Get-EraDoctorReport -Registry $rawRegistry))
+    # 2026-06-10 P5.3: the /era alias SKILL.md directs callers here — verify
+    # this skill root actually has the runtimes the alias promises.
+    $aliasOk = (Test-Path (Join-Path $PSScriptRoot 'resolve.ps1')) -and
+               (Test-Path (Join-Path $skillRoot 'backends/_registry.json'))
+    Write-Host ("[{0}] era-alias skill-root resolution (runtimes/resolve.ps1 + backends/_registry.json reachable from {1})" -f ($(if ($aliasOk) { ' OK ' } else { 'FAIL' })), $skillRoot)
     return
 }
 
@@ -237,9 +268,23 @@ if ($Command -eq 'review-this') {
         Write-Host "[era] Dispatching review of $($recentFiles.Count) changed file(s)..."
         $IncludeFiles = $recentFiles
         if (-not $TopicSlug) {
-            $TopicSlug = 'review-this'
+            # Timestamped slug (2026-06-10 P2.3): a fixed 'review-this' slug
+            # collides across unrelated sessions in .external-reviews/. NEVER
+            # derive the slug from a -ConversationFile filename (temp names
+            # like session.md collide even worse).
+            $TopicSlug = 'review-this-' + (Get-Date -Format 'yyyyMMdd-HHmm')
         }
         $Force = $true  # auto-dispatch, no cost prompt
+    } elseif ($ConversationFile) {
+        # 2026-06-10 P2.3: conversation-context-only review — no spec, no git
+        # changes, but the caller supplied session context. Degraded mode (no
+        # source bundle) is warned per SKILL.md; the caller should normally
+        # also pass -IncludeFiles.
+        Write-Host "[era] WARNING: review-this with -ConversationFile but no spec/changed files — dispatching context-only (degraded: no source bundle)."
+        if (-not $TopicSlug) {
+            $TopicSlug = 'review-this-' + (Get-Date -Format 'yyyyMMdd-HHmm')
+        }
+        $Force = $true
     } else {
         Write-Host "[era] No spec files or recent git changes found."
         Write-Host "[era] Pass -TopicSlug and -IncludeFiles explicitly, or run from a repo with recent activity."
@@ -382,6 +427,8 @@ Please assess the spec for the following, in priority order. **Be specific** —
 ### 5. Edge cases the spec missed
 ### 6. Testability — are the proposed tests sufficient?
 ### 7. Anything else wrong, missing, or under-specified.
+
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
 
 ## Output format
 
@@ -552,6 +599,9 @@ if (-not $PromptOverrideFile) {
     $pendingPromptPath = Join-Path $reviewDir 'pending-prompt.md'
     if (Test-Path $pendingPromptPath) {
         $PromptOverrideFile = $pendingPromptPath
+        # Pre-written prompt = user-authored for -ConversationFile purposes
+        # (honored only via {{CONVERSATION_CONTEXT}} placeholder).
+        $script:UserSuppliedPromptOverride = $true
         Write-Host "[era] Auto-detected pending-prompt.md in topic dir; using it as prompt override."
     }
 }
@@ -589,6 +639,8 @@ All source files are fully included in the attached bundle. Review ONLY what is 
 3. **Edge cases** -- what could break?
 4. **Actionability** -- are the suggestions well-targeted?
 
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
 ## Output format
 
 ```
@@ -617,6 +669,8 @@ Be terse. If a section is empty, write "(none)".
 You are reviewing the attached codebase bundle. Provide structured feedback.
 
 All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
 
 ## Output format
 
@@ -653,6 +707,50 @@ Be terse. If a section is empty, write "(none)".
         }
     } elseif (-not (Test-Path $promptPath)) {
         $promptTemplate -replace '{{TOPIC_TITLE}}', $promptTitle | Set-Content -Path $promptPath -Encoding utf8
+    }
+
+    # --- -ConversationFile injection (2026-06-10 hardening P2) ---
+    # Runs on the FINALIZED prompt file, BEFORE {{PREVIOUS_ROUND}} substitution
+    # so '## Session context' precedes the previous-round block (stable context
+    # first, then the delta the reviewer must react to).
+    if ($ConversationFile) {
+        if (-not (Test-Path $ConversationFile)) { throw "Conversation file not found: $ConversationFile" }
+        $convText = (Get-Content -Raw $ConversationFile).TrimEnd()
+        $promptText = Get-Content -Raw $promptPath
+        if ($promptText -match '\{\{CONVERSATION_CONTEXT\}\}') {
+            # .Replace = literal (no regex metacharacter surprises in $convText)
+            $promptText = $promptText.Replace('{{CONVERSATION_CONTEXT}}', $convText)
+            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+            Write-Host "[era] -ConversationFile: injected into {{CONVERSATION_CONTEXT}} placeholder."
+        } elseif ($script:UserSuppliedPromptOverride) {
+            # Hard error (smoke-review round 1): silently dropping session
+            # context recreates the folklore problem -ConversationFile exists
+            # to fix. Add {{CONVERSATION_CONTEXT}} to the override, or drop
+            # one of the two flags.
+            throw "-ConversationFile was passed but the supplied -PromptOverrideFile has no {{CONVERSATION_CONTEXT}} placeholder. Add the placeholder or omit one flag."
+        } else {
+            $section = "## Session context`n`n$convText`n`n"
+            $marker = '## Output format'
+            $idx = $promptText.IndexOf($marker)
+            if ($idx -ge 0) {
+                # Insert before the Output-format heading (string surgery, no
+                # regex — the marker text also appears in template literals).
+                $promptText = $promptText.Substring(0, $idx) + $section + $promptText.Substring($idx)
+            } else {
+                $promptText = $promptText.TrimEnd() + "`n`n" + $section
+            }
+            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+            Write-Host "[era] -ConversationFile: appended as '## Session context'."
+        }
+    } else {
+        # Degraded mode (P2.2): a dangling placeholder must not reach the
+        # reviewer verbatim.
+        $promptText = Get-Content -Raw $promptPath
+        if ($promptText -match '\{\{CONVERSATION_CONTEXT\}\}') {
+            Write-Host "[era] WARNING: prompt has {{CONVERSATION_CONTEXT}} but no -ConversationFile was passed (degraded mode — see SKILL.md conversation hand-off)."
+            $promptText = $promptText.Replace('{{CONVERSATION_CONTEXT}}', '(none provided)')
+            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+        }
     }
 
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
@@ -802,6 +900,8 @@ Only changed files are attached below.
 2. New issues introduced by the changes.
 3. Any remaining issues.
 
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
 ## Output format
 
 ```
@@ -858,7 +958,11 @@ Be terse. If a section is empty, write "(none)".
     }
 
     $configData = @{
-        output = @{ filePath = $bundlePath; style = 'xml'; instructionFilePath = $promptPath; headerText = if ($isFollowUp) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
+        # showLineNumbers (2026-06-10 hardening P4): reviewers fabricate
+        # bundle-relative line numbers on large bundles — observed on BOTH
+        # correct and incorrect claims. True per-file numbers in the bundle +
+        # the citation instruction in the prompt templates kill the artifact.
+        output = @{ filePath = $bundlePath; style = 'xml'; showLineNumbers = $true; instructionFilePath = $promptPath; headerText = if ($isFollowUp) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
         include = $effectiveInclude
         ignore = @{
             useGitignore = $false
@@ -868,6 +972,49 @@ Be terse. If a section is empty, write "(none)".
     }
     $configJson = $configData | ConvertTo-Json -Depth 10
     $configJson | Set-Content -Path $configPath -Encoding utf8
+
+    # --- 2026-06-10 hardening P6: out-of-repo -IncludeFiles staging ----------
+    # repomix can only bundle under repoRoot. An ABSOLUTE path outside the repo
+    # is explicit caller intent (e.g. skill sources under ~/.claude), so stage
+    # a copy into the round's artifact dir, mirroring the source path so bundle
+    # citations still identify the real file:
+    #   C:\Users\<you>\.claude\skills\era\SKILL.md
+    #     -> .external-reviews/<slug>/round-N-external/HOME/.claude/skills/era/SKILL.md
+    # Staged copies persist as round artifacts (same reproducibility contract
+    # as round-N-bundle.xml). RELATIVE traversal (..\..) stays blocked below —
+    # that shape is accidental, not intent. Files only; out-of-repo dirs/globs
+    # throw (pass individual files).
+    if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
+        $IncludeFiles = @($IncludeFiles | ForEach-Object {
+            $entry = "$_"
+            if ($entry -match '[*?\[\]]') { return $entry }   # globs are in-repo by definition
+            if (-not [System.IO.Path]::IsPathRooted($entry)) { return $entry }
+            $full = [System.IO.Path]::GetFullPath($entry)
+            if ($full.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                # Absolute but inside the repo — relativize for repomix.
+                return ($full.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
+            }
+            if (-not (Test-Path $full -PathType Leaf)) {
+                throw "ERROR: out-of-repo -IncludeFiles entry must be an existing FILE (dirs/globs unsupported): $entry"
+            }
+            # Privacy: bundles are sent to external reviewer APIs - never
+            # embed the user's home path (Users/<name>). Home-rooted files
+            # mirror under 'HOME/'; non-home paths keep the drive-stripped
+            # mirror.
+            $homeFull = [System.IO.Path]::GetFullPath($HOME)
+            if ($full.StartsWith($homeFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $mirror = 'HOME/' + (($full.Substring($homeFull.Length).TrimStart('\', '/')) -replace '\\', '/')
+            } else {
+                $mirror = (($full -replace ':', '') -replace '\\', '/').TrimStart('/')
+            }
+            $stagedAbs = Join-Path $reviewDir "round-$round-external/$mirror"
+            New-Item -ItemType Directory -Path (Split-Path -Parent $stagedAbs) -Force | Out-Null
+            Copy-Item -Path $full -Destination $stagedAbs -Force
+            $stagedRel = ($stagedAbs.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
+            Write-Host "[era] Staged out-of-repo file for bundling: $full -> $stagedRel"
+            return $stagedRel
+        })
+    }
 
     # Fix (PR 2 C): Validate -IncludeFiles paths against Test-Path BEFORE invoking
     # repomix. repomix runs 3+ seconds before returning an empty bundle for typo'd

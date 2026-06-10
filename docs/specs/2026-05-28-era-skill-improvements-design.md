@@ -244,4 +244,4 @@ Every proposal above either (a) operates inside era.ps1 itself (PS-only, no plat
 
 3. **PR 1 doc split** — should `references/internals.md` be loaded automatically when era.ps1 itself errors? E.g., on a non-zero exit, print the error AND emit "See ~/.claude/skills/external-review-auto/references/troubleshooting.md for diagnosis steps." This makes the troubleshooting reference self-pointing.
 
-4. **Adoption path for existing invocations.** This skill lives at `~/.claude/skills/`, outside the trading repo. Changes don't affect the repo itself. But the skill is presumably used across multiple projects. Should we version the skill (`v2` directory, opt-in migration), or just edit in place? Author's lean: in-place edit; the changes are all backwards-compatible per §6.
+4. **Adoption path for existing invocations.** This skill lives at `~/.claude/skills/`, outside any consuming repo. Changes don't affect consuming repos. But the skill is presumably used across multiple projects. Should we version the skill (`v2` directory, opt-in migration), or just edit in place? Author's lean: in-place edit; the changes are all backwards-compatible per §6.

@@ -81,6 +81,12 @@ if ($registry._opencode_model_map) {
     }
 }
 
+# Exact registry preset names (e.g. 'gemini-pro-high', 'deepseek-api') so a
+# hyphenated preset token resolves directly instead of being misread as a
+# topic slug. Underscore-prefixed keys are internal maps, not presets.
+# (2026-06-10 hardening P1; see era-conductor-hardening design spec.)
+$presetNames = @($registry.PSObject.Properties.Name | Where-Object { $_ -notmatch '^_' })
+
 # Helper to emit JSON and exit (single, clean stdout write).
 function script:Emit-Result {
     param([hashtable]$Flags)
@@ -119,6 +125,28 @@ function script:Remove-LeadingFiller {
     @($list[$i..($list.Count - 1)])
 }
 
+# --- All-reviewer-token guard (2026-06-10 hardening P1.1) ---------------------
+# True when EVERY non-filler token is plausibly part of a reviewer spec:
+# a $reviewerKeywords word, a tier word, a version number (3.1, v4, m2.7), or
+# an exact registry preset name. Used by the 'with'/'via' splitter aliases,
+# which need a stricter guard than 'use' because 'with' is common in topics
+# ("issue with minimax algorithm" must keep its topic intact).
+function script:Test-AllReviewerTokens {
+    param([string[]]$Tokens)
+    $clean = @(script:Remove-Filler -Tokens $Tokens)
+    if ($clean.Count -eq 0) { return $false }
+    $tierWords = @('high', 'low', 'budget', 'rest', 'direct')
+    foreach ($t in $clean) {
+        $tl = $t.ToLower()
+        $ok = ($reviewerKeywords -contains $tl) -or
+              ($tierWords -contains $tl) -or
+              ($presetNames -contains $tl) -or
+              ($tl -match '^[vm]?\d+(\.\d+)*$')
+        if (-not $ok) { return $false }
+    }
+    return $true
+}
+
 # --- Resolve a reviewer-spec token stream -> @{ Reviewer; Model } or $null ----
 # Returns $null when the spec is non-empty but matches no known reviewer/model.
 function script:Resolve-ReviewerSpec {
@@ -128,6 +156,20 @@ function script:Resolve-ReviewerSpec {
     if ($clean.Count -eq 0) {
         # Bare invocation -> the configured default (ships gemini-pro-low).
         return @{ Reviewer = $script:DefaultReviewer }
+    }
+
+    # Exact preset name (hyphenated, e.g. 'gemini-pro-high') resolves directly.
+    # Without this, '/era gemini-pro-high' was misread as a TOPIC slug because
+    # the hyphenated token matches no single $reviewerKeywords word.
+    # Single-word FAMILY keywords ('minimax', 'deepseek', …) that happen to
+    # also be preset names must still take the family branches below — those
+    # attach Model overrides (e.g. minimax -> registry default model_id).
+    # (2026-06-10 hardening P1.)
+    if ($clean.Count -eq 1) {
+        $soloLower = $clean[0].ToLower()
+        if (($presetNames -contains $soloLower) -and ($reviewerKeywords -notcontains $soloLower)) {
+            return @{ Reviewer = $soloLower }
+        }
     }
 
     $lower = @($clean | ForEach-Object { $_.ToLower() })
@@ -295,7 +337,19 @@ function script:Try-ReviewThis {
     if ($clean[0].ToLower() -ne 'review') { return $null }
     $second = $clean[1].ToLower()
     if ($second -in @('this', 'current', 'now', 'here', 'it')) {
-        return @{ Command = 'review-this' }
+        $result = @{ Command = 'review-this' }
+        # 2026-06-10 hardening P1.2: tokens after the marker may name a
+        # reviewer ("review this with gemini pro high") — merge it instead of
+        # silently dropping the choice. Unresolvable trailing tokens are
+        # ignored (plain review-this).
+        if ($clean.Count -gt 2) {
+            $rest = @($clean[2..($clean.Count - 1)])
+            $spec = script:Resolve-ReviewerSpec -Tokens $rest
+            if ($null -ne $spec) {
+                foreach ($k in $spec.Keys) { $result[$k] = $spec[$k] }
+            }
+        }
+        return $result
     }
     return $null
 }
@@ -438,9 +492,17 @@ if ($cleanForCmd.Count -gt 0) {
 # slug. Only split when the tail contains at least one reviewer keyword; otherwise
 # the input is a topic whose description happens to include "use" and no reviewer
 # was intended (e.g. "fix the use of deprecated api" with no reviewer keyword).
+#
+# 2026-06-10 hardening P1.1: 'with' and 'via' are splitter ALIASES of 'use',
+# but with a STRICTER guard — every token in the tail must be a reviewer token
+# (Test-AllReviewerTokens), because 'with' appears in ordinary topics ("issue
+# with minimax algorithm") far more often than 'use' does. 'use' keeps its
+# original >=1-keyword guard for backward compatibility.
 $useIdx = -1
+$useWord = $null
 for ($i = 0; $i -lt $tokens.Count; $i++) {
-    if ($tokens[$i].ToLower() -eq 'use') { $useIdx = $i }
+    $tl = $tokens[$i].ToLower()
+    if ($tl -in @('use', 'with', 'via')) { $useIdx = $i; $useWord = $tl }
 }
 
 $topicSlug = $null
@@ -454,7 +516,14 @@ if ($useIdx -ge 0) {
     # deprecated api") and no reviewer was intended.
     $afterUse = if ($useIdx -lt $tokens.Count - 1) { @($tokens[($useIdx + 1)..($tokens.Count - 1)]) } else { @() }
     $afterLower = @($afterUse | ForEach-Object { $_.ToLower() })
-    $hasReviewerInTail = ($reviewerKeywords | Where-Object { $afterLower -contains $_ }).Count -gt 0
+    $hasReviewerInTail = if ($useWord -eq 'use') {
+        # Original guard: >=1 reviewer keyword anywhere in the tail.
+        ($reviewerKeywords | Where-Object { $afterLower -contains $_ }).Count -gt 0 -or
+            (script:Test-AllReviewerTokens -Tokens $afterUse)
+    } else {
+        # 'with'/'via' (P1.1): EVERY tail token must be a reviewer token.
+        (script:Test-AllReviewerTokens -Tokens $afterUse)
+    }
     if ($hasReviewerInTail) {
         # Everything before 'use' is the topic; everything after is the reviewer spec.
         $beforeUse = @($tokens[0..([Math]::Max(0, $useIdx - 1))])
@@ -477,6 +546,10 @@ if ($useIdx -ge 0) {
     if ($clean.Count -gt 0) {
         $firstCanon = ($clean[0].ToLower() -replace '[^a-z0-9]', '')
         $isReviewerFirst = $false
+        # Exact hyphenated preset name ('gemini-pro-high') IS a reviewer spec —
+        # check before the keyword loop, whose canon strips hyphens
+        # (2026-06-10 hardening P1).
+        if ($presetNames -contains $clean[0].ToLower()) { $isReviewerFirst = $true }
         foreach ($kw in $reviewerKeywords) {
             # EXACT/word match only. A substring `-like "*$kw*"` misclassifies
             # topic slugs whose first word merely CONTAINS a (short) reviewer
@@ -525,5 +598,13 @@ if ($null -eq $spec) {
 $flags = @{}
 if ($topicSlug) { $flags['TopicSlug'] = $topicSlug }
 foreach ($k in $spec.Keys) { $flags[$k] = $spec[$k] }
+
+# 2026-06-10 hardening P1.3: a reviewer with NO topic ("/era gemini 3.1 pro")
+# means "review what we're doing, with that model" — emit review-this so
+# era.ps1 has something to dispatch instead of a reviewer with no subject.
+if (-not $flags.ContainsKey('TopicSlug') -and -not $flags.ContainsKey('Command') -and
+    $flags.ContainsKey('Reviewer')) {
+    $flags['Command'] = 'review-this'
+}
 
 Write-Output (script:Emit-Result -Flags $flags)

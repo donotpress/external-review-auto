@@ -439,3 +439,74 @@ Describe 'resolve.ps1 to era.ps1 parameter contract' {
         }
     }
 }
+
+# 2026-06-10 hardening P1 acceptance table — see the era-conductor-hardening design spec
+# docs/superpowers/specs/2026-06-10-era-conductor-hardening-design.md (P1.4).
+Describe 'resolve.ps1 2026-06-10 hardening (P1)' {
+
+    It 'bare model name gains Command review-this (P1.3)' {
+        $r = script:Invoke-Resolve 'gemini 3.1 pro'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-high'
+        $r.Command | Should -BeExactly 'review-this'
+    }
+
+    It 'exact hyphenated preset alone resolves as reviewer + review-this' {
+        $r = script:Invoke-Resolve 'gemini-pro-high'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-high'
+        $r.Command | Should -BeExactly 'review-this'
+    }
+
+    It '"with" splits topic from spaced reviewer (P1.1)' {
+        $r = script:Invoke-Resolve 'review the fidelity spec with gemini pro high'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-high'
+        $r.TopicSlug | Should -BeExactly 'review-the-fidelity-spec'
+    }
+
+    It '"with" splits topic from hyphenated preset (P1.1)' {
+        $r = script:Invoke-Resolve 'review the fidelity spec with gemini-pro-high'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-high'
+        $r.TopicSlug | Should -BeExactly 'review-the-fidelity-spec'
+    }
+
+    It '"with" followed by a registry word plus a non-reviewer word keeps the topic intact (guard)' {
+        $r = script:Invoke-Resolve 'issue with minimax algorithm'
+        $r.TopicSlug | Should -BeExactly 'issue-with-minimax-algorithm'
+        $r.PSObject.Properties.Name | Should -Not -Contain 'Command'
+    }
+
+    It '"review this with <reviewer>" merges the reviewer (P1.2)' {
+        $r = script:Invoke-Resolve 'review this with gemini pro high'
+        $r.Command | Should -BeExactly 'review-this'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-high'
+    }
+
+    It '"review this" alone carries no Reviewer key' {
+        $r = script:Invoke-Resolve 'review this'
+        $r.Command | Should -BeExactly 'review-this'
+        $r.PSObject.Properties.Name | Should -Not -Contain 'Reviewer'
+    }
+
+    It 'multi syntax is unaffected by clause extraction' {
+        $r = script:Invoke-Resolve 'multi gemini,deepseek'
+        $r.Reviewer | Should -BeExactly 'gemini,deepseek'
+        $r.PSObject.Properties.Name | Should -Not -Contain 'Command'
+    }
+
+    It 'legacy last-"use" splitter unchanged' {
+        $r = script:Invoke-Resolve 'fix use of deprecated api use gemini'
+        $r.TopicSlug | Should -BeExactly 'fix-use-of-deprecated-api'
+        $r.Reviewer | Should -BeExactly 'gemini'
+    }
+
+    It 'topic-only input gains no Command (slug + default reviewer)' {
+        $r = script:Invoke-Resolve 'improvement-plan refactor'
+        $r.TopicSlug | Should -BeExactly 'improvement-plan-refactor'
+        $r.PSObject.Properties.Name | Should -Not -Contain 'Command'
+    }
+
+    It '"set default" order-of-operations preserved' {
+        $r = script:Invoke-Resolve 'set default to gemini pro low'
+        $r.Command | Should -BeExactly 'set-default'
+        $r.Reviewer | Should -BeExactly 'gemini-pro-low'
+    }
+}

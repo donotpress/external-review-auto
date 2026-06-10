@@ -443,3 +443,77 @@ Be terse. Don't pad. If a section is empty, write "(none)".
 
 - `references/internals.md` — hardening details, opencode variant resolution, parallel-dispatch mechanics, maintainer notes
 - `references/troubleshooting.md` — edge cases and known errors with fixes
+
+## Conversation context hand-off (`-ConversationFile`) — 2026-06-10
+
+`era.ps1` cannot see the calling conversation. The typed channel for it is
+`-ConversationFile <path>` (absolute paths anywhere are fine — the file is
+read into the prompt, never bundled). Before dispatch, the calling agent
+writes a distillation file containing:
+
+```markdown
+# Session context — <topic>
+## Goal
+<what this session is trying to accomplish>
+## Current state
+<what has been done/decided so far; key file:line anchors>
+## Findings / claims to scrutinize
+<numbered; each with the evidence the agent has>
+## Decisions already made (do not re-litigate)
+<list>
+## Open questions for the reviewer
+<list>
+```
+
+Injection rules: a `{{CONVERSATION_CONTEXT}}` placeholder in the prompt is
+replaced; generated/template prompts get a `## Session context` section
+inserted before `## Output format`; a user-supplied `-PromptOverrideFile`
+honors the file ONLY via the placeholder (else **hard error** — silently
+dropping context is the failure mode this flag exists to fix). A dispatch
+with neither spec nor ConversationFile context is degraded mode and warns.
+A prompt-only dispatch (no source bundle) remains forbidden.
+
+## Out-of-repo source files in the bundle (P6) — 2026-06-10
+
+`-IncludeFiles` accepts **absolute paths outside the repo** (e.g. skill
+sources under `~/.claude/`): era.ps1 stages a copy into the round's artifact
+dir with the source path mirrored —
+`.external-reviews/<slug>/round-N-external/HOME/.claude/.../file.ps1` — so
+bundle citations still identify the real file. **Privacy:** home-rooted
+sources mirror under `HOME/` so the bundle (which is sent to an external
+reviewer API) never embeds `Users/<name>`; non-home paths keep a
+drive-stripped mirror. Staged copies persist as round artifacts. Files only
+(out-of-repo dirs/globs throw). Relative traversal (`../secret`) remains
+blocked — typing the full absolute path is the explicit opt-in.
+
+## Conductor protocol (NORMATIVE — any calling model, any platform) — 2026-06-10
+
+The transport (era.ps1) is deterministic; review QUALITY depends on the
+calling model executing this protocol. It is part of the skill, not optional.
+
+1. **Triage every claim by type** before incorporating: *empirical* (run the
+   code/measurement), *code-reading* (open the cited site), *known-issue*
+   (cross-check the record), *reasoning* (argue it). Validate at least one
+   empirical claim per round; spot-check every code-reading claim AT the
+   cited location. Treat reviewer line numbers as untrusted until they match
+   the file (see history: fabricated `file:line` observed on correct AND
+   incorrect claims in the same round).
+2. **Record disposition per claim** in the spec under review:
+   CONFIRMED (with what verified it) / REJECTED (with the evidence) /
+   DEFERRED (with why). The "External review (round N)" sections in the
+   originating design specs are the reference format.
+3. **Iteration policy.** Continue rounds without approval pauses while a
+   round yields ≥1 confirmed critical/important finding not already
+   absorbed. STOP when: a round yields none (converged); OR 4 rounds elapse
+   (escalate the open disagreement to the human); OR the subject is a
+   findings/measurement document (one round — reviewers cannot refute
+   measurements); OR **a round's critical findings are confabulations**
+   (observed 2026-06-10: when a fabricated citation was rejected, the
+   reviewer invented corroborating detail — a 1,693-line file, fake line
+   content — instead of conceding; further rounds re-litigate fiction.
+   Harvest incidental lower-tier findings, then stop).
+4. **Rejection hygiene.** When a claim is rejected, the next round's prompt
+   must state the rejection as established fact WITH evidence ("era.ps1 is
+   1,040 lines; line 860 reads `$configData = @{`") — or drop the disputed
+   thread entirely. Leaving the reviewer's original claim visible without
+   the counter-evidence invites doubling-down.

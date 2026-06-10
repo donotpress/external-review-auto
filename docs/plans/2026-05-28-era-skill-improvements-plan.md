@@ -8,7 +8,7 @@
 
 **Tech Stack:** PowerShell 7+ · repomix · agy/Claude/opencode CLIs · git
 
-**Source spec:** `~/.claude/skills/external-review-auto/docs/specs/2026-05-28-era-skill-improvements-design.md` (converged after 2 Gemini 3.1 Pro review rounds to READY TO IMPLEMENT). A copy is also at `docs/superpowers/specs/2026-05-28-era-skill-improvements-design.md` in the trading repo for reference.
+**Source spec:** `~/.claude/skills/external-review-auto/docs/specs/2026-05-28-era-skill-improvements-design.md` (converged after 2 Gemini 3.1 Pro review rounds to READY TO IMPLEMENT).
 
 **Critical constraint:** the era skill repo at `~/.claude/skills/external-review-auto/` has uncommitted modifications from the maintainer that are NOT part of this work. Every commit in this plan must be scoped to specific files this plan touches (use `git add <path>` never `git add .`).
 
@@ -235,5 +235,5 @@ Per spec §4.A:
 - [ ] `{{PREVIOUS_ROUND}}` token in round-N>1 prompts auto-substitutes (PR 3)
 - [ ] `-AutoDetect` flag works with confirmation prompt OR `-Force` (PR 4)
 - [ ] `-SpecReview docs/spec.md -Reviewer gemini` works without `-IncludeFiles` or `-PromptOverrideFile` (PR 5)
-- [ ] Existing /era invocations from the trading repo (and any other downstream user) still work — backwards-compatible (all PRs)
+- [ ] Existing /era invocations from downstream projects still work — backwards-compatible (all PRs)
 - [ ] Pester tests all green: `pwsh -Command "Invoke-Pester -Path tests/ -Tag Unit"`
