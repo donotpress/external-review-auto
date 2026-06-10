@@ -84,9 +84,11 @@ In a TUI (Claude Code, opencode, etc.), just type:
 /era Gemini 3.1 Pro           # use Gemini 3.1 Pro (High)
 /era Opus 4.8                 # use Claude Opus
 /era deepseek v4 flash        # use DeepSeek V4 Flash
-/era my-feature use sonnet    # review topic "my-feature" with Claude Sonnet
+/era my-feature with sonnet   # review topic "my-feature" with Claude Sonnet
+/era my-feature use sonnet    # same — 'use', 'with', and 'via' all split topic from reviewer
 /era multi gemini,opus        # dispatch to multiple reviewers in parallel
 /era review this              # auto-detect context and review (spec or git changes)
+/era review this with opus    # same, with an explicit reviewer
 /era what should I review     # scan repo for review targets (specs, commits, topics)
 /era doctor                   # check prerequisites + backend status
 /era set default to opus      # change your default reviewer (persists)
@@ -136,6 +138,23 @@ On first run with no `-Reviewer`, `/era` auto-detects what you have installed an
 pwsh runtimes/era.ps1                                                  # default
 pwsh runtimes/era.ps1 -TopicSlug my-design -Reviewer gemini-pro-high   # explicit
 pwsh runtimes/era.ps1 -TopicSlug my-topic -IncludeFiles src/main.py,tests/test_main.py -PromptOverrideFile prompt.md
+```
+
+**Session context (`-ConversationFile`):** agent callers should distill the
+conversation (goal, findings, claims to scrutinize, open questions) into a
+file and pass it — it is injected into the prompt (never bundled), so any
+absolute path works:
+
+```bash
+pwsh runtimes/era.ps1 -TopicSlug my-design -ConversationFile /tmp/session-context.md -IncludeFiles src/main.py
+```
+
+**Out-of-repo files:** absolute `-IncludeFiles` paths outside the repo are
+staged into the round's artifact dir and bundled, with home-rooted paths
+mirrored under `HOME/` so the bundle never embeds your username. Relative
+`../` traversal is still blocked.
+```bash
+pwsh runtimes/era.ps1 -TopicSlug skill-review -IncludeFiles ~/.claude/skills/era/SKILL.md
 ```
 
 ## Set your default reviewer
@@ -190,6 +209,7 @@ All CLI adapters launch their binary in a **private hidden console** (`ProcessSt
 - **Self-healing (agy)** — a stall/timeout, an empty capture, or a narration capture triggers one in-adapter retry within the same budget.
 - **Concurrency-safe** — agy uses per-process `--model` + Run-ID capture; opencode is stateless; multiple dispatches against one topic reserve distinct round numbers atomically.
 - **Adaptive default** — a bare `/era` (no `-Reviewer`) live-detects which backends you have (CLI on PATH / API key set) and picks the first usable one by preference instead of erroring; override with `$env:ERA_DEFAULT_REVIEWER`. `era.ps1 -Doctor` prints the full status.
+- **Line-numbered bundles** — repomix emits true per-file line numbers and every prompt template instructs `file:line` citation from them, sharply reducing fabricated line citations (verify per the SKILL.md conductor protocol regardless).
 - **pwsh 7+** is required (enforced via `#Requires`).
 
 ### Direct REST (uses an API key — pure HTTPS, no subprocess, no TTY)
@@ -220,7 +240,7 @@ LLMs invoking `/era` should parse free-form input (e.g. `/era use gemini 3.1 pro
 
 ## Documentation
 
-See **[SKILL.md](SKILL.md)** for full usage — includes a quick-reference card, invocation workflow (9-step checklist + dot-graph), mode selection and file curation decision trees, round 2+ convergence protocol, pitfalls table, flags, prompt templates, resolver rules, and triage guidance.
+See **[SKILL.md](SKILL.md)** for full usage — includes a quick-reference card, invocation workflow (9-step checklist + dot-graph), mode selection and file curation decision trees, round 2+ convergence protocol, pitfalls table, flags, prompt templates, resolver rules, and the normative **conductor protocol** (claim triage + validation duty, per-claim dispositions, iteration stop rules including confabulation detection) with the **conversation-context hand-off** template for `-ConversationFile`.
 
 ## Troubleshooting
 
@@ -235,7 +255,7 @@ Install-Module Pester -MinimumVersion 5.0 -Force -SkipPublisherCheck   # one-tim
 Invoke-Pester -Path tests/                                              # ~100s, no network
 ```
 
-Coverage (260+ tests): `Get-AgyTranscriptResponse` (the highest-risk function), the agy retry loop + non-review detector, the cross-adapter process-tree-kill and shareable-sink invariants, the natural-language resolver, empty-bundle/ANSI regexes, registry integrity, and env-scrub blocks. See `tests/README.md` for the full list and when to add tests.
+Coverage (325 tests): `Get-AgyTranscriptResponse` (the highest-risk function), the agy retry loop + non-review detector, the cross-adapter process-tree-kill and shareable-sink invariants, the natural-language resolver (incl. the with/via clause acceptance table), empty-bundle/ANSI regexes, registry integrity, env-scrub blocks, and out-of-repo staging (incl. the username-absence privacy assertion). See `tests/README.md` for the full list and when to add tests.
 
 ## License
 
