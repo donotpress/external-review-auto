@@ -41,6 +41,7 @@ trigger: /external-review-auto
 | **geminiapi** | `GEMINI_API_KEY` (free at https://aistudio.google.com/apikey) | `gemini-api`, `gemini-api-pro` |
 | **anthropic** | `ANTHROPIC_API_KEY` (https://console.anthropic.com/) | `opus-api`, `sonnet-api`, `haiku-api` |
 | **openaicompat** | per-preset (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, …) | `deepseek-api`, `deepseek-reasoner-api`, `minimax-api`; extensible via `_registry.json` to Groq/Together/OpenRouter/any OpenAI-compatible endpoint |
+| **opencode (HTTP, v1.8)** | `OPENCODE_API_KEY` / `NVIDIA_API_KEY` — **auto-sourced from opencode `auth.json` if unset** | `deepseek-http`, `glm-http`, `minimax-http`, `kimi-http`, `nvidia` — opencode-go models + free NVIDIA NIM over **direct HTTP (no TUI)**. Set `ERA_USE_HTTP_OPENCODE=1` to route the `deepseek`/`minimax` aliases here automatically. |
 
 REST adapters bypass the CLI entirely — no subprocess, no TTY exposure, no console pollution, no transcript-file polling. Use them if you want the strongest hermetic guarantees and/or you have direct API keys. Otherwise CLI adapters are fine and free.
 
@@ -315,6 +316,7 @@ Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 |---|---|---|
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
 | `ERA_DEFAULT_REVIEWER` | `gemini-pro-low` | Reviewer preset for bare `/era` (no `-Reviewer`). Overrides the adaptive fallback order. |
+| `ERA_USE_HTTP_OPENCODE` | (unset) | Set to `1` to route the `deepseek`/`minimax` reviewer aliases over **direct HTTP** (the `*-http` presets) instead of the opencode TUI. Keys auto-source from opencode `auth.json`. Default off. |
 | `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |
 | `ERA_SPEC_GLOB` | `docs/superpowers/specs/*-design.md` | Glob for auto-detecting design spec files (topic slug, auto-detection, suggest command). Change for non-superpowers repos. Example: `'docs/**/*-design.md'` |
 

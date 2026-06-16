@@ -194,6 +194,61 @@
     "supports_streaming": false,
     "notes": "opencode run -m opencode-go/deepseek-v4-pro via opencode-go provider."
   },
+  "deepseek-http": {
+    "backend": "openaicompat",
+    "model_id": "deepseek-v4-pro",
+    "api_base": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "max_tokens": 16384,
+    "pricing": { "input_per_m": 1.74, "output_per_m": 3.48 },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode-go DeepSeek v4 Pro via direct HTTP (OpenAI-compatible). Key from auth.json (opencode-go)."
+  },
+  "glm-http": {
+    "backend": "openaicompat",
+    "model_id": "glm-5.1",
+    "api_base": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "max_tokens": 16384,
+    "pricing": { "input_per_m": 1.4, "output_per_m": 4.4 },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode-go GLM-5.1 via direct HTTP (OpenAI-compatible)."
+  },
+  "minimax-http": {
+    "backend": "openaicompat",
+    "model_id": "minimax-m2.7",
+    "api_base": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "max_tokens": 16384,
+    "pricing": { "input_per_m": 0.3, "output_per_m": 1.2 },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode-go MiniMax M2.7 via direct HTTP (OpenAI-compatible)."
+  },
+  "kimi-http": {
+    "backend": "openaicompat",
+    "model_id": "kimi-k2.7-code",
+    "api_base": "https://opencode.ai/zen/go/v1",
+    "api_key_env": "OPENCODE_API_KEY",
+    "max_tokens": 16384,
+    "pricing": { "input_per_m": 0.95, "output_per_m": 4.0 },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode-go Kimi K2.7 Code via direct HTTP (OpenAI-compatible)."
+  },
+  "nvidia": {
+    "backend": "openaicompat",
+    "model_id": "meta/llama-3.1-70b-instruct",
+    "api_base": "https://integrate.api.nvidia.com/v1",
+    "api_key_env": "NVIDIA_API_KEY",
+    "max_tokens": 8192,
+    "pricing": { "input_per_m": 0.0, "output_per_m": 0.0 },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "NVIDIA NIM free reviewer tier. Key from auth.json (nvidia)."
+  },
   "_agy_model_map": {
     "gemini-3.5-flash": {
       "low": {

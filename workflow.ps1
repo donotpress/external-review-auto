@@ -348,6 +348,32 @@ function Get-ForceMode {
            (-not [Environment]::UserInteractive)
 }
 
+function Resolve-EraAuthJsonKeys {
+    <#
+      For each requested api_key_env that is NOT already set in the process env,
+      source the key from opencode's auth.json (subscription providers only) and
+      set it in the PROCESS env so the existing env-based adapters + availability
+      checks work unchanged. Additive + safe: only fills empties, only known
+      providers, never overwrites an existing env var.
+    #>
+    param(
+        [string[]]$ApiKeyEnvs,
+        [string]$AuthPath = (Join-Path $HOME '.local/share/opencode/auth.json')
+    )
+    $map = @{ 'OPENCODE_API_KEY' = 'opencode-go'; 'MINIMAX_API_KEY' = 'minimax'; 'NVIDIA_API_KEY' = 'nvidia' }
+    if (-not (Test-Path $AuthPath)) { return }
+    $auth = Get-Content $AuthPath -Raw | ConvertFrom-Json
+    foreach ($envName in ($ApiKeyEnvs | Where-Object { $_ } | Select-Object -Unique)) {
+        if ([Environment]::GetEnvironmentVariable($envName)) { continue }
+        $prov = $map[$envName]
+        if (-not $prov) { continue }
+        $entry = $auth.$prov
+        if ($entry -and $entry.type -eq 'api' -and $entry.key) {
+            [Environment]::SetEnvironmentVariable($envName, $entry.key)  # process scope only
+        }
+    }
+}
+
 function Get-ResponseFilenameSuffix {
     [CmdletBinding()]
     param(

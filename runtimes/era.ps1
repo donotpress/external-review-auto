@@ -508,12 +508,30 @@ $registry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach
         # and the default --model settings_value lookup uses both.
         agy_model_family = $_.Value.agy_model_family
         agy_model_tier = $_.Value.agy_model_tier
+        # REST fields (openaicompat/anthropic): without these, dispatch's
+        # $modelInfo = @{} + $Registry[$r] loses the endpoint+key and the adapter
+        # throws "requires ModelInfo.api_base". (era.ps1 passes $registryHash to
+        # Invoke-ReviewerDispatch, not the raw registry.)
+        api_base = $_.Value.api_base
+        api_key_env = $_.Value.api_key_env
+        api_key_header = $_.Value.api_key_header
+        max_tokens = $_.Value.max_tokens
         pricing = @{ input_per_m = $_.Value.pricing.input_per_m; output_per_m = $_.Value.pricing.output_per_m }
         supports_file_read = $_.Value.supports_file_read
         supports_streaming = $_.Value.supports_streaming
         notes = $_.Value.notes
     }
 }
+
+# Opt-in: route the opencode reviewer aliases over direct HTTP instead of the TUI.
+if ($env:ERA_USE_HTTP_OPENCODE) {
+    $httpMap = @{ 'deepseek' = 'deepseek-http'; 'minimax' = 'minimax-http' }
+    $reviewerList = @($reviewerList | ForEach-Object { if ($httpMap.ContainsKey($_)) { $httpMap[$_] } else { $_ } })
+    Write-Host "[era] ERA_USE_HTTP_OPENCODE set -> using HTTP presets for opencode reviewers: $($reviewerList -join ', ')"
+}
+# Fill any opencode-subscription api_key_env (OPENCODE/MINIMAX/NVIDIA) from auth.json
+# when not already in the process env, so the env-based REST adapter + checks work.
+Resolve-EraAuthJsonKeys -ApiKeyEnvs (@($reviewerList | ForEach-Object { $registryHash[$_].api_key_env }))
 
 Test-ReviewerListAgainstRegistry -ReviewerList $reviewerList -Registry $registryHash
 # REST-only backends don't shell out to a CLI -- skip the PATH check for them.

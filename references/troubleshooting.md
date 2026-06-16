@@ -18,6 +18,7 @@
 10. **Auto-detected spec path is wrong for your repo:** The default spec glob `docs/superpowers/specs/*-design.md` only matches the superpowers project layout. Set `$env:ERA_SPEC_GLOB` to your repo's convention (e.g. `'docs/**/*-design.md'` or `'specs/**/*.md'`).
 11. **Default bundle globs don't include your language:** The out-of-box default covers ~40 extensions (`.py`, `.ts`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, etc.) but may still miss niche ones. Set `$env:ERA_DEFAULT_GLOBS` to a comma-separated list (e.g. `'**/*.nim,**/*.zig,**/*.md'`). Pass `-IncludeFiles` explicitly for one-off reviews.
 12. **agy returns a planner preamble instead of a review:** The default prompt templates now include a guard phrase instructing the model not to open files. If you're writing a custom override prompt, open with: *"All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle."* See section "agy returns a ~120-char planner preamble" below.
+13. **HTTP preset (`*-http` / `nvidia`) fails with a key error (v1.8):** these presets read `OPENCODE_API_KEY` / `NVIDIA_API_KEY` from the env, falling back to opencode's `auth.json` (`~/.local/share/opencode/auth.json`, `type:api` entries). If you get a key error, confirm that file has a `type:api` `key` for the matching provider (`opencode-go`/`nvidia`), or set the env var directly. A `401` from `opencode.ai/zen/go` usually means the opencode-go subscription has no balance for that model.
 
 ---
 

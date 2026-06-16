@@ -50,9 +50,12 @@ function Invoke-OpenaicompatReview {
     $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
     $fullContent = "$promptText`n`n--- BUNDLE ($BundlePath) ---`n`n$bundleText"
 
+    # Reasoning models can burn the budget thinking before emitting the answer;
+    # allow per-preset override (default 8192).
+    $maxTokens = if ($ModelInfo.max_tokens) { [int]$ModelInfo.max_tokens } else { 8192 }
     $body = @{
         model       = $modelId
-        max_tokens  = 8192
+        max_tokens  = $maxTokens
         temperature = 0.3
         messages    = @(
             @{ role = 'user'; content = $fullContent }
@@ -94,13 +97,19 @@ function Invoke-OpenaicompatReview {
 
         # Check for truncation
         if ($choice.finish_reason -eq 'length') {
-            $truncationWarning = "Response hit max_tokens=8192; consider raising or tightening the prompt."
+            $truncationWarning = "Response hit max_tokens=$maxTokens; consider raising or tightening the prompt."
             $warnings += $truncationWarning
         } elseif ($choice.finish_reason -and $choice.finish_reason -ne 'stop') {
             $warnings += "Non-stop finish_reason: $($choice.finish_reason)"
         }
 
         $response = $choice.message.content
+        # Reasoning models (e.g. DeepSeek) may leave content empty and put the
+        # text in reasoning_content (or run out of tokens mid-think). Fall back so
+        # the review is never silently blank.
+        if (-not $response -and $choice.message.reasoning_content) {
+            $response = $choice.message.reasoning_content
+        }
         if (-not $response) {
             throw "OpenAI-compat API returned a choice with no content. finish_reason=$($choice.finish_reason)"
         }

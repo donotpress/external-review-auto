@@ -109,6 +109,40 @@ external-review-auto/
 
 ---
 
+## opencode-go over HTTP (v1.8)
+
+opencode-go models are reachable as a plain OpenAI-compatible HTTP API, so the
+`openaicompat` adapter serves them directly — retiring the opencode TUI driver for
+these models (and its watchdog / stall-snapshot / narration-detector machinery).
+
+- **Presets** (`_registry.json`): `deepseek-http`, `glm-http`, `minimax-http`,
+  `kimi-http` → `backend: openaicompat`, `api_base: https://opencode.ai/zen/go/v1`,
+  `api_key_env: OPENCODE_API_KEY`, `max_tokens: 16384`. Plus `nvidia` →
+  `integrate.api.nvidia.com/v1`, `NVIDIA_API_KEY` (free NIM tier).
+- **registryHash carries REST fields.** era.ps1's `$registryHash` builder now copies
+  `api_base`/`api_key_env`/`api_key_header`/`max_tokens` (it previously dropped them),
+  because era.ps1 passes `$registryHash` — not the raw registry — to
+  `Invoke-ReviewerDispatch`. Without this, openaicompat presets dispatched via era.ps1
+  throw "requires ModelInfo.api_base".
+- **Key resolution** (`workflow.ps1::Resolve-EraAuthJsonKeys`): for any requested
+  `api_key_env` not already in the process env, the key is sourced from opencode's
+  `auth.json` (`OPENCODE_API_KEY`→`opencode-go`, `MINIMAX_API_KEY`→`minimax`,
+  `NVIDIA_API_KEY`→`nvidia`; `type:api` entries only). Never overwrites an existing env
+  var; set at process scope, visible to the ThreadJob adapters (same process).
+- **Reasoning models** (`openaicompat.ps1`): falls back to `message.reasoning_content`
+  when `message.content` is empty, and uses a per-preset `max_tokens` (default 8192),
+  so reasoning models (deepseek) don't return blank reviews.
+- **Opt-in flag:** `ERA_USE_HTTP_OPENCODE=1` remaps the `deepseek`/`minimax` reviewer
+  aliases to their `*-http` presets at resolve time (before availability checks).
+  Default off; existing behavior byte-identical.
+- **Auth headers (verified 2026-06-15):** the opencode OpenAI endpoint (`/zen/go/v1`)
+  uses `Authorization: Bearer`; the Anthropic endpoint (`/zen/go/v1/messages`, used by
+  `qwen3.7-max`) uses `x-api-key` (Bearer → 401). Each adapter's native default is
+  correct. qwen (Anthropic-style) is DEFERRED to a future pass (would route via
+  `anthropic.ps1` with an `api_base` override).
+
+---
+
 ## Parallel dispatches
 
 Multiple `era.ps1` processes against the **same topic slug** can now run concurrently. Each process gets its own round number via atomic round-number reservation:

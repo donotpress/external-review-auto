@@ -222,6 +222,23 @@ All CLI adapters launch their binary in a **private hidden console** (`ProcessSt
 
 REST adapters are simpler (~150 LOC each vs ~300 for CLI adapters), have no console/TTY exposure, and return real token counts + costs in the metadata. They coexist with CLI adapters — use whichever fits your auth setup.
 
+### opencode over HTTP + NVIDIA NIM (v1.8)
+
+The opencode-go models are plain HTTP APIs, so they can be reached **directly** through the `openaicompat` adapter — no opencode **TUI**, and none of the headless-driver watchdog / console-pollution / narration-capture failure class. Same opencode-go subscription, same cost.
+
+| Preset | Model | Endpoint | Key |
+|---|---|---|---|
+| `deepseek-http` | deepseek-v4-pro | `opencode.ai/zen/go/v1` | `OPENCODE_API_KEY` |
+| `glm-http` | glm-5.1 | `opencode.ai/zen/go/v1` | `OPENCODE_API_KEY` |
+| `minimax-http` | minimax-m2.7 | `opencode.ai/zen/go/v1` | `OPENCODE_API_KEY` |
+| `kimi-http` | kimi-k2.7-code | `opencode.ai/zen/go/v1` | `OPENCODE_API_KEY` |
+| `nvidia` | llama-3.1-70b-instruct (free NIM tier) | NVIDIA NIM | `NVIDIA_API_KEY` |
+
+- **Keys auto-resolve from opencode's `auth.json`.** If `OPENCODE_API_KEY` / `MINIMAX_API_KEY` / `NVIDIA_API_KEY` isn't in your environment, era sources it from `~/.local/share/opencode/auth.json` (subscription `type:api` entries) at dispatch — no manual key setup if you already use opencode.
+- **Opt-in flag:** set `ERA_USE_HTTP_OPENCODE=1` to transparently route the `deepseek` / `minimax` reviewer aliases over HTTP instead of the TUI. Default off — existing behavior unchanged.
+- **Reasoning models** (deepseek) are handled: the adapter falls back to `reasoning_content` and honors a per-preset `max_tokens`, so reviews are never silently blank.
+- Not reachable this way: **Gemini 3.1 Pro** (Antigravity-only → keep `agy`) and **Claude** (no HTTP route without an Anthropic key / Zen balance → keep the `claude` CLI).
+
 ## Architecture
 
 ```
