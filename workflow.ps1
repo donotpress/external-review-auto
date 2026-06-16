@@ -467,6 +467,72 @@ function Test-EraBackendAvailable {
     }
 }
 
+function Get-EraReviewerList {
+    <# Pure: rows of selectable reviewer presets with live readiness. Resolvers
+       injectable for tests (mirrors Get-EraDoctorReport). #>
+    [CmdletBinding()]
+    param(
+        $Registry,
+        [string]$Default,
+        [scriptblock]$CommandExists = { param($n) [bool](Get-Command $n -ErrorAction SilentlyContinue) },
+        [scriptblock]$EnvValue      = { param($n) [Environment]::GetEnvironmentVariable($n) }
+    )
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($p in $Registry.PSObject.Properties) {
+        if ($p.Name -like '_*') { continue }
+        $b = $p.Value.backend
+        if (-not $b) { continue }
+        $ready = Test-EraBackendAvailable -Backend $b -ApiKeyEnv $p.Value.api_key_env `
+            -CommandExists $CommandExists -EnvValue $EnvValue
+        $req = switch ($b) {
+            'agy'          { 'agy CLI' }
+            'claude'       { 'claude CLI' }
+            'opencode'     { 'opencode CLI' }
+            'geminiapi'    { 'GEMINI_API_KEY' }
+            'anthropic'    { 'ANTHROPIC_API_KEY' }
+            'openaicompat' { "$($p.Value.api_key_env)" }
+            default        { '' }
+        }
+        $rows.Add([pscustomobject]@{
+            preset = $p.Name; backend = $b; ready = [bool]$ready
+            model = "$($p.Value.model_id)"; requirement = $req
+            is_default = ($p.Name -eq $Default)
+        })
+    }
+    return $rows.ToArray()
+}
+
+function Format-EraReviewerList {
+    <# Render Get-EraReviewerList rows grouped by backend. Pure. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object[]]$Rows, [string]$Default)
+    $order = @('agy','claude','opencode','openaicompat','geminiapi','anthropic')
+    $label = @{ agy='agy (Gemini, subscription)'; claude='claude CLI (subscription)';
+        opencode='opencode (TUI)'; openaicompat='REST / opencode HTTP (API key or auth.json)';
+        geminiapi='Gemini REST (API key)'; anthropic='Anthropic REST (API key)' }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('Reviewers ([x] = ready now)'); $lines.Add('')
+    $allBackends = @($order) + @($Rows | Select-Object -ExpandProperty backend) | Select-Object -Unique
+    foreach ($b in $allBackends) {
+        $group = @($Rows | Where-Object { $_.backend -eq $b })
+        if (-not $group) { continue }
+        $head = $label[$b]; if (-not $head) { $head = $b }
+        $lines.Add($head)
+        foreach ($r in $group) {
+            $mark = if ($r.ready) { '[x]' } else { '[ ]' }
+            $line = "  $mark $($r.preset)"
+            if ($r.model)      { $line += "  ($($r.model))" }
+            if ($r.is_default) { $line += '  [default]' }
+            if (-not $r.ready -and $r.requirement) { $line += "  -> needs $($r.requirement)" }
+            $lines.Add($line)
+        }
+        $lines.Add('')
+    }
+    $defLabel = if ($Default) { $Default } else { '(none ready)' }
+    $lines.Add("Default: $defLabel   .   change: /era set default <name>")
+    return ($lines -join "`n")
+}
+
 function Resolve-DefaultReviewer {
     <#
     .SYNOPSIS

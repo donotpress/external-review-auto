@@ -47,7 +47,7 @@ param(
     [string]$AgyModel,
     [string]$Model,
     [string]$Provider,
-    [ValidateSet('', 'update-models', 'doctor', 'set-default', 'review-this', 'suggest')][string]$Command = '',
+    [ValidateSet('', 'update-models', 'doctor', 'list', 'set-default', 'review-this', 'suggest')][string]$Command = '',
     # -Doctor: preflight only. Prints a consolidated prereq/backend status report
     # (pwsh, ThreadJob, repomix, each backend CLI/API key) and exits without
     # dispatching a review. Never installs anything — it reports the fix commands.
@@ -187,6 +187,19 @@ if ($Command -eq 'update-models') {
 if ($Command -eq 'doctor') {
     $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     Write-Host (Format-EraDoctorReport -Checks (Get-EraDoctorReport -Registry $rawRegistry))
+    return
+}
+
+# --- list command: show selectable reviewers + readiness (/era models) -------
+if ($Command -eq 'list') {
+    $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+    $listEnvs = @($rawRegistry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } |
+        ForEach-Object { $_.Value.api_key_env })
+    Resolve-EraAuthJsonKeys -ApiKeyEnvs $listEnvs
+    $listDefault = if ($env:ERA_DEFAULT_REVIEWER) { $env:ERA_DEFAULT_REVIEWER }
+                   else { Resolve-DefaultReviewer -Registry $rawRegistry }
+    $listRows = Get-EraReviewerList -Registry $rawRegistry -Default $listDefault
+    Write-Host (Format-EraReviewerList -Rows $listRows -Default $listDefault)
     return
 }
 

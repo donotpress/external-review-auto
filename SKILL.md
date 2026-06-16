@@ -167,6 +167,21 @@ If the user already passed typed flags (`--reviewer X --model Y`), forward them 
 resolver is a friendly fallback, not a replacement. The full human-readable patterns table lives
 in `era/SKILL.md`; `resolve.ps1` is the executable, single-source-of-truth version of it.
 
+### Command routing (NOT reviewer selection)
+
+Some `/era` inputs are management commands, not review dispatches. Route these to a
+`-Command` instead of bundling/dispatching:
+
+- **`/era models`** (also "list reviewers", "what models can I use", "show backends") →
+  run `pwsh <skill-root>/runtimes/era.ps1 -Command list`. Read-only: it prints every
+  preset grouped by backend with ✓/✗ readiness and the current default. **Do NOT
+  dispatch a review.**
+- **`/era set default <spec>`** (also "make X my default", "default to X") → resolve
+  `<spec>` to **exactly one** preset (same matching rules as `-Reviewer`, but never plural
+  — `-Command set-default` hard-errors on more than one preset), then run
+  `era.ps1 -Command set-default -Reviewer <preset>`. Example:
+  `/era set default Gemini 3.1 Pro` → `era.ps1 -Command set-default -Reviewer gemini-pro-high`.
+
 ## Handling the response — triage before incorporating
 
 A review response is a list of *claims*. Some claims are facts (the code does X, this method exists, this error is raised). Some are reasoning (this would cause Y under Z conditions, A is preferred over B). **Auto-incorporating every claim without verification is the failure mode this skill is designed to AVOID.** A reviewer can be wrong, out of date, or hallucinating an API that doesn't exist.

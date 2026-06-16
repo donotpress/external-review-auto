@@ -25,7 +25,7 @@ Describe 'PR4: -AutoDetect flag' -Tag Unit {
         try {
             # Remove git from PATH for this test by running in a child process
             # with a cleared PATH. On Windows, wrap with cmd to strip PATH.
-            $output = & pwsh -NonInteractive -Command @"
+            $output = & pwsh -NoProfile -NonInteractive -Command @"
 `$ErrorActionPreference = 'Stop'
 `$env:PATH = 'C:\Windows\System32'  # git not here
 try {
@@ -46,7 +46,7 @@ try {
         New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
         # Do NOT create a .git directory — this is a non-repo directory
         try {
-            $output = & pwsh -NonInteractive -Command @"
+            $output = & pwsh -NoProfile -NonInteractive -Command @"
 `$ErrorActionPreference = 'Stop'
 Set-Location '$($tmpDir -replace "'", "''")'
 try {
