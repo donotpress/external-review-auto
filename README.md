@@ -207,6 +207,8 @@ All CLI adapters launch their binary in a **private hidden console** (`ProcessSt
 
 - **Honest metadata** — every run records `content_ok`, `capture_strategy`, `retry_count`, and per-attempt cost. A non-review (an agentic tool-narration or "I can't read the bundle" refusal that still exits 0) is detected and recorded as a failure, never a silent success.
 - **Self-healing (agy)** — a stall/timeout, an empty capture, or a narration capture triggers one in-adapter retry within the same budget.
+- **agy auto-fallback (v1.10)** — if agy still fails after that retry, era re-dispatches to a non-agy reviewer (`$env:ERA_AGY_FALLBACK`, default auto / `off` to disable) so the round still produces a review instead of an empty result.
+- **Cross-shell paths (v1.10)** — `-IncludeFiles /c/Users/…` (Git-Bash/MSYS) is normalized to `C:/Users/…` on Windows; running outside a git repo without git no longer raw-errors; known `-IncludeFiles`/empty-bundle mistakes print a clean `[era] ERROR:` line (exit 1) instead of a PowerShell stack.
 - **Concurrency-safe** — agy uses per-process `--model` + Run-ID capture; opencode is stateless; multiple dispatches against one topic reserve distinct round numbers atomically.
 - **Adaptive default** — a bare `/era` (no `-Reviewer`) live-detects which backends you have (CLI on PATH / API key set) and picks the first usable one by preference instead of erroring; override with `$env:ERA_DEFAULT_REVIEWER`. `era.ps1 -Doctor` prints the full status.
 - **Line-numbered bundles** — repomix emits true per-file line numbers and every prompt template instructs `file:line` citation from them, sharply reducing fabricated line citations (verify per the SKILL.md conductor protocol regardless).

@@ -332,6 +332,7 @@ Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
 | `ERA_DEFAULT_REVIEWER` | `gemini-pro-low` | Reviewer preset for bare `/era` (no `-Reviewer`). Overrides the adaptive fallback order. |
 | `ERA_USE_HTTP_OPENCODE` | (unset) | Set to `1` to route the `deepseek`/`minimax` reviewer aliases over **direct HTTP** (the `*-http` presets) instead of the opencode TUI. Keys auto-source from opencode `auth.json`. Default off. |
+| `ERA_AGY_FALLBACK` | (auto) | v1.10: when an **agy** reviewer fails to capture even after its retry, era auto-falls-back to a non-agy reviewer so the round still yields a review. Set to a preset (e.g. `gemini-api`) to pin the fallback, or `off`/`0` to disable. Triggers only on an actual agy failure — healthy runs are unaffected. |
 | `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |
 | `ERA_SPEC_GLOB` | `docs/superpowers/specs/*-design.md` | Glob for auto-detecting design spec files (topic slug, auto-detection, suggest command). Change for non-superpowers repos. Example: `'docs/**/*-design.md'` |
 

@@ -143,6 +143,35 @@ these models (and its watchdog / stall-snapshot / narration-detector machinery).
 
 ---
 
+## Robustness hardening (v1.10)
+
+Four fixes from failed-run analysis:
+
+- **agy auto-fallback** (`workflow.ps1::Resolve-EraAgyFallback` + era.ps1 post-dispatch
+  wiring): when an agy reviewer returns `ExitCode != 0` (capture failure after its
+  in-adapter retry), era re-dispatches that work to a non-agy fallback via a second
+  `Invoke-ReviewerDispatch` and adds it under its OWN preset key (correct
+  backend/pricing in metadata); the failed agy entry is kept for telemetry. The
+  fallback is appended to `$approvedList` so `Copy-PrimaryResponseAlias` (which already
+  promotes only `ExitCode==0` reviewers) makes it the primary. Fallback target =
+  `$env:ERA_AGY_FALLBACK` if valid/available/non-agy, else first available non-agy by
+  preference; `off`/`0` disables. Triggers only on real agy failure.
+- **`-SuffixReviewerList`** on `Invoke-ReviewerDispatch`: decouples response-filename
+  suffix calc from the dispatch list, so the fallback re-dispatch passes the COMBINED
+  list and doesn't clobber `round-N-response.md` in a multi-reviewer run.
+- **git guard** (era.ps1 `$repoRoot`): only calls `git rev-parse` when `Get-Command git`
+  succeeds; else falls back to cwd. Avoids the raw "term 'git' is not recognized" crash
+  outside a git repo without git. (The `if (-not $repoRoot)` cwd fallback is retained.)
+- **MSYS path normalization** (`workflow.ps1::ConvertTo-EraNativePath`, Windows-guarded):
+  rewrites a leading `/c/…` to `C:/…` in `-IncludeFiles` so bash-on-Windows callers don't
+  trip the out-of-repo file check. No-op on Linux (where `/c/…` is a real path).
+- **Clean preflight errors** (`era.ps1::Stop-EraWithError`): known user mistakes (bad
+  `-IncludeFiles`, empty bundle) print a single `[era] ERROR: …` line + exit 1 instead
+  of a raw exception stack. (AutoDetect throws are unchanged — tests capture them via
+  the error stream.)
+
+---
+
 ## Parallel dispatches
 
 Multiple `era.ps1` processes against the **same topic slug** can now run concurrently. Each process gets its own round number via atomic round-number reservation:

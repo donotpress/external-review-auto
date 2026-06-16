@@ -105,7 +105,21 @@ $skillRoot = Split-Path -Parent $PSScriptRoot
 # contract test can call Resolve-ModelFromHint directly without forking pwsh).
 . (Join-Path $PSScriptRoot 'resolve-model.ps1')
 
+# Normalize Git-Bash/MSYS drive paths (/c/Users/x -> C:/Users/x) in -IncludeFiles so
+# callers shelling from bash on Windows don't trip the out-of-repo file check.
+# (After workflow.ps1 is dot-sourced so ConvertTo-EraNativePath is available.)
+if ($IncludeFiles) { $IncludeFiles = @($IncludeFiles | ForEach-Object { ConvertTo-EraNativePath $_ }) }
+
 if ($Force) { $env:ERA_FORCE = '1' }
+
+function Stop-EraWithError {
+    # Clean single-line preflight error for known user mistakes (bad -IncludeFiles,
+    # empty bundle) — no raw PowerShell exception/stack. era.ps1 always runs as a
+    # script (never dot-sourced); tests invoke it out-of-process, so exit is safe.
+    param([string]$Message)
+    Write-Host "[era] ERROR: $Message"
+    exit 1
+}
 
 # --- Doctor preflight: report prereq + backend status, then exit (no dispatch) ---
 if ($Doctor) {
@@ -119,7 +133,13 @@ if ($Doctor) {
     return
 }
 
-$repoRoot = if (Test-Path ".git") { (Get-Location).Path } else { $(& git rev-parse --show-toplevel 2>$null) }
+# Guard the git call: under $ErrorActionPreference='Stop', `& git` throws a raw
+# "term 'git' is not recognized" when git isn't on PATH (no .git in cwd). Only invoke
+# git when it exists; otherwise fall back to cwd (line below). repomix still bundles
+# explicit -IncludeFiles from a non-git directory.
+$repoRoot = if (Test-Path ".git") { (Get-Location).Path }
+            elseif (Get-Command git -ErrorAction SilentlyContinue) { $(& git rev-parse --show-toplevel 2>$null) }
+            else { $null }
 if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
 
 function Get-SpecGlob {
@@ -1026,7 +1046,7 @@ Be terse. If a section is empty, write "(none)".
                 return ($full.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
             }
             if (-not (Test-Path $full -PathType Leaf)) {
-                throw "ERROR: out-of-repo -IncludeFiles entry must be an existing FILE (dirs/globs unsupported): $entry"
+                Stop-EraWithError "out-of-repo -IncludeFiles entry must be an existing FILE (dirs/globs unsupported): $entry"
             }
             # Privacy: bundles are sent to external reviewer APIs - never
             # embed the user's home path (Users/<name>). Home-rooted files
@@ -1057,7 +1077,7 @@ Be terse. If a section is empty, write "(none)".
         try {
             $missing = @($IncludeFiles | Where-Object { -not (Test-Path $_) })
             if ($missing) {
-                throw "ERROR: -IncludeFiles paths not found relative to repo root ($repoRoot): $($missing -join ', ')"
+                Stop-EraWithError "-IncludeFiles paths not found relative to repo root ($repoRoot): $($missing -join ', ')"
             }
             # Path traversal guard: every resolved path must stay inside repoRoot.
             # Skip paths containing wildcards (*, ?, [, ]) — glob patterns match
@@ -1071,7 +1091,7 @@ Be terse. If a section is empty, write "(none)".
                 -not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
             })
             if ($traversal) {
-                throw "ERROR: -IncludeFiles paths escape the repo root (path traversal blocked): $($traversal -join ', ')"
+                Stop-EraWithError "-IncludeFiles paths escape the repo root (path traversal blocked): $($traversal -join ', ')"
             }
         } finally {
             Pop-Location
@@ -1130,7 +1150,7 @@ Be terse. If a section is empty, write "(none)".
         } else {
             "`n`nNo -IncludeFiles was passed, so this is unusual. Check that the repo root ($repoRoot) actually contains files matching repomix's default globs, or pass -IncludeFiles explicitly."
         }
-        throw "Bundle is empty -- repomix matched 0 files.$includeHint"
+        Stop-EraWithError "Bundle is empty -- repomix matched 0 files.$includeHint"
     }
 
     $bundleBytes = if (Test-Path $bundlePath) { (Get-Item $bundlePath).Length } else { 0 }
@@ -1171,6 +1191,37 @@ Be terse. If a section is empty, write "(none)".
         -AgyModelMap $agyModelMap `
         -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
         -BundleTokens $tokenCount
+
+    # --- Item #1 (v1.10): agy auto-fallback on capture failure ---
+    # When an agy reviewer fails to produce a usable review (ExitCode != 0) even after
+    # its in-adapter retry, re-dispatch to a non-agy fallback so a flaky default
+    # reviewer doesn't yield an empty round. Triggers ONLY on an actual agy failure
+    # (healthy runs are byte-identical). Disable with ERA_AGY_FALLBACK=off.
+    if ($env:ERA_AGY_FALLBACK -ne 'off' -and $env:ERA_AGY_FALLBACK -ne '0') {
+        $failedAgy = @($approvedList | Where-Object {
+            $registryHash[$_].backend -eq 'agy' -and $results[$_] -and $results[$_].ExitCode -ne 0
+        })
+        if ($failedAgy.Count -gt 0) {
+            # Hydrate subscription keys so opencode/nvidia fallbacks register as available.
+            Resolve-EraAuthJsonKeys -ApiKeyEnvs @($registryHash.Keys | ForEach-Object { $registryHash[$_].api_key_env })
+            $fallbackPreset = Resolve-EraAgyFallback -Registry $registryHash -Override $env:ERA_AGY_FALLBACK -Exclude $approvedList
+            if ($fallbackPreset) {
+                Write-Host "[era] agy capture failed ($($failedAgy -join ', ')) -> falling back to '$fallbackPreset'."
+                $fbResults = Invoke-ReviewerDispatch -ReviewerList @($fallbackPreset) `
+                    -SuffixReviewerList @($approvedList + $fallbackPreset) `
+                    -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
+                    -ReviewDir $reviewDir -Round $round -AgyModelMap $agyModelMap `
+                    -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
+                    -BundleTokens $tokenCount
+                # Add the fallback under its OWN preset key (correct backend/pricing in
+                # metadata); keep the failed agy entry for honest failure telemetry.
+                foreach ($k in $fbResults.Keys) { $results[$k] = $fbResults[$k] }
+                $approvedList = @($approvedList + $fallbackPreset)
+            } else {
+                Write-Host "[era] agy capture failed and no non-agy fallback is available; leaving the result as-is."
+            }
+        }
+    }
 
     # Unified response alias (Fix 4 / R3-Gemini-C4): copy the FIRST SUCCESSFUL
     # reviewer's response to round-N-response.md UNCONDITIONALLY. The old

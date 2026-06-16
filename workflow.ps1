@@ -348,6 +348,18 @@ function Get-ForceMode {
            (-not [Environment]::UserInteractive)
 }
 
+function ConvertTo-EraNativePath {
+    <# Rewrite a leading Git-Bash/MSYS drive prefix (/c/foo) to native Windows
+       (C:/foo) so -IncludeFiles works when invoked from bash on Windows. Pure,
+       idempotent; non-MSYS and relative paths pass through unchanged. #>
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    # Windows only — on Linux, /c/lib/x is a legitimate absolute path, not an MSYS drive.
+    if (-not ($IsWindows -or $env:OS -eq 'Windows_NT')) { return $Path }
+    if ($Path -match '^/([A-Za-z])/(.*)$') { return "$($Matches[1].ToUpper()):/$($Matches[2])" }
+    return $Path
+}
+
 function Resolve-EraAuthJsonKeys {
     <#
       For each requested api_key_env that is NOT already set in the process env,
@@ -531,6 +543,39 @@ function Format-EraReviewerList {
     $defLabel = if ($Default) { $Default } else { '(none ready)' }
     $lines.Add("Default: $defLabel   .   change: /era set default <name>")
     return ($lines -join "`n")
+}
+
+function Resolve-EraAgyFallback {
+    <# Pick a non-agy fallback reviewer when an agy capture fails. Honors an explicit
+       $env:ERA_AGY_FALLBACK preset if it is valid, non-agy, and available; otherwise
+       the first available non-agy preset by preference. Excludes presets already in
+       the run and ALL agy-backed presets. Returns $null if none available. Resolvers
+       injectable for tests. #>
+    [CmdletBinding()]
+    param(
+        $Registry,
+        [string]$Override,
+        [string[]]$Exclude = @(),
+        [string[]]$Preference = @('gemini-api','deepseek-http','sonnet','haiku','minimax-http','nvidia','gemini-api-pro'),
+        [scriptblock]$CommandExists = { param($n) [bool](Get-Command $n -ErrorAction SilentlyContinue) },
+        [scriptblock]$EnvValue      = { param($n) [Environment]::GetEnvironmentVariable($n) }
+    )
+    $isUsable = {
+        param($p)
+        $e = $Registry[$p]
+        if (-not $e -or -not $e.backend) { return $false }
+        if ($e.backend -eq 'agy') { return $false }
+        if ($Exclude -contains $p) { return $false }
+        return [bool](Test-EraBackendAvailable -Backend $e.backend -ApiKeyEnv $e.api_key_env `
+            -CommandExists $CommandExists -EnvValue $EnvValue)
+    }
+    if ($Override -and $Override -ne 'off' -and $Override -ne '0' -and (& $isUsable $Override)) {
+        return $Override
+    }
+    foreach ($p in $Preference) {
+        if (& $isUsable $p) { return $p }
+    }
+    return $null
 }
 
 function Resolve-DefaultReviewer {
@@ -720,6 +765,11 @@ function Invoke-ReviewerDispatch {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$ReviewerList,
+        # Reviewer set used ONLY for response-filename suffix calculation (multi vs
+        # single -> round-N-<preset>-response.md vs round-N-response.md). Defaults to
+        # $ReviewerList; the agy-fallback re-dispatch passes the COMBINED list so the
+        # fallback's file doesn't clobber round-N-response.md in a multi-reviewer run.
+        [string[]]$SuffixReviewerList,
         [Parameter(Mandatory)][hashtable]$Registry,
         [Parameter(Mandatory)][string]$BundlePath,
         [Parameter(Mandatory)][string]$PromptPath,
@@ -774,7 +824,8 @@ function Invoke-ReviewerDispatch {
         if ($ModelOverrides.ContainsKey($r)) {
             $modelInfo.model_id = $ModelOverrides[$r]
         }
-        $suffix = Get-ResponseFilenameSuffix -ReviewerList $ReviewerList -Preset $r
+        $suffixList = if ($SuffixReviewerList) { $SuffixReviewerList } else { $ReviewerList }
+        $suffix = Get-ResponseFilenameSuffix -ReviewerList $suffixList -Preset $r
         $respPath = Join-Path $ReviewDir "round-$Round$suffix-response.md"
         $adapterPath = Join-Path $skillRoot "backends/$($modelInfo.backend).ps1"
         $fnName = "Invoke-$((Get-Culture).TextInfo.ToTitleCase($modelInfo.backend))Review"
