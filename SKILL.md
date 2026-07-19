@@ -84,6 +84,7 @@ This skill follows a **single-entry-point** architecture. When the slash command
 ## Invocation Workflow (follow this exactly)
 
 0. **Locate skill root** — check in order: `$env:ERA_SKILL_ROOT`, `$HOME/.claude/skills/external-review-auto/`, `$HOME/.config/opencode/skills/external-review-auto/`. All subsequent paths (`resolve.ps1`, `era.ps1`) are relative to this root. The `/era` shim is a pointer — never call scripts from the shim directory.
+   - **WSL host dispatching Windows `pwsh.exe`:** when the skill root resolves to a WSL path (`/home/…` or a symlink into `/mnt/<drive>/…`), pass it to `pwsh.exe` as a **native Windows path** (`wslpath -w "$root"` → e.g. `C:\Users\…\external-review-auto\runtimes\era.ps1`). Do **not** use a `\\wsl.localhost\…` UNC path — if the skill dir is a symlink to the Windows drive it round-trips (Windows → 9P → symlink → DrvFs → back to the drive), which is slow and fragile. The Windows-native path is direct.
 1. **Resolve input** — if the user provided typed flags (`-Reviewer X -Model Y`), forward verbatim; otherwise call `<skill-root>/runtimes/resolve.ps1` with whatever the user typed (handles slugs, URLs, SIDs, model names, prose)
 2. **Select mode** — see Mode Selection below
 3. **Curate files** — see File Curation below

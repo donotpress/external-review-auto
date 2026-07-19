@@ -1104,7 +1104,7 @@ Be terse. If a section is empty, write "(none)".
     if ($slugWarning) { Write-Host $slugWarning }
 
     Write-Host "Running repomix..."
-    $repomixTimeoutSec = 120
+    $repomixTimeoutSec = 300
     Test-ThreadJobAvailable
     $repomixJob = Start-ThreadJob -Name repomix -ScriptBlock { param($c, $r) Push-Location $r; $o = repomix -c $c 2>&1; $ec = $LASTEXITCODE; Pop-Location; @{ output = $o; exitCode = $ec } } -ArgumentList $configPath, $repoRoot
     $completed = $repomixJob | Wait-Job -Timeout $repomixTimeoutSec
