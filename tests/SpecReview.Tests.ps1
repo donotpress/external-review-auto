@@ -79,8 +79,8 @@ try {
     }
 }
 
-Describe 'PR-C Fix 5: default reviewer is Gemini 3.1 Pro (Low)' -Tag Unit {
-    It 'bare /era (no -Reviewer) defaults to gemini-pro-low' {
+Describe 'v1.12: default reviewer is the 3-model panel' -Tag Unit {
+    It 'bare /era (no -Reviewer) defaults to the gemini,opus,deepseek-flash panel' {
         # Assert the param default directly (no need to shell era.ps1).
         $cmd = Get-Command $script:EraPath
         $default = $cmd.Parameters['Reviewer'].Attributes |
@@ -93,10 +93,16 @@ Describe 'PR-C Fix 5: default reviewer is Gemini 3.1 Pro (Low)' -Tag Unit {
             Where-Object { $_.Name.VariablePath.UserPath -eq 'Reviewer' }
         $reviewerParam | Should -Not -BeNullOrEmpty
         $defaultText = $reviewerParam.DefaultValue.Extent.Text
-        $defaultText | Should -Match 'gemini-pro-low' `
-            -Because 'Fix 5: bare /era must resolve to Gemini 3.1 Pro (Low)'
-        $defaultText | Should -Not -Match "@\('gemini'\)" `
-            -Because 'the old plain-gemini (Flash) default must be gone'
+        # v1.12: the param default is the PANEL. Note this literal is only a
+        # parse-time placeholder — era.ps1 re-resolves from config/defaults.json
+        # via the shared helper — but it must still name the panel so the two
+        # never disagree if the config file is missing.
+        foreach ($member in @('gemini', 'opus', 'deepseek-flash')) {
+            $defaultText | Should -Match ([regex]::Escape($member)) `
+                -Because "bare /era must dispatch the $member reviewer"
+        }
+        $defaultText | Should -Not -Match 'gemini-pro-low' `
+            -Because 'the previous single-reviewer default must be gone'
     }
 
     It 'gemini-pro-low is a registered agy preset resolving to Gemini 3.1 Pro (Low)' {
@@ -112,10 +118,13 @@ Describe 'PR-C Fix 5: default reviewer is Gemini 3.1 Pro (Low)' -Tag Unit {
             Should -Be 'Gemini 3.1 Pro (Low)'
     }
 
-    It 'explicit -Reviewer gemini still resolves to Flash via the registry' {
+    It 'explicit -Reviewer gemini resolves to Gemini 3.6 Flash via the registry' {
         $registry = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/_registry.json') |
             ConvertFrom-Json
-        $registry.'gemini'.agy_model_family | Should -Be 'gemini-3.5-flash'
+        # v1.12 moved the Flash slot 3.5 -> 3.6. The previous model is still
+        # reachable as `gemini-flash-35` so a regression can be A/B'd.
+        $registry.'gemini'.agy_model_family | Should -Be 'gemini-3.6-flash'
+        $registry.'gemini-flash-35'.agy_model_family | Should -Be 'gemini-3.5-flash'
     }
 }
 

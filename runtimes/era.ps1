@@ -36,14 +36,33 @@ param(
     # cleanly via PowerShell's native array coercion. Quoted single-string form
     # `-Reviewer 'gemini,deepseek'` still works because of the comma-split below.
     #
-    # Default = 'gemini-pro-low' (Gemini 3.1 Pro (Low) via agy) — Fix 5. The old
-    # bare-/era default 'gemini' (Gemini 3.5 Flash) was the LEAST reliable preset
-    # (67% ok over 57 runs); Pro (Low) sits in the 94% reliability class with no
-    # REST/CLI fallback. An explicit `-Reviewer gemini` still resolves to Flash
-    # via the registry, unchanged. COST NOTE (R4-Opus-I2): Pro (Low) input/output
-    # pricing ($1.5/$5.0 per M) is ~5x Flash input ($0.3/M) — bare /era is more
-    # expensive than before, but far more reliable. Per-reviewer cap stays $2.
-    [string[]]$Reviewer = @('gemini-pro-low'),
+    # Default = a THREE-reviewer panel across three independent backends
+    # (2026-08-02): Gemini 3.6 Flash via agy, Claude Opus 4.8 via the claude CLI,
+    # DeepSeek V4 Flash via opencode. Cross-vendor by design — round 11 had
+    # Gemini 3.1 Pro (High) review the wrong subject entirely (it followed the
+    # topic slug instead of the round context) while Flash found a real shipped
+    # regression, so a single reviewer is a single point of failure regardless of
+    # which one you pick.
+    #
+    # Supersedes the single 'gemini-pro-low' default from Fix 5. That note said
+    # bare 'gemini' (then 3.5 Flash) was the LEAST reliable preset — 67% ok over
+    # 57 runs — versus Pro (Low) at ~94%. Two things change the calculus: the
+    # Flash slot is now 3.6, and with three reviewers one flaky member degrades
+    # the panel instead of losing the round.
+    #
+    # COST: roughly $0.3/$1.2 (Flash) + $15/$75 (Opus) + $0.28/$0.42 (DeepSeek)
+    # per M in/out. Opus dominates — a bare /era is now materially more expensive
+    # than the old single-Flash default. Per-reviewer cap stays $2. Drop to one
+    # with an explicit -Reviewer, e.g. `-Reviewer gemini`.
+    #
+    # Opus runs on the SUBSCRIPTION claude CLI, not opus-api: ANTHROPIC_API_KEY
+    # is not set on this box, so the -api presets cannot run at all.
+    #
+    # This literal is only a parse-time placeholder — a param default cannot call
+    # the shared helper. It is REPLACED below with Get-EraDefaultReviewer once
+    # $skillRoot exists, so config/defaults.json stays the single source of truth
+    # and this list can never silently disagree with resolve.ps1.
+    [string[]]$Reviewer = @('gemini', 'opus', 'deepseek-flash'),
     [string]$AgyModel,
     [string]$Model,
     [string]$Provider,
@@ -104,6 +123,10 @@ $skillRoot = Split-Path -Parent $PSScriptRoot
 # Layer-2 model-hint resolver (extracted from this script in PR-D / D.0 so the
 # contract test can call Resolve-ModelFromHint directly without forking pwsh).
 . (Join-Path $PSScriptRoot 'resolve-model.ps1')
+# Shared default-reviewer resolution — the SAME helper resolve.ps1 uses, so the
+# two layers cannot drift apart (they previously carried separate defaults with
+# different parsing). See runtimes/_era-defaults.ps1.
+. (Join-Path $PSScriptRoot '_era-defaults.ps1')
 
 # Normalize Git-Bash/MSYS drive paths (/c/Users/x -> C:/Users/x) in -IncludeFiles so
 # callers shelling from bash on Windows don't trip the out-of-repo file check.
@@ -216,8 +239,13 @@ if ($Command -eq 'list') {
     $listEnvs = @($rawRegistry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } |
         ForEach-Object { $_.Value.api_key_env })
     Resolve-EraAuthJsonKeys -ApiKeyEnvs $listEnvs
-    $listDefault = if ($env:ERA_DEFAULT_REVIEWER) { $env:ERA_DEFAULT_REVIEWER }
-                   else { Resolve-DefaultReviewer -Registry $rawRegistry }
+    # Report what a bare /era will ACTUALLY run. `$Reviewer`'s own default is the
+    # panel, and it wins unless ERA_DEFAULT_REVIEWER overrides it — so reading
+    # only the env var (or only Resolve-DefaultReviewer) printed a single preset
+    # while the real default was three, which reads as "my change didn't take".
+    # Read the SAME source a bare /era uses, so `list` can never advertise a
+    # default that differs from what actually dispatches.
+    $listDefault = (Get-EraDefaultReviewer -SkillRoot $skillRoot) -join ', '
     $listRows = Get-EraReviewerList -Registry $rawRegistry -Default $listDefault
     Write-Host (Format-EraReviewerList -Rows $listRows -Default $listDefault)
     return
@@ -225,36 +253,42 @@ if ($Command -eq 'list') {
 
 # --- set-default command: persist ERA_DEFAULT_REVIEWER -----------------------
 if ($Command -eq 'set-default') {
-    if (-not $Reviewer -or $Reviewer.Count -ne 1) {
-        throw "set-default requires exactly one reviewer preset. Got: $Reviewer"
+    # Accepts ONE preset or a PANEL. It used to hard-error on more than one, which
+    # made a multi-reviewer default un-settable through the supported path.
+    $presets = @($Reviewer | ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    if (-not $presets) {
+        throw "set-default requires at least one reviewer preset. Got: $Reviewer"
     }
-    $preset = $Reviewer[0]
-    # Validate the preset exists in the registry
+    # Validate every preset against the registry before writing anything.
     $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     $validPresets = @($rawRegistry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach-Object { $_.Name })
-    if ($preset -notin $validPresets) {
-        throw "Unknown reviewer preset: '$preset'. Valid presets: $($validPresets -join ', ')"
+    $unknown = @($presets | Where-Object { $_ -notin $validPresets })
+    if ($unknown) {
+        throw "Unknown reviewer preset(s): $($unknown -join ', '). Valid presets: $($validPresets -join ', ')"
     }
-    # Persist per-user (survives new shells). Cross-platform.
+
+    # Persist to the CONFIG FILE, not an environment variable. An env var is
+    # per-process and inherited: setting it at Windows User scope leaves every
+    # already-running shell (and everything they spawn) on the OLD value, and
+    # PowerShell / WSL / opencode / agy each read a different store. The file is
+    # located from $PSScriptRoot, so all of them see the same default.
+    $written = Set-EraDefaultReviewer -SkillRoot $skillRoot -Reviewer $presets
+
+    # A stale env var would out-rank the file we just wrote, so clear it in this
+    # process and drop the persisted copy that older versions used to set.
+    $env:ERA_DEFAULT_REVIEWER = $null
     if ($IsWindows -or $env:OS -eq 'Windows_NT') {
-        [Environment]::SetEnvironmentVariable('ERA_DEFAULT_REVIEWER', $preset, 'User')
-    } else {
-        # macOS / Linux: write to shell profile
-        $shellProfile = if ($env:ZSH_VERSION -or (Test-Path "$HOME/.zshrc")) { "$HOME/.zshrc" } else { "$HOME/.bashrc" }
-        $exportLine = "export ERA_DEFAULT_REVIEWER='$preset'"
-        $existing = if (Test-Path $shellProfile) { Get-Content $shellProfile -Raw } else { '' }
-        if ($existing -match 'export\s+ERA_DEFAULT_REVIEWER=') {
-            $updated = $existing -replace 'export\s+ERA_DEFAULT_REVIEWER=[''"][^''"]*[''"]', $exportLine
-            Set-Content -Path $shellProfile -Value $updated -Encoding UTF8
-        } else {
-            Add-Content -Path $shellProfile -Value "`n$exportLine" -Encoding UTF8
-        }
+        try { [Environment]::SetEnvironmentVariable('ERA_DEFAULT_REVIEWER', $null, 'User') } catch { }
     }
-    # Also set for the current session
-    $env:ERA_DEFAULT_REVIEWER = $preset
-    Write-Host "[era] Default reviewer set to '$preset' (persistent + current session)."
-    Write-Host "[era] This takes effect immediately. New shells will also use this default."
-    Write-Host "[era] To revert: unset ERA_DEFAULT_REVIEWER or run '/era set default to <other>'."
+
+    $label = if ($presets.Count -gt 1) { "panel: $($presets -join ', ')" } else { "'$($presets[0])'" }
+    Write-Host "[era] Default reviewer set to $label."
+    Write-Host "[era] Written to $written — read identically from Claude Code, PowerShell, WSL, opencode and agy."
+    if ($presets.Count -gt 1) {
+        Write-Host "[era] A bare /era will dispatch all $($presets.Count) simultaneously."
+    }
+    Write-Host "[era] To change: '/era set default to <name>' (or edit that file)."
     return
 }
 
@@ -509,10 +543,13 @@ $registry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | 
 # preference. Override the order with $env:ERA_DEFAULT_REVIEWER. An explicit
 # -Reviewer is always respected as-is (and still errors if its backend is missing).
 if (-not $PSBoundParameters.ContainsKey('Reviewer')) {
-    $defaultPref = @()
-    if ($env:ERA_DEFAULT_REVIEWER) {
-        $defaultPref += @($env:ERA_DEFAULT_REVIEWER -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
-    }
+    # Re-resolve from the shared helper (env override -> config/defaults.json ->
+    # shipped panel). This is what makes the param-default literal above inert:
+    # whatever the file says wins, from any shell.
+    $reviewerList = @(Get-EraDefaultReviewer -SkillRoot $skillRoot)
+
+    $defaultPref = @($reviewerList)
+    # Backends to fall back through if the configured default's backend is absent.
     $defaultPref += @('gemini-pro-low', 'sonnet', 'deepseek', 'gemini-api')
     $autoReviewer = Resolve-DefaultReviewer -Registry $registry -Preference $defaultPref
     if (-not $autoReviewer) {
@@ -523,9 +560,23 @@ No review backend is available. /era needs at least ONE of:
 Run 'pwsh runtimes/era.ps1 -Doctor' for a full status report with fix commands.
 "@
     }
-    if ($autoReviewer -ne $reviewerList[0]) {
-        Write-Host "[era] No -Reviewer specified; auto-selected '$autoReviewer' based on what's installed (default 'gemini-pro-low' needs agy). Pass -Reviewer or set `$env:ERA_DEFAULT_REVIEWER to choose; run -Doctor for status."
+    # Only collapse to the auto-selected single reviewer when the default really
+    # IS a single reviewer. The default is now a three-backend panel, and this
+    # branch used to rewrite $reviewerList to @($autoReviewer) unconditionally —
+    # which would silently run one reviewer while reporting a panel, the exact
+    # failure mode the panel exists to avoid.
+    #
+    # Keeping the guard for the single-default case preserves the original
+    # intent: don't hard-fail when the default's backend isn't installed.
+    # A multi-reviewer default is left intact; any member whose backend is
+    # missing fails loudly on its own dispatch, which is what we want to see.
+    $defaultIsPanel = $reviewerList.Count -gt 1
+    if ($autoReviewer -ne $reviewerList[0] -and -not $defaultIsPanel) {
+        Write-Host "[era] No -Reviewer specified; auto-selected '$autoReviewer' based on what's installed. Pass -Reviewer or set `$env:ERA_DEFAULT_REVIEWER to choose; run -Doctor for status."
         $reviewerList = @($autoReviewer)
+    }
+    elseif ($defaultIsPanel) {
+        Write-Host "[era] No -Reviewer specified; using the default panel: $($reviewerList -join ', '). Pass -Reviewer <name> for a single reviewer."
     }
 }
 $registryHash = @{}

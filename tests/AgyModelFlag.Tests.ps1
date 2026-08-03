@@ -162,10 +162,10 @@ Describe 'per-reviewer agy default --model resolution (heterogeneous batch)' {
         Get-Command Resolve-AgyDefaultModelToken -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
     }
 
-    It "resolves gemini's default to 'Gemini 3.5 Flash (High)'" {
+    It "resolves gemini's default to 'Gemini 3.6 Flash (High)'" {
         $token = Resolve-AgyDefaultModelToken -AgyModelMap $script:AgyMap `
             -Family $script:Gemini.agy_model_family -Tier $script:Gemini.agy_model_tier
-        $token | Should -BeExactly 'Gemini 3.5 Flash (High)'
+        $token | Should -BeExactly 'Gemini 3.6 Flash (High)'
     }
 
     It "resolves gemini-pro-low's default to 'Gemini 3.1 Pro (Low)'" {
@@ -182,7 +182,7 @@ Describe 'per-reviewer agy default --model resolution (heterogeneous batch)' {
         }
         ($tokens | Select-Object -Unique).Count | Should -Be 2 `
             -Because 'a heterogeneous agy batch must not collapse to one model'
-        $tokens[0] | Should -BeExactly 'Gemini 3.5 Flash (High)'
+        $tokens[0] | Should -BeExactly 'Gemini 3.6 Flash (High)'
         $tokens[1] | Should -BeExactly 'Gemini 3.1 Pro (Low)'
     }
 }

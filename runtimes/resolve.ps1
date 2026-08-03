@@ -36,14 +36,16 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Bare-invocation default reviewer. Ships as 'gemini-pro-low' but is overridable
-# per-user via $env:ERA_DEFAULT_REVIEWER (first token if a comma list), so a user
-# can point their default at any preset (e.g. gemini-pro-high) without editing the
-# repo. era.ps1's adaptive default honors the same env var.
-$script:DefaultReviewer = if ($env:ERA_DEFAULT_REVIEWER) {
-    @(($env:ERA_DEFAULT_REVIEWER -split ',') | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })[0]
-} else { 'gemini-pro-low' }
-if (-not $script:DefaultReviewer) { $script:DefaultReviewer = 'gemini-pro-low' }
+# Bare-invocation default reviewer(s) — resolved from the SHARED helper so this
+# layer and era.ps1 can never disagree. See runtimes/_era-defaults.ps1 for the
+# precedence rules and for why the persistent default is a file, not an env var.
+#
+# This is Layer 1 and it ALWAYS emits an explicit -Reviewer, so era.ps1's own
+# `[string[]]$Reviewer` default is never reached through the /era skill path —
+# `$PSBoundParameters.ContainsKey('Reviewer')` is true and its adaptive-default
+# block is skipped entirely. Changing only era.ps1 therefore does nothing for a
+# bare `/era`; that is exactly the bug this shared helper removes.
+. (Join-Path $PSScriptRoot '_era-defaults.ps1')
 
 # --- Acquire input: positional arg first, else stdin (do not hang on empty) ---
 # CRITICAL (CI-hang fix): distinguish an EXPLICIT empty positional arg
@@ -72,6 +74,11 @@ $raw = if ($null -eq $InputText) { '' } else { $InputText.Trim() }
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $registryPath = Join-Path $skillRoot 'backends/_registry.json'
 $registry = Get-Content -Raw $registryPath | ConvertFrom-Json
+
+# Resolved here, not at the top, because the shared helper needs $skillRoot to
+# find config/defaults.json. Comma-joined because that is the shape era.ps1's
+# -Reviewer accepts (it comma-splits on the way in).
+$script:DefaultReviewer = Get-EraDefaultReviewer -SkillRoot $skillRoot -AsString
 
 # Build the opencode provider/model map (deepseek, minimax variants, etc.).
 $opencodeMap = @{}
@@ -154,7 +161,7 @@ function script:Resolve-ReviewerSpec {
 
     $clean = @(script:Remove-Filler -Tokens $Tokens)
     if ($clean.Count -eq 0) {
-        # Bare invocation -> the configured default (ships gemini-pro-low).
+        # Bare invocation -> the configured default (ships the 3-reviewer panel).
         return @{ Reviewer = $script:DefaultReviewer }
     }
 

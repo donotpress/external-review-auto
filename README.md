@@ -159,15 +159,32 @@ pwsh runtimes/era.ps1 -TopicSlug skill-review -IncludeFiles ~/.claude/skills/era
 
 ## Set your default reviewer
 
-A bare `/era` adapts to what you have installed (see [Robustness](#robustness)). To **pin a personal default**, just say so in your TUI:
+**Since v1.12 a bare `/era` dispatches a three-model PANEL simultaneously** —
+Gemini 3.6 Flash (agy), Claude Opus 5 (claude CLI) and DeepSeek V4 Flash (New)
+(opencode-go). Cross-vendor on purpose: a single reviewer is a single point of
+failure, and in practice each model catches defects the others miss.
+
+To **pin a personal default**, just say so in your TUI — one preset or a panel:
 
 ```
 /era set default to gemini pro high
 /era default opus
-/era set default sonnet
+/era set default gemini,opus,deepseek-flash
 ```
 
-This persists `ERA_DEFAULT_REVIEWER` per-user (writes to your shell profile on macOS/Linux, or the Windows user environment). Takes effect immediately and in new shells. No restart needed.
+This writes `config/defaults.json` inside the skill (v1.12 — previously an
+environment variable). A file is read identically from Claude Code, PowerShell,
+WSL, opencode and agy, because it is located from the script's own path rather
+than from the environment. Takes effect immediately, everywhere, with no restart.
+
+> **Why not an env var?** It is per-process and inherited, so it drifts: a value
+> set at Windows User scope is invisible to already-running shells, which keep
+> handing their *startup* copy to every child. Measured on one box: a variable
+> cleared from User scope, Machine scope and `HKCU\Environment` still arrived in
+> every new shell for days, because the owning terminal window predated the
+> change — silently collapsing a 3-reviewer panel to one. `config/defaults.json`
+> therefore takes precedence over `ERA_DEFAULT_REVIEWER`, and a losing env
+> override is reported on stderr instead of being applied silently.
 
 Any valid preset works (`haiku`, `sonnet`, `gemini-pro-high`, `deepseek`, `gemini-api`, …). A per-run `-Reviewer` always overrides it.
 

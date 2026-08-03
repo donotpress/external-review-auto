@@ -1,0 +1,8 @@
+{
+  "reviewer": [
+    "gemini",
+    "opus",
+    "deepseek-flash"
+  ],
+  "note": "Default reviewer(s) for a bare /era. A list is dispatched simultaneously as a panel. Edit via `/era set default <names>` or by hand."
+}

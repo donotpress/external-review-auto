@@ -1,8 +1,8 @@
 {
   "gemini": {
     "backend": "agy",
-    "model_id": "gemini-3.5-flash-high",
-    "agy_model_family": "gemini-3.5-flash",
+    "model_id": "gemini-3.6-flash-high",
+    "agy_model_family": "gemini-3.6-flash",
     "agy_model_tier": "high",
     "pricing": {
       "input_per_m": 0.3,
@@ -10,7 +10,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy --dangerously-skip-permissions --print. Bundle read from disk via agy tools. Model selected via --model flag (per-dispatch, concurrent-safe)."
+    "notes": "agy --dangerously-skip-permissions --print, model 'Gemini 3.6 Flash (High)'. Bundle read from disk via agy tools. Verified 2026-08-02 against `agy models`."
   },
   "gemini-pro-high": {
     "backend": "agy",
@@ -23,7 +23,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy with Gemini 3.1 Pro (High) — highest context window."
+    "notes": "agy with Gemini 3.1 Pro (High) \u2014 highest context window."
   },
   "gemini-pro-low": {
     "backend": "agy",
@@ -36,7 +36,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy with Gemini 3.1 Pro (Low) — budget option."
+    "notes": "agy with Gemini 3.1 Pro (Low) \u2014 budget option."
   },
   "gemini-api": {
     "backend": "geminiapi",
@@ -134,7 +134,7 @@
   },
   "opus": {
     "backend": "claude",
-    "model_id": "claude-opus-4-7",
+    "model_id": "claude-opus-5",
     "claude_model_family": "opus",
     "pricing": {
       "input_per_m": 15.0,
@@ -142,7 +142,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "claude CLI --print --model claude-opus-4-7. Bundle piped via stdin."
+    "notes": "claude CLI --print --model claude-opus-5. Bundle piped via stdin. Verified 2026-08-02: the CLI errors on a bogus model id, so this one is real."
   },
   "sonnet": {
     "backend": "claude",
@@ -187,8 +187,8 @@
     "opencode_provider": "opencode-go",
     "opencode_model_family": "deepseek-v4",
     "pricing": {
-      "input_per_m": 0.5,
-      "output_per_m": 2.0
+      "input_per_m": 0.435,
+      "output_per_m": 0.87
     },
     "supports_file_read": true,
     "supports_streaming": false,
@@ -200,7 +200,10 @@
     "api_base": "https://opencode.ai/zen/go/v1",
     "api_key_env": "OPENCODE_API_KEY",
     "max_tokens": 16384,
-    "pricing": { "input_per_m": 1.74, "output_per_m": 3.48 },
+    "pricing": {
+      "input_per_m": 1.74,
+      "output_per_m": 3.48
+    },
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "opencode-go DeepSeek v4 Pro via direct HTTP (OpenAI-compatible). Key from auth.json (opencode-go)."
@@ -211,7 +214,10 @@
     "api_base": "https://opencode.ai/zen/go/v1",
     "api_key_env": "OPENCODE_API_KEY",
     "max_tokens": 16384,
-    "pricing": { "input_per_m": 1.4, "output_per_m": 4.4 },
+    "pricing": {
+      "input_per_m": 1.4,
+      "output_per_m": 4.4
+    },
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "opencode-go GLM-5.1 via direct HTTP (OpenAI-compatible)."
@@ -222,7 +228,10 @@
     "api_base": "https://opencode.ai/zen/go/v1",
     "api_key_env": "OPENCODE_API_KEY",
     "max_tokens": 16384,
-    "pricing": { "input_per_m": 0.3, "output_per_m": 1.2 },
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "opencode-go MiniMax M2.7 via direct HTTP (OpenAI-compatible)."
@@ -233,7 +242,10 @@
     "api_base": "https://opencode.ai/zen/go/v1",
     "api_key_env": "OPENCODE_API_KEY",
     "max_tokens": 16384,
-    "pricing": { "input_per_m": 0.95, "output_per_m": 4.0 },
+    "pricing": {
+      "input_per_m": 0.95,
+      "output_per_m": 4.0
+    },
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "opencode-go Kimi K2.7 Code via direct HTTP (OpenAI-compatible)."
@@ -244,7 +256,10 @@
     "api_base": "https://integrate.api.nvidia.com/v1",
     "api_key_env": "NVIDIA_API_KEY",
     "max_tokens": 8192,
-    "pricing": { "input_per_m": 0.0, "output_per_m": 0.0 },
+    "pricing": {
+      "input_per_m": 0.0,
+      "output_per_m": 0.0
+    },
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "NVIDIA NIM free reviewer tier. Key from auth.json (nvidia)."
@@ -272,6 +287,20 @@
       "high": {
         "display": "Gemini 3.1 Pro (High)",
         "settings_value": "Gemini 3.1 Pro (High)"
+      }
+    },
+    "gemini-3.6-flash": {
+      "low": {
+        "display": "Gemini 3.6 Flash (Low)",
+        "settings_value": "Gemini 3.6 Flash (Low)"
+      },
+      "medium": {
+        "display": "Gemini 3.6 Flash (Medium)",
+        "settings_value": "Gemini 3.6 Flash (Medium)"
+      },
+      "high": {
+        "display": "Gemini 3.6 Flash (High)",
+        "settings_value": "Gemini 3.6 Flash (High)"
       }
     }
   },
@@ -579,5 +608,43 @@
         "model_id": "opencode-go/qwen3.7-max"
       }
     }
+  },
+  "gemini-flash-35": {
+    "backend": "agy",
+    "model_id": "gemini-3.5-flash-high",
+    "agy_model_family": "gemini-3.5-flash",
+    "agy_model_tier": "high",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Previous Flash default. Kept so a regression can be A/B'd against 3.6."
+  },
+  "deepseek-flash": {
+    "backend": "opencode",
+    "model_id": "opencode-go/deepseek-v4-flash",
+    "opencode_provider": "opencode-go",
+    "opencode_model_family": "deepseek-v4",
+    "pricing": {
+      "input_per_m": 0.14,
+      "output_per_m": 0.28
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode run -m opencode-go/deepseek-v4-flash. models.dev display name is 'DeepSeek V4 Flash (New)' \u2014 the 2026-07-31 build, NOT the 2026-04-24 one. 1M context, 384k max output, reasoning-capable. Verified 2026-08-02."
+  },
+  "opus-48": {
+    "backend": "claude",
+    "model_id": "claude-opus-4-8",
+    "claude_model_family": "opus",
+    "pricing": {
+      "input_per_m": 15.0,
+      "output_per_m": 75.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Previous panel member (Opus 4.8). Kept so a regression can be A/B'd against Opus 5."
   }
 }

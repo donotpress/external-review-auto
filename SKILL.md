@@ -30,7 +30,7 @@ trigger: /external-review-auto
 
 | Backend | Install command | Reviewer presets |
 |---|---|---|
-| **agy** (antigravity CLI) | Platform-specific (see agy docs) | `gemini-pro-low` (**default**), `gemini-pro-high`, `gemini` |
+| **agy** (antigravity CLI) | Platform-specific (see agy docs) | `gemini` (Gemini 3.6 Flash, **in the default panel**), `gemini-pro-high`, `gemini-pro-low`, `gemini-flash-35` |
 | **Claude Code CLI** | `npm install -g @anthropic-ai/claude-code` | `opus`, `sonnet`, `haiku` |
 | **opencode** | opencode install | `minimax`, `deepseek` |
 
@@ -53,9 +53,32 @@ The skill fails fast with a clear error if any dependency is missing. CLI preset
 - **On any prereq error** (from `-Doctor` or a failed dispatch), surface the exact missing item and the fix command from the message, then **offer to run it for the user** — e.g. *"repomix isn't installed. Want me to run `npm install -g repomix`?"* — and only run it with their approval. **Never auto-install without asking.** The fix commands are: `Install-Module -Name ThreadJob -Force -Scope CurrentUser`, `npm install -g repomix`, the relevant backend CLI install, or `setx`/`$env:` for an API key (CLI presets reuse the user's existing login — no key needed).
 - If **no backend is available**, tell the user they need at least one (cheapest reliable: Claude **Haiku** via the `claude` CLI, or **DeepSeek V4 Flash** via opencode) before a review can run.
 
-> **Default reviewer (adaptive):** a bare `/era` with no `-Reviewer` prefers
-> **`gemini-pro-low` (Gemini 3.1 Pro (Low) via agy)** — far more reliable than the old
-> Flash default (94% class vs 67%). **But the default adapts to what's installed:** if
+### Where the default lives
+
+`<skill-root>/config/defaults.json` — the single source of truth, read by BOTH
+layers (`resolve.ps1` and `era.ps1`) through the shared `runtimes/_era-defaults.ps1`.
+It is located from `$PSScriptRoot`, so Claude Code, PowerShell, WSL, opencode and
+agy all resolve the same default regardless of shell, environment or working
+directory.
+
+```json
+{ "reviewer": ["gemini", "opus", "deepseek-flash"] }
+```
+
+Precedence, highest first: explicit `-Reviewer` -> `$env:ERA_DEFAULT_REVIEWER`
+(deliberate per-session override) -> `config/defaults.json` -> a shipped
+fallback panel that is never empty.
+
+Change it with `/era set default <names>` (accepts a panel), or edit the file.
+
+> **Default reviewers (a 3-model panel, run simultaneously):** a bare `/era` with no
+> `-Reviewer` dispatches **`gemini,opus,deepseek-flash`** — Gemini 3.6 Flash (agy),
+> Claude Opus 4.8 (claude CLI), DeepSeek V4 Flash (New) (opencode-go). Cross-vendor
+> on purpose: in round 11 one reviewer reviewed the wrong subject entirely while
+> another found a real shipped regression, so a single reviewer is a single point of
+> failure whichever one you pick. Cost is dominated by Opus (~$15/$75 per M vs ~$0.3
+> and ~$0.14) — pass `-Reviewer gemini` for a cheap single run.
+> **The single-reviewer fallback still adapts to what's installed:** if
 > agy isn't available, `/era` auto-selects the first usable backend by preference
 > (`gemini-pro-low` → `sonnet` → `deepseek` → `gemini-api`) instead of erroring, and
 > prints which it chose. Override the order with `$env:ERA_DEFAULT_REVIEWER` (e.g.
@@ -159,7 +182,7 @@ pwsh "<skill-root>/runtimes/resolve.ps1" "<user input>"
 | `gemini 3.1 pro low` | `{"Reviewer":"gemini-pro-low"}` |
 | `deepseek v4 flash` | `{"Reviewer":"deepseek","Model":"opencode-go/deepseek-v4-flash"}` |
 | `console-bugs use opus` | `{"Reviewer":"opus","TopicSlug":"console-bugs"}` |
-| (bare / empty) | `{"Reviewer":"gemini-pro-low"}` |
+| (bare / empty) | `{"Reviewer":"gemini,opus,deepseek-flash"}` (the default panel) |
 | unmatched/ambiguous | `{"error":"unresolved","input":"<raw>"}` |
 
 Parse the JSON, then forward the keys as `era.ps1` flags (`-Reviewer`, `-Model`, `-TopicSlug`).
@@ -256,7 +279,7 @@ When round N's response contains critical issues:
 | `<topic-slug>` (positional) | `-TopicSlug <slug>` | Explicit topic (auto-detected from newest spec if omitted) |
 | `--doctor` | `-Doctor` | Preflight only: report prereq + backend status (with fix commands) and exit. No dispatch, no install. |
 | `--mode assessment` | `-Mode assessment` | No spec file required; reviews arbitrary code |
-| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini-pro-low` (Gemini 3.1 Pro (Low)) |
+| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini,opus,deepseek-flash` — Gemini 3.6 Flash + Opus 4.8 + DeepSeek V4 Flash (New), dispatched simultaneously |
 | `--model <hint>` | `-Model <hint>` | Override model: `"gemini 3.1 pro"`, `"deepseek v4 pro"` |
 | `--provider <name>` | `-Provider <name>` | Force a specific opencode provider |
 | `--include <path1,path2>` | `-IncludeFiles path1,path2` | Specific files to bundle (curated by LLM) |
@@ -309,7 +332,7 @@ pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command suggest
 # Update model registry from connected opencode providers
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command update-models
 
-# Default: auto-detect topic, gemini-pro-low = Gemini 3.1 Pro (Low) via agy backend
+# Default: auto-detect topic, and the 3-reviewer panel (gemini,opus,deepseek-flash) run simultaneously
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1
 
 # Explicit topic, Claude Sonnet
@@ -331,7 +354,7 @@ Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 | Variable | Default | Purpose |
 |---|---|---|
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
-| `ERA_DEFAULT_REVIEWER` | `gemini-pro-low` | Reviewer preset for bare `/era` (no `-Reviewer`). Overrides the adaptive fallback order. |
+| `ERA_DEFAULT_REVIEWER` | *(unset)* | OPTIONAL per-session override of the default reviewer(s). The persistent default lives in **`config/defaults.json`**, not here — an env var is per-process and inherited, so a value set at Windows User scope leaves already-running shells on the OLD one, and PowerShell / WSL / opencode / agy each read a different store. Set this only for a one-off. |
 | `ERA_USE_HTTP_OPENCODE` | (unset) | Set to `1` to route the `deepseek`/`minimax` reviewer aliases over **direct HTTP** (the `*-http` presets) instead of the opencode TUI. Keys auto-source from opencode `auth.json`. Default off. |
 | `ERA_AGY_FALLBACK` | (auto) | v1.10: when an **agy** reviewer fails to capture even after its retry, era auto-falls-back to a non-agy reviewer so the round still yields a review. Set to a preset (e.g. `gemini-api`) to pin the fallback, or `off`/`0` to disable. Triggers only on an actual agy failure — healthy runs are unaffected. |
 | `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |
