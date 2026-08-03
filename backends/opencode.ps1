@@ -93,9 +93,38 @@ function Invoke-OpencodeReview {
         # adapter uniformly. The provider is derived from the model_id here.
         [string]$OpencodeProvider
     )
-    # Bundle access: by default ATTACH the bundle via `-f`. ERA_OPENCODE_READ_TOOL=1
-    # rolls back to telling the model to Read the file itself.
-    $useReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
+    # Bundle access: ATTACH via `-f` for small bundles, READ TOOL for large ones.
+    #
+    # opencode TRUNCATES an attached file at exactly 50 KiB (51200 bytes), silently.
+    # Measured 2026-08-03 against two real runs: DeepSeek V4 Flash reported its input
+    # ending at line 1169 of a 9,234-line bundle, and `head -1169` of that file is
+    # 51,191 bytes while line 1170 would cross 51,200 - the cut lands mid-line at the
+    # 50 KiB boundary. On a 474 KB bundle the reviewer therefore saw 10.7% of it; on a
+    # 692 KB bundle, 7.3%.
+    #
+    # The failure is SILENT and worse than an error: the model still returns a
+    # well-formed review, so `content_ok` is true and the run looks successful - it is
+    # simply a review of a tenth of the input, and its "no blocking defects found" is
+    # near-worthless. In one observed run the model worked around it by chunk-reading
+    # anyway, which is why that attempt took 566s.
+    #
+    # So: over the cap, tell the model to Read the file itself (it can chunk). Under
+    # the cap, attach - it is faster and needs no tool calls. ERA_OPENCODE_READ_TOOL=1
+    # still forces read-tool mode; set it to 0/false to force ATTACH even for a large
+    # bundle (diagnostics only - you will get a truncated review).
+    $OPENCODE_ATTACH_LIMIT_BYTES = 51200
+    $forceReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
+    $forceAttach = $env:ERA_OPENCODE_READ_TOOL -and ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false')
+    $bundleBytes = 0
+    try { $bundleBytes = (Get-Item -LiteralPath $BundlePath).Length } catch { $bundleBytes = 0 }
+    $overAttachLimit = $bundleBytes -gt $OPENCODE_ATTACH_LIMIT_BYTES
+    $useReadTool = $forceReadTool -or ($overAttachLimit -and -not $forceAttach)
+    if ($overAttachLimit -and $forceAttach) {
+        Write-Host "[opencode] WARNING: bundle is $bundleBytes bytes but ERA_OPENCODE_READ_TOOL=0 forces attach - opencode will TRUNCATE at $OPENCODE_ATTACH_LIMIT_BYTES bytes; the review covers only the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))%."
+    }
+    elseif ($overAttachLimit) {
+        Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
+    }
     $prompt = if ($useReadTool) {
         "Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. Output your structured review."
     } else {
