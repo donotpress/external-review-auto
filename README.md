@@ -84,6 +84,8 @@ In a TUI (Claude Code, opencode, etc.), just type:
 /era Gemini 3.1 Pro           # use Gemini 3.1 Pro (High)
 /era Opus 4.8                 # use Claude Opus
 /era deepseek v4 flash        # use DeepSeek V4 Flash
+/era deepseek                 # bare family name -> DeepSeek V4 Flash (New), the family default (v1.13)
+/era deepseek pro             # ...name the tier to get V4 Pro instead
 /era my-feature with sonnet   # review topic "my-feature" with Claude Sonnet
 /era my-feature use sonnet    # same — 'use', 'with', and 'via' all split topic from reviewer
 /era multi gemini,opus        # dispatch to multiple reviewers in parallel

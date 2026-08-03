@@ -249,8 +249,21 @@ function script:Resolve-ReviewerSpec {
         # Variant override via the opencode-go map (single source of truth).
         $variant = script:Find-OpencodeModel -Canon $canon -ProviderKey 'opencode-go' -FamilyHint 'deepseek'
         if ($variant) { return @{ Reviewer = 'deepseek'; Model = $variant } }
-        # Bare "deepseek" -> registry default for the deepseek preset.
-        return @{ Reviewer = 'deepseek' }
+        # "deepseek pro" (tier word without the full model name, which
+        # Find-OpencodeModel above only matches as "deepseek v4 pro"). Before
+        # 2026-08-03 this landed on the bare-deepseek fallback, which happened
+        # to BE pro; now that the fallback is flash it must be explicit or
+        # asking for pro would silently hand back flash.
+        if ($wantsPro) { return @{ Reviewer = 'deepseek' } }
+        # Bare "deepseek" (no variant named) -> DeepSeek V4 Flash (New).
+        # 2026-08-03: was `Reviewer = 'deepseek'`, whose registry preset is
+        # opencode-go/deepseek-v4-PRO. Flash is the intended family default —
+        # it is what config/defaults.json puts in the standard panel, and the
+        # 1M-context/384k-output build that survives a large repomix bundle.
+        # Pro remains reachable by naming it: "deepseek v4 pro" / "deepseek pro"
+        # resolve via Find-OpencodeModel above, and -Reviewer deepseek still
+        # selects the pro preset verbatim.
+        return @{ Reviewer = 'deepseek-flash' }
     }
 
     # ---- MiniMax family ----

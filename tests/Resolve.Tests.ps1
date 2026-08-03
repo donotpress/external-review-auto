@@ -133,9 +133,25 @@ Describe 'resolve.ps1 Layer-1 pattern resolution' {
         $r.Reviewer | Should -BeExactly 'opus'
     }
 
-    It 'deepseek -> -Reviewer deepseek' {
+    It 'deepseek (bare) -> -Reviewer deepseek-flash (v1.13 family default)' {
+        # v1.13: a bare "deepseek" used to land on the `deepseek` preset, which
+        # is opencode-go/deepseek-v4-PRO. Flash is the intended family default —
+        # it is what config/defaults.json puts in the standard panel.
         $r = script:Invoke-Resolve 'deepseek'
+        $r.Reviewer | Should -BeExactly 'deepseek-flash'
+    }
+
+    It 'deepseek pro -> -Reviewer deepseek (pro stays reachable without the full model name)' {
+        # Guards the v1.13 regression: Find-OpencodeModel only matches the full
+        # "deepseek v4 pro", so before the explicit $wantsPro check "deepseek pro"
+        # fell through to the bare fallback and would have silently returned flash.
+        $r = script:Invoke-Resolve 'deepseek pro'
         $r.Reviewer | Should -BeExactly 'deepseek'
+    }
+
+    It 'deepseek flash -> -Reviewer deepseek-flash' {
+        $r = script:Invoke-Resolve 'deepseek flash'
+        $r.Reviewer | Should -BeExactly 'deepseek-flash'
     }
 
     It 'deepseek v4 flash -> -Reviewer deepseek -Model opencode-go/deepseek-v4-flash' {
@@ -500,8 +516,11 @@ Describe 'resolve.ps1 2026-06-10 hardening (P1)' {
     }
 
     It 'multi syntax is unaffected by clause extraction' {
+        # v1.13: the 'deepseek' member resolves to deepseek-flash (family
+        # default). The point of this test is that `multi` still splits and
+        # per-member resolution still runs — not which DeepSeek build wins.
         $r = script:Invoke-Resolve 'multi gemini,deepseek'
-        $r.Reviewer | Should -BeExactly 'gemini,deepseek'
+        $r.Reviewer | Should -BeExactly 'gemini,deepseek-flash'
         $r.PSObject.Properties.Name | Should -Not -Contain 'Command'
     }
 

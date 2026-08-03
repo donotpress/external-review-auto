@@ -181,6 +181,8 @@ pwsh "<skill-root>/runtimes/resolve.ps1" "<user input>"
 |---|---|
 | `gemini 3.1 pro low` | `{"Reviewer":"gemini-pro-low"}` |
 | `deepseek v4 flash` | `{"Reviewer":"deepseek","Model":"opencode-go/deepseek-v4-flash"}` |
+| `deepseek` (bare, no variant) | `{"Reviewer":"deepseek-flash"}` — **DeepSeek V4 Flash (New)** is the family default (2026-08-03) |
+| `deepseek pro` / `deepseek v4 pro` | `{"Reviewer":"deepseek"}` — the `deepseek` preset is `opencode-go/deepseek-v4-pro` |
 | `console-bugs use opus` | `{"Reviewer":"opus","TopicSlug":"console-bugs"}` |
 | (bare / empty) | `{"Reviewer":"gemini,opus,deepseek-flash"}` (the default panel) |
 | unmatched/ambiguous | `{"error":"unresolved","input":"<raw>"}` |
