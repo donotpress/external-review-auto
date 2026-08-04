@@ -75,8 +75,21 @@ function Invoke-ClaudeReview {
         $cmdPath
     } else { $claudeCli.Source }
 
+    # WINDOWS-vs-WSL CREDENTIAL SPLIT (measured 2026-08-04). claude.exe reads
+    # C:\Users\<u>\.claude\.credentials.json; a claude running INSIDE WSL reads the Linux home's.
+    # They expire INDEPENDENTLY -- /era's opus arm went 115/119 lifetime -> 0/4 in a day when the
+    # Windows token lapsed, while the interactive agent (authenticated against the WSL store) kept
+    # working. So a working agent is no evidence that THIS backend works, and the WSL binary is a
+    # usable fallback. Probed lazily below, only after a failure a different store would fix.
+    $launcherFile = $claudeExe
+    $launcherPre  = @()
+    $usedKind     = 'windows'
+    $fallbackNote = $null
+
+    for ($try = 0; $try -lt 2; $try++) {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
-    $psi.FileName = $claudeExe
+    $psi.FileName = $launcherFile
+    foreach ($pre in $launcherPre) { $psi.ArgumentList.Add($pre) }
     $psi.ArgumentList.Add('--print')
     $psi.ArgumentList.Add('--model')
     $psi.ArgumentList.Add($modelId)
@@ -108,6 +121,7 @@ function Invoke-ClaudeReview {
     $stderrCopyTask = $null
     $claudeProc = $null
 
+    $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
 
@@ -173,8 +187,41 @@ function Invoke-ClaudeReview {
         $clean = $banner + $clean
     }
 
-    if ($exitCode -ne 0 -or -not $clean) {
-        throw "claude CLI failed (exit=$exitCode, model=$modelId): $stderr"
+    if ($exitCode -eq 0 -and $clean) { break }
+
+    # The CLI prints its fatal reasons to STDOUT, not stderr: throwing with $stderr alone recorded a
+    # BLANK cause on 3 of 4 failures (2026-08-04) while "Failed to authenticate: OAuth session
+    # expired and could not be refreshed" sat in $clean and was discarded, so four sessions read an
+    # empty string and concluded the MODEL was unreliable. Carry whichever stream actually spoke.
+    # ⚠️ REPORT BOTH STREAMS, never "stderr if non-empty else stdout". Measured 2026-08-04: a failing
+    # run emits a benign `Ignoring 1 permissions.allow entry … not been trusted` WARNING on stderr
+    # *and* the fatal `Failed to authenticate: …` on stdout, so a stderr-first rule records the
+    # warning and hides the cause -- the original bug inverted. Preferring stdout would hide a
+    # genuinely stderr-only fatal. Both, labelled, is the only rule that cannot mask either.
+    $parts = @()
+    if ($stderr.Trim()) { $parts += 'stderr: ' + $(if ($stderr.Trim().Length -gt 300) { $stderr.Trim().Substring(0,300) + '...' } else { $stderr.Trim() }) }
+    if ($clean.Trim())  { $parts += 'stdout: ' + $(if ($clean.Trim().Length  -gt 300) { $clean.Trim().Substring(0,300)  + '...' } else { $clean.Trim() }) }
+    $why = if ($parts) { $parts -join ' || ' } else { '<both stdout and stderr were empty>' }
+
+    # Retry on a DIFFERENT CREDENTIAL STORE, and only for failures a different store could fix.
+    # A bad model id, a network fault or a real API error must NOT be retried: that would double
+    # every genuine failure's latency and blur which launcher produced the error.
+    if ($try -eq 0 -and
+        $why -match 'authenticat|OAuth|session expired|Invalid API key|not been trusted|trust dialog') {
+        $wslClaude = $null
+        try {
+            $probe = (& wsl.exe -e sh -lc 'command -v claude || true' 2>$null | Select-Object -First 1)
+            if ($probe) { $wslClaude = $probe.Trim() }
+        } catch { $wslClaude = $null }
+        if ($wslClaude) {
+            $launcherFile = 'wsl.exe'; $launcherPre = @('-e', $wslClaude); $usedKind = 'wsl'
+            $fallbackNote = "windows claude.exe failed credential-shaped (exit=$exitCode): $why " +
+                            "-> retrying via WSL, which reads a SEPARATE credential store."
+            Write-Host "[claude] $fallbackNote"
+            continue
+        }
+    }
+    throw "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
     }
     $clean | Set-Content -Path $ResponsePath -Encoding utf8
     return @{
@@ -186,6 +233,9 @@ function Invoke-ClaudeReview {
         WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
         TruncationWarning = $truncationWarning
         Stderr = $stderr
-        Warnings = @()
+        # A silent launcher switch would be the same defect class as the blank error string above:
+        # the run reads normal while having been rescued, and the Windows credential fault stays
+        # invisible forever. Record it.
+        Warnings = @(if ($fallbackNote) { $fallbackNote })
     }
 }

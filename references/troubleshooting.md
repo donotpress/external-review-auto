@@ -105,3 +105,38 @@ Boolean parameters accept only Boolean values and numbers
 **Cause:** the model hit a usage limit (weekly quota, balance exhausted) and the opencode TUI displayed a blocking popup dialog. This popup is rendered via direct console writes (invisible to stdout/stderr capture), so the dispatch waits naively until the global `TimeoutSec` (600–1800s) fires.
 
 **Fix:** the first-token watchdog (Phase 1) now kills the process at the `ERA_OPENCODE_FIRST_TOKEN_SEC` deadline (default 120s, min 10s) if zero output has ever been captured. This catches the popup case at ~120–130s instead of waiting 10–30 minutes. If Phase 1 misses (e.g. the popup produces at least one byte), Phase 2 catches it at the variant-aware stall threshold (120–600s). Set `ERA_OPENCODE_FIRST_TOKEN_SEC` to a lower value (e.g. `60`) to fail faster at the cost of false-positive risk on very slow models.
+
+### `opus`/`sonnet`/`haiku` return nothing, with a BLANK error string (Windows/WSL credential split)
+
+**Symptom.** Every `claude`-backend reviewer fails at once, instantly (`wall_clock_sec = 0`), and the
+metadata records `claude CLI failed (exit=1, model=…): ` with **nothing after the colon**. The
+interactive Claude Code agent you are running from works fine, so the backend "should" work.
+
+**Cause.** Two things, and the second is why the first stayed hidden for a day (measured 2026-08-04):
+
+1. **Separate credential stores.** `/era` shells out to the **Windows** `claude.exe`, which reads
+   `C:\Users\<u>\.claude\.credentials.json`. A `claude` running **inside WSL** reads the Linux home's
+   store. They expire **independently**. `opus` went **115/119 lifetime → 0/4 in one day** when the
+   Windows refresh token lapsed — 19 minutes after its last success — while the agent, authenticated
+   against the WSL store, kept working. ⚠️ **A working agent is no evidence that this backend works.**
+2. **The adapter discarded the reason.** The CLI prints fatal causes to **stdout**; the adapter threw
+   with `$stderr`, which was empty. The sentence naming the cause
+   (`Failed to authenticate: OAuth session expired and could not be refreshed`) sat in the discarded
+   buffer. Four sessions read the blank string and concluded the *model* was unreliable.
+
+**Fixed in v1.15.** The error now carries whichever stream spoke, and a credential-shaped failure
+retries once via `wsl.exe -e <linux claude>` (recorded in `warnings`). If you see the fallback
+warning, `/era` is working but the **Windows** CLI still needs `claude` run interactively and logged
+in — anything else shelling out to `claude.exe` remains broken.
+
+**Diagnosing it yourself:**
+```powershell
+claude.exe --print --model claude-opus-5 "Reply with: PONG"   # exit 1 + the real reason on stdout
+python -c "import json;print(json.load(open(r'C:\Users\<u>\.claude\.credentials.json'))['claudeAiOauth'])"
+```
+An `accessToken` of **0 characters** or a past `refreshTokenExpiresAt` confirms it.
+
+⛔ **Not the cause, though it looks like one:** `hasTrustDialogAccepted: false` in `~/.claude.json`.
+One failure did print `Ignoring 1 permissions.allow entry … this workspace has not been trusted`, but
+that message says it is *ignoring* an entry, not aborting — and the flag was already `false` across
+all 115 successes. A dispatch later succeeded with it still `false`. It is a co-occurring warning.
