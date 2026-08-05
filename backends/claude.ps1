@@ -121,6 +121,13 @@ function Invoke-ClaudeReview {
     $stderrCopyTask = $null
     $claudeProc = $null
 
+    # ⚠️ THE RETRY MUST FIT INSIDE THE *GLOBAL* BUDGET, NOT GET A FRESH ONE. The dispatcher waits
+    # only `TimeoutSec + 30` for this whole adapter (workflow.ps1), so two attempts each budgeted
+    # `TimeoutSec` can overrun it and the ThreadJob is killed mid-retry -- recorded as a bare
+    # "Timed out after N seconds (global)" with no cause. Observed 2026-08-04 on a loaded box, and a
+    # single unloaded verification run cannot surface it. The second attempt therefore gets whatever
+    # is LEFT, floored at 60s so a nearly-exhausted budget fails fast instead of pretending to try.
+    $attemptTimeoutSec = [Math]::Max(60, $TimeoutSec - [int]$sw.Elapsed.TotalSeconds)
     $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
@@ -138,17 +145,17 @@ function Invoke-ClaudeReview {
         $bundleStream = [System.IO.File]::OpenRead($BundlePath)
         try {
             $stdinCopyTask = $bundleStream.CopyToAsync($claudeProc.StandardInput.BaseStream)
-            $null = $stdinCopyTask.Wait($TimeoutSec * 1000)
+            $null = $stdinCopyTask.Wait($attemptTimeoutSec * 1000)
         } finally {
             $bundleStream.Dispose()
             $claudeProc.StandardInput.Close()
         }
 
-        if (-not $claudeProc.WaitForExit($TimeoutSec * 1000)) {
+        if (-not $claudeProc.WaitForExit($attemptTimeoutSec * 1000)) {
             # Kill($true): tear down the whole tree. claude is a shim (cmd -> node);
             # a bare Kill() would orphan the node child.
             try { $claudeProc.Kill($true) } catch {}
-            throw "claude CLI exceeded timeout of ${TimeoutSec}s (model=$modelId)"
+            throw "claude CLI exceeded its ${attemptTimeoutSec}s slice of the ${TimeoutSec}s budget (model=$modelId, launcher=$usedKind)"
         }
         $exitCode = $claudeProc.ExitCode
     } finally {
