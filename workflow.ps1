@@ -1134,6 +1134,127 @@ function Write-ReviewMetadata {
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
+function ConvertTo-EraContractNormalized {
+    <#
+    .SYNOPSIS
+        Normalise text for decoration-tolerant contract matching.
+
+    .DESCRIPTION
+        Measured on the 2026-08-09 panel: deepseek-flash answered '**P1: DO**'
+        while gemini and opus answered 'P1: DO'. A literal check would have
+        failed the sharpest response in the panel, so strip markdown decoration
+        before comparing.
+    #>
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    $t = $Text -replace '[*`_#]', ''
+    $t = $t -replace '\s+', ' '
+    return $t.Trim().ToLowerInvariant()
+}
+
+function Get-EraResponseContract {
+    <#
+    .SYNOPSIS
+        Read a prompt's declared response contract.
+
+    .DESCRIPTION
+        A prompt declares what its answer must contain with a marker line:
+
+            <!-- era-require: ORDER:, DROP-ENTIRELY:, MISSING: -->
+
+        The contract travels WITH the prompt, so a -PromptOverrideFile carries
+        its own and no extra parameter is needed. No marker means lenient --
+        exactly the behaviour before this existed, so existing callers are
+        untouched.
+    #>
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$PromptText)
+    if ([string]::IsNullOrEmpty($PromptText)) { return @() }
+    if ($PromptText -notmatch '(?im)<!--\s*era-require:\s*(.+?)\s*-->') { return @() }
+    return @($matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+function Test-ResponseContract {
+    <#
+    .SYNOPSIS
+        Does a reviewer's response contain everything the prompt required?
+
+    .DESCRIPTION
+        Nothing verified that an answer matched the request: adapters checked
+        non-empty text plus a finish reason, then returned ExitCode=0. A reviewer
+        returned zero of ten requested verdicts three times and each was recorded
+        as a normal success -- and the promoted response feeds the NEXT round's
+        prompt, so a bad round poisons its successor.
+
+        Uses .Contains() rather than -like, so a required token containing '[' or
+        '*' is matched literally instead of being read as a glob.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Response,
+        [AllowNull()][string[]]$Required
+    )
+    $req = @($Required | Where-Object { $_ })
+    if ($req.Count -eq 0) { return @{ Ok = $true; Missing = @() } }
+
+    $haystack = ConvertTo-EraContractNormalized -Text $Response
+    $missing = [System.Collections.Generic.List[string]]::new()
+    foreach ($r in $req) {
+        $needle = ConvertTo-EraContractNormalized -Text $r
+        if (-not $needle) { continue }
+        if (-not $haystack.Contains($needle)) { $missing.Add($r) }
+    }
+    return @{ Ok = ($missing.Count -eq 0); Missing = @($missing) }
+}
+
+function Get-EraPorcelainPaths {
+    <#
+    .SYNOPSIS
+        Changed-file paths from `git status`, parsed correctly.
+
+    .DESCRIPTION
+        The old parse stripped three characters and kept the remainder, so a
+        rename 'R  old -> new' yielded the non-path 'old -> new', and
+        core.quotePath wrapped non-ASCII names in quotes that survived into the
+        path. Both then failed Test-Path with a confusing "paths not found".
+
+        --porcelain -z emits NUL-terminated records with no quoting and no
+        escaping. Measured on this box, a rename emits TWO fields, destination
+        first:
+            [R  new.md]  [old.md]  [?? probe.ps1]  [?? untracked.md]
+        So for an R or C status, skip the following field -- it is the source
+        path, which no longer exists and would fail Test-Path downstream.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return @() }
+
+    Push-Location $RepoRoot
+    try {
+        $raw = (& git status --porcelain -z 2>$null) -join ''
+    } catch {
+        return @()
+    } finally {
+        Pop-Location
+    }
+    if ([string]::IsNullOrEmpty($raw)) { return @() }
+
+    $fields = @($raw -split "`0" | Where-Object { $_ -ne '' })
+    $paths  = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $fields.Count; $i++) {
+        $rec = $fields[$i]
+        if ($rec.Length -lt 4) { continue }
+        $xy   = $rec.Substring(0, 2)
+        $path = $rec.Substring(3).Trim()
+        if ($path) { $paths.Add($path) }
+        # Rename/copy records carry a second field: the source path.
+        if ($xy -match '[RC]') { $i++ }
+    }
+    return @($paths)
+}
+
 function Test-EraPathInsideRoot {
     <#
     .SYNOPSIS
