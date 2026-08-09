@@ -41,16 +41,20 @@ Describe 'Single-reviewer contract failure must not stay canonical' -Tag Unit {
         } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
     }
 
-    It 'keeps the failed answer as evidence under its preset name' {
+    It 'keeps the failed answer as evidence, under a name the next round will not read' {
+        # NOT round-1-gemini-response.md: that shape is exactly what
+        # Invoke-PromptTokenSubstitution globs to build round N+1, so demoting
+        # into it fed the rejected answer straight back in.
         $dir = New-RoundDir (Join-Path $env:TEMP "era-alias-eviden-$(New-Guid)")
         try {
             Set-Content -Path (Join-Path $dir 'round-1-response.md') -Value 'OFF-CONTRACT ANSWER'
             $results = @{ gemini = @{ Preset = 'gemini'; ExitCode = -1; ContentOk = $false
                                       Error = 'response-contract'; Response = 'OFF-CONTRACT ANSWER' } }
             Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('gemini') -Results $results
-            $kept = Join-Path $dir 'round-1-gemini-response.md'
+            $kept = Join-Path $dir 'round-1-gemini-response.rejected.md'
             Test-Path $kept | Should -BeTrue
             (Get-Content -Raw $kept) | Should -Match 'OFF-CONTRACT ANSWER'
+            Test-Path (Join-Path $dir 'round-1-gemini-response.md') | Should -BeFalse
         } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
     }
 
@@ -132,6 +136,78 @@ Describe '{{PREVIOUS_ROUND}} carries the whole panel, not one model' -Tag Unit {
             Set-Content -Path $prompt -Value "{{PREVIOUS_ROUND}}"
             Invoke-PromptTokenSubstitution -PromptFile $prompt -ReviewDir $dir -RoundN 2
             (Get-Content -Raw $prompt) | Should -Match 'SOLO-ANSWER'
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'A demoted failure must not re-enter via {{PREVIOUS_ROUND}}' -Tag Unit {
+    It 'does not inject a contract-failed response into the next round' {
+        # The round-2 panel caught this: demoting a failed solo response to
+        # round-N-<preset>-response.md put it into exactly the shape the new
+        # panel aggregation globs (round-N-*-response.md). The B1 fix relocated
+        # the poison instead of removing it, and the B3 fix opened the door it
+        # moved to. Demotions must not match the aggregation glob.
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-prev-rejected-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-response.md') -Value 'POISON-OFF-CONTRACT'
+            $results = @{ gemini = @{ Preset = 'gemini'; ExitCode = -1; ContentOk = $false
+                                      Error = 'response-contract' } }
+            Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('gemini') -Results $results
+
+            $prompt = Join-Path $dir 'p.md'
+            Set-Content -Path $prompt -Value '{{PREVIOUS_ROUND}}'
+            Invoke-PromptTokenSubstitution -PromptFile $prompt -ReviewDir $dir -RoundN 2
+
+            (Get-Content -Raw $prompt) | Should -Not -Match 'POISON-OFF-CONTRACT'
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
+    It 'still keeps the rejected answer on disk as evidence' {
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-prev-evid2-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-response.md') -Value 'REJECTED-BODY'
+            $results = @{ gemini = @{ Preset = 'gemini'; ExitCode = -1; ContentOk = $false
+                                      Error = 'response-contract' } }
+            Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('gemini') -Results $results
+            $found = @(Get-ChildItem -Path $dir -Filter 'round-1-*rejected*' -File)
+            $found.Count | Should -BeGreaterThan 0
+            (Get-Content -Raw $found[0].FullName) | Should -Match 'REJECTED-BODY'
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
+    It 'reports an in-flight prior round rather than a partial panel' {
+        # The per-preset branch preceded the claim-file branch, so a round still
+        # in flight yielded whatever reviewers had finished, presented as if it
+        # were the complete panel.
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-prev-inflight-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-gemini-response.md') -Value 'EARLY-FINISHER'
+            Set-Content -Path (Join-Path $dir 'round-1-claim.json') -Value '{}'
+            $prompt = Join-Path $dir 'p.md'
+            Set-Content -Path $prompt -Value '{{PREVIOUS_ROUND}}'
+            Invoke-PromptTokenSubstitution -PromptFile $prompt -ReviewDir $dir -RoundN 2
+            $text = Get-Content -Raw $prompt
+            $text | Should -Match 'in flight'
+            $text | Should -Not -Match 'EARLY-FINISHER'
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
+    It 'never removes the canonical when it is the only copy' {
+        # On a multi-reviewer round where nobody passed, removing the canonical
+        # is only safe if a per-preset copy exists to serve as evidence.
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-prev-onlycopy-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-response.md') -Value 'ONLY-COPY'
+            $results = @{
+                a = @{ Preset = 'a'; ExitCode = -1; Error = 'timeout' }
+                b = @{ Preset = 'b'; ExitCode = -1; Error = 'timeout' }
+            }
+            Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('a', 'b') -Results $results
+            # No per-preset file exists, so the canonical is the only artifact.
+            # It must be preserved (renamed as evidence), not destroyed.
+            @(Get-ChildItem -Path $dir -Filter 'round-1-*' -File).Count | Should -BeGreaterThan 0
+            (Get-ChildItem -Path $dir -Filter 'round-1-*' -File | ForEach-Object { Get-Content -Raw $_.FullName }) -join '' |
+                Should -Match 'ONLY-COPY'
         } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
     }
 }

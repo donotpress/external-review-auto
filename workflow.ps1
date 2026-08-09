@@ -132,8 +132,20 @@ function Invoke-PromptTokenSubstitution {
     # the panel exists precisely because one reviewer is a single point of
     # failure. Per-preset files are preferred when present; the canonical is the
     # fallback for single-reviewer rounds, which have no suffixed files.
-    $perPreset = @(Get-ChildItem -Path $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
-        Sort-Object Name)
+    #
+    # The in-flight check comes FIRST. It used to sit after the aggregation, so a
+    # round still running yielded whichever reviewers had already finished,
+    # presented as though it were the complete panel.
+    #
+    # The glob is 'round-N-*-response.md'. Rejected answers are deliberately
+    # written as 'round-N-<preset>-response.rejected.md' by
+    # Copy-PrimaryResponseAlias so they cannot match here — that is the whole
+    # point of the naming, do not "tidy" it.
+    $perPreset = @()
+    if (-not (Test-Path $claimFile)) {
+        $perPreset = @(Get-ChildItem -Path $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
+            Sort-Object Name)
+    }
     if ($perPreset.Count -gt 0) {
         $sections = foreach ($f in $perPreset) {
             if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
@@ -1014,17 +1026,21 @@ function Copy-PrimaryResponseAlias {
     # named this the #1 blocker, on the very configuration the docs tell people
     # to drop to. Demote it: keep the answer as evidence under its preset name,
     # and leave no canonical behind.
+    # The demoted name must NOT match 'round-N-*-response.md', because
+    # Invoke-PromptTokenSubstitution globs exactly that shape to build the next
+    # round's context. The first version of this fix demoted to
+    # round-N-<preset>-response.md and thereby fed the rejected answer straight
+    # back into round N+1 — relocating the poison instead of removing it. Caught
+    # by all three reviewers of the round-2 graded panel.
+    $rejectedName = { param($p) "round-$Round-$p-response.rejected.md" }
+
     if ($ReviewerList.Count -le 1) {
         $solo = @($ReviewerList)[0]
         if (-not $solo -or (& $isOk $solo)) { return }
         $canonical = Join-Path $ReviewDir "round-$Round-response.md"
         if (-not (Test-Path $canonical)) { return }
-        $evidence = Join-Path $ReviewDir "round-$Round-$solo-response.md"
-        if (-not (Test-Path $evidence)) {
-            Move-Item -Path $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
-        } else {
-            Remove-Item -Path $canonical -Force -ErrorAction SilentlyContinue
-        }
+        $evidence = Join-Path $ReviewDir (& $rejectedName $solo)
+        Move-Item -Path $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -1043,9 +1059,17 @@ function Copy-PrimaryResponseAlias {
         if (& $isOk $cand) { $primary = $cand; break }
     }
     if (-not $primary) {
-        # Nobody passed. Do not leave a stale canonical from an earlier attempt.
+        # Nobody passed. The canonical must not survive as if it were a good
+        # review — but never DESTROY it: on a panel where no per-preset file was
+        # written it is the only copy. Rename it to the rejected shape, which the
+        # {{PREVIOUS_ROUND}} glob deliberately does not match.
         $stale = Join-Path $ReviewDir "round-$Round-response.md"
-        if (Test-Path $stale) { Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $stale) {
+            $first = @($ReviewerList)[0]
+            if (-not $first) { $first = 'unknown' }
+            Move-Item -Path $stale -Destination (Join-Path $ReviewDir (& $rejectedName $first)) `
+                -Force -ErrorAction SilentlyContinue
+        }
         return
     }
 
