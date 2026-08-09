@@ -68,40 +68,42 @@ Boolean parameters accept only Boolean values and numbers
 
 ---
 
-### repomix timeout does not kill the node child (known limitation)
+### repomix timeout (fixed 2026-08-09 — was a known limitation)
 
-**Symptom:** era reports `repomix timed out after 300s`, but a `node` process
-keeps burning CPU (and disk) afterwards.
+**Previously:** era reported `repomix timed out after 300s`, but a `node`
+process kept burning CPU and disk afterwards, and the error explained nothing.
 
-**Cause:** the repomix guard uses `Start-ThreadJob` + `Wait-Job -Timeout` +
-`Stop-Job`. `Stop-Job` ends the *thread*; it cannot bound the **native child
-process** repomix spawned. The backend adapters do not have this problem — they
-hold a `Process` handle and call `.Kill($true)` for a tree-kill, an invariant
-`tests/ProcessTreeKill.Tests.ps1` asserts across agy/claude/opencode.
+**Cause:** the guard used `Start-ThreadJob` + `Wait-Job -Timeout` + `Stop-Job`.
+`Stop-Job` ends the *thread*; it cannot bound the **native child process**
+repomix spawned. The backend adapters never had this problem — they hold a
+`Process` handle and call `.Kill($true)`, an invariant
+`tests/ProcessTreeKill.Tests.ps1` asserts across agy/claude/opencode. repomix
+was the one place that did not, because npm resolves it to a `.ps1` shim that
+`CreateProcess` cannot execute.
 
-**Why it is still this way:** `repomix` resolves to a `.ps1`/`.cmd` shim on
-Windows, so putting it behind a `Process` handle needs its own shim-resolution
-logic (and tests) rather than a one-line swap. Tracked as a follow-on.
+**Fix:** `Resolve-EraRepomixCommand` picks a spawnable form — it prefers the
+sibling `repomix.cmd` (measured: npm installs `repomix`, `repomix.cmd` and
+`repomix.ps1` side by side), falling back to `pwsh -File` for a lone `.ps1` and
+running a real executable directly. `Invoke-EraTrackedProcess` then runs it with
+`-PassThru`, waits with a real timeout, and on expiry calls `.Kill($true)` to
+take out the whole tree. Verified by measurement: child count 1 → 0, parent
+exited.
 
-**Mitigations in place (2026-08-09):** both failure paths run the capture
-through `Get-EraTruncatedText`, because the run that started collecting 72,378
-files interpolated a **16.9 MB** log into its exception string. The broad-bundle
-gate above should stop you reaching this state at all.
+**The inert drain is fixed too.** `Receive-Job` could never return anything —
+the ThreadJob body captured every byte into a local and emitted nothing until
+completion, so a job that had not completed had no output to receive. Output now
+goes to redirect files, so partial output is on disk and readable at kill time.
+`tests/RepomixProcess.Tests.ps1` asserts this directly: a killed `ping` still
+yields its partial output.
 
-**The timeout branch's `Receive-Job` is currently inert — known.** It is called
-before `Stop-Job` (correct ordering, so nothing is discarded), but the ThreadJob
-body is `{ $o = repomix -c $c 2>&1; ...; @{ output = $o; exitCode = $ec } }`:
-every byte of repomix's stdout and stderr is captured into the local `$o` and
-nothing reaches the job's output stream until the final hashtable is emitted at
-completion. On the timeout path the job has by definition *not* completed, so
-the drain always returns nothing and the message reads "No output was captured
-before the timeout." Making it useful means streaming from the job body (e.g.
-`repomix … | Tee-Object` or writing progress to a file the parent can read),
-which belongs with the `Process`-handle change above. Surfaced by external
-review; recorded rather than papered over.
+Both failure paths also run the capture through `Get-EraTruncatedText`, because
+the run that started collecting 72,378 files interpolated a **16.9 MB** log into
+its exception string.
 
-**If you hit it:** kill the stray `node` process manually, then re-run with
-`-IncludeFiles` scoped to what you actually want reviewed.
+**If a timeout still happens:** the tree is killed for you. Read the partial
+output in the error, then re-run with `-IncludeFiles` scoped to what you
+actually want reviewed. The broad-bundle gate above should stop you reaching
+this state at all.
 
 ---
 

@@ -1208,6 +1208,148 @@ function Test-ResponseContract {
     return @{ Ok = ($missing.Count -eq 0); Missing = @($missing) }
 }
 
+function Resolve-EraRepomixCommand {
+    <#
+    .SYNOPSIS
+        Turn a resolved `repomix` command into something Start-Process can spawn
+        under a killable handle.
+
+    .DESCRIPTION
+        This is the reason repomix kept using Start-ThreadJob: on Windows npm
+        installs shims, and `Get-Command repomix` resolves to repomix.ps1 (an
+        ExternalScript), which CreateProcess cannot execute. Measured on this box
+        the npm directory holds all three of `repomix`, `repomix.cmd` and
+        `repomix.ps1`, so preferring the sibling .cmd avoids nesting a second
+        pwsh just to reach node.
+
+        Pure function -- takes the already-resolved source and command type so it
+        can be unit-tested without an install.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [string]$CommandType = 'Application'
+    )
+    $ext = [System.IO.Path]::GetExtension($Source)
+
+    if ($ext -in @('.cmd', '.bat')) {
+        return @{ FilePath = $env:ComSpec; Arguments = @('/c', $Source) }
+    }
+
+    if ($ext -eq '.ps1' -or $CommandType -eq 'ExternalScript') {
+        # Prefer a sibling .cmd: one less process, and no pwsh startup cost.
+        $sibling = Join-Path (Split-Path -Parent $Source) 'repomix.cmd'
+        if ($env:ComSpec -and (Test-Path $sibling)) {
+            return @{ FilePath = $env:ComSpec; Arguments = @('/c', $sibling) }
+        }
+        $pwshPath = (Get-Process -Id $PID).Path
+        if (-not $pwshPath) { $pwshPath = 'pwsh' }
+        return @{ FilePath = $pwshPath; Arguments = @('-NoProfile', '-File', $Source) }
+    }
+
+    # A real executable (or a POSIX shim) runs directly.
+    return @{ FilePath = $Source; Arguments = @() }
+}
+
+function Invoke-EraTrackedProcess {
+    <#
+    .SYNOPSIS
+        Run a child process under a handle we can tree-kill, capturing output to
+        files so a timeout still yields diagnostics.
+
+    .DESCRIPTION
+        Replaces Start-ThreadJob + Wait-Job + Stop-Job for native children.
+        Stop-Job ends the THREAD; the spawned process keeps running. The adapters
+        already use Process.Kill($true) for exactly this reason -- an invariant
+        tests/ProcessTreeKill.Tests.ps1 asserts across agy/claude/opencode.
+
+        Output is redirected to temp files rather than buffered in the child, so
+        on a timeout the partial output is on disk and readable. The old
+        Receive-Job drain could never return anything: the ThreadJob body
+        captured everything into a local and emitted nothing until completion.
+
+        Returns @{ Output; ExitCode; TimedOut; ProcessId; StdOutPath }.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [int]$TimeoutSec = 300
+    )
+    $stamp = [System.Guid]::NewGuid().ToString('N').Substring(0, 8)
+    $outPath = Join-Path ([System.IO.Path]::GetTempPath()) "era-proc-$stamp.out"
+    $errPath = Join-Path ([System.IO.Path]::GetTempPath()) "era-proc-$stamp.err"
+
+    $startArgs = @{
+        FilePath               = $FilePath
+        WorkingDirectory       = $WorkingDirectory
+        NoNewWindow            = $true
+        PassThru               = $true
+        RedirectStandardOutput = $outPath
+        RedirectStandardError  = $errPath
+    }
+    if ($Arguments -and $Arguments.Count -gt 0) { $startArgs['ArgumentList'] = $Arguments }
+
+    $proc = Start-Process @startArgs
+    $procId = $proc.Id
+    $timedOut = $false
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        $timedOut = $true
+        # $true = tree-kill. Killing only the parent would leave node running,
+        # which is the whole defect this replaces.
+        try { $proc.Kill($true) } catch { }
+        try { $null = $proc.WaitForExit(10000) } catch { }
+    }
+
+    $readBoth = {
+        param($o, $e)
+        $t = ''
+        foreach ($p in @($o, $e)) {
+            if (Test-Path $p) {
+                $c = Get-Content -Raw $p -ErrorAction SilentlyContinue
+                if ($c) { $t += $c }
+            }
+        }
+        return $t
+    }
+    $output = & $readBoth $outPath $errPath
+
+    $exitCode = if ($timedOut) { -1 } else { try { $proc.ExitCode } catch { -1 } }
+
+    Remove-Item $outPath, $errPath -Force -ErrorAction SilentlyContinue
+
+    return @{
+        Output     = $output
+        ExitCode   = $exitCode
+        TimedOut   = $timedOut
+        ProcessId  = $procId
+        StdOutPath = $outPath
+    }
+}
+
+function Invoke-EraRepomix {
+    <#
+    .SYNOPSIS
+        Run repomix against a config under a killable handle.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [int]$TimeoutSec = 300
+    )
+    $cmd = Get-Command repomix -ErrorAction SilentlyContinue
+    if (-not $cmd) {
+        return @{ Output = ''; ExitCode = -1; TimedOut = $false; ProcessId = 0
+                  Error = 'repomix not found (is it installed? try: npm install -g repomix)' }
+    }
+    $resolved = Resolve-EraRepomixCommand -Source $cmd.Source -CommandType "$($cmd.CommandType)"
+    return Invoke-EraTrackedProcess -FilePath $resolved.FilePath `
+        -Arguments (@($resolved.Arguments) + @('-c', $ConfigPath)) `
+        -WorkingDirectory $RepoRoot -TimeoutSec $TimeoutSec
+}
+
 function Assert-EraResponseContract {
     <#
     .SYNOPSIS

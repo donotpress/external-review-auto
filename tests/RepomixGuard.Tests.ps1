@@ -76,18 +76,41 @@ Describe 'era.ps1 repomix guard' -Tag Unit {
         $src | Should -Match 'Get-EraTruncatedText'
     }
 
-    It 'receives job output before stopping the job on the timeout branch' {
+    # SUPERSEDED 2026-08-09. Two tests here used to assert the ThreadJob design:
+    # that Receive-Job preceded Stop-Job on the timeout branch, and that era
+    # DOCUMENTED its inability to tree-kill the native child. Both encoded a
+    # workaround and a known limitation, and P3 removed the limitation, so they
+    # now assert the stronger invariant that replaced it. Behavioural coverage
+    # lives in tests/RepomixProcess.Tests.ps1.
+
+    It 'surfaces partial output on the timeout branch' {
         $src = Get-Content -Raw $script:EraPath
         $timeoutIdx = $src.IndexOf('repomix timed out after')
         $timeoutIdx | Should -BeGreaterThan 0
-        # Look back over the timeout branch for a Receive-Job preceding Stop-Job.
-        $branch = $src.Substring([Math]::Max(0, $timeoutIdx - 1200), [Math]::Min(1200, $timeoutIdx))
-        $branch | Should -Match 'Receive-Job'
-        $branch.IndexOf('Receive-Job') | Should -BeLessThan $branch.LastIndexOf('Stop-Job')
+        $branch = $src.Substring([Math]::Max(0, $timeoutIdx - 900), [Math]::Min(900, $timeoutIdx))
+        # The tracked-process result carries output captured before the kill.
+        $branch | Should -Match '\$repomixRun\.Output'
+        $branch | Should -Match 'Get-EraTruncatedText'
     }
 
-    It 'documents that Stop-Job cannot tree-kill the native repomix child' {
+    It 'runs repomix under a tree-killable handle, not a ThreadJob' {
         $src = Get-Content -Raw $script:EraPath
-        $src | Should -Match '(?i)cannot (bound|kill).{0,80}(native|child)'
+        $src | Should -Not -Match 'Start-ThreadJob -Name repomix'
+        $src | Should -Match 'Invoke-EraRepomix'
+        # The kill itself is Process.Kill($true) — the same invariant
+        # tests/ProcessTreeKill.Tests.ps1 asserts for every backend adapter.
+        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $wf | Should -Match '\.Kill\(\$true\)'
+        $wf | Should -Not -Match '(?m)^\s*\$proc\.Kill\(\)\s*$'
+    }
+
+    It 'no longer claims the native child cannot be killed' {
+        # The old comment said Wait-Job/Stop-Job "cannot bound the NATIVE child
+        # process". That is no longer true, so the claim must not survive as
+        # stale documentation.
+        $src = Get-Content -Raw $script:EraPath
+        $src | Should -Not -Match '(?i)cannot (bound|kill)[^\r\n]{0,80}(native|child)'
+        $doc = Get-Content -Raw (Join-Path $script:SkillRoot 'references/troubleshooting.md')
+        $doc | Should -Not -Match '(?i)known limitation.{0,120}Stop-Job'
     }
 }

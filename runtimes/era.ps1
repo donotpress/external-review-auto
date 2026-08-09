@@ -1318,47 +1318,27 @@ Be terse. If a section is empty, write "(none)".
 
     Write-Host "Running repomix..."
     $repomixTimeoutSec = 300
-    Test-ThreadJobAvailable
-    $repomixJob = Start-ThreadJob -Name repomix -ScriptBlock { param($c, $r) Push-Location $r; $o = repomix -c $c 2>&1; $ec = $LASTEXITCODE; Pop-Location; @{ output = $o; exitCode = $ec } } -ArgumentList $configPath, $repoRoot
-    $completed = $repomixJob | Wait-Job -Timeout $repomixTimeoutSec
-    if (-not $completed) {
-        # Drain the job BEFORE stopping it. Stop-Job discarded everything repomix
-        # had said, so an 18-minute timeout explained nothing at all.
-        #
-        # HONEST CAVEAT: this drain is currently INERT. The job body above
-        # captures all of repomix's stdout/stderr into its local $o and emits
-        # nothing until the final hashtable, so a job that has NOT completed has
-        # no job output to receive. The ordering is correct and costs nothing;
-        # making it useful requires the job body to stream, which belongs with
-        # the Process-handle change. See references/troubleshooting.md.
-        #
-        # KNOWN LIMITATION: Wait-Job/Stop-Job cannot bound the NATIVE child
-        # process repomix spawns — Stop-Job ends the thread, node keeps running.
-        # The adapters solve the equivalent problem with Process.Kill($true)
-        # (tests/ProcessTreeKill.Tests.ps1), but repomix resolves to a .ps1/.cmd
-        # shim on Windows, so putting it behind a Process handle needs its own
-        # shim resolution and tests. See references/troubleshooting.md.
-        $partial = ''
-        try {
-            $partialObj = Receive-Job $repomixJob -ErrorAction SilentlyContinue
-            if ($partialObj) { $partial = (@($partialObj | ForEach-Object { "$_" }) -join "`n") }
-        } catch { }
-        Stop-Job $repomixJob -ErrorAction SilentlyContinue
-        Remove-Job $repomixJob -Force -ErrorAction SilentlyContinue
-        $partialText = Get-EraTruncatedText -Text $partial -MaxChars 4000
-        throw ("repomix timed out after ${repomixTimeoutSec}s." +
+    # Run repomix under a handle we can TREE-KILL. This was Start-ThreadJob +
+    # Wait-Job + Stop-Job, which ends the THREAD but not the native node process
+    # repomix spawns — so a timeout left it running, burning CPU and disk. The
+    # adapters have always used Process.Kill($true) for exactly this problem, an
+    # invariant tests/ProcessTreeKill.Tests.ps1 asserts across agy/claude/
+    # opencode; repomix was the one place that did not, because npm resolves it
+    # to a .ps1 shim that CreateProcess cannot execute. Resolve-EraRepomixCommand
+    # handles that by preferring the sibling .cmd.
+    #
+    # Output is redirected to files, so partial output SURVIVES a timeout. The
+    # Receive-Job drain this replaces could never return anything: the ThreadJob
+    # body buffered everything into a local until completion.
+    $repomixRun = Invoke-EraRepomix -ConfigPath $configPath -RepoRoot $repoRoot -TimeoutSec $repomixTimeoutSec
+    if ($repomixRun.TimedOut) {
+        $partialText = Get-EraTruncatedText -Text $repomixRun.Output -MaxChars 4000
+        throw ("repomix timed out after ${repomixTimeoutSec}s (process tree killed)." +
             $(if ($partialText) { " Partial output:`n$partialText" } else { " No output was captured before the timeout." }))
     }
-    $repomixJobError = $repomixJob.Error | ForEach-Object { $_.ToString() }
-    $repomixResultObj = Receive-Job $repomixJob -ErrorAction SilentlyContinue
-    Remove-Job $repomixJob -Force -ErrorAction SilentlyContinue
-    if (-not $repomixResultObj) {
-        $jobError = $repomixJobError
-        $msg = if ($jobError) { "repomix job failed: $jobError" } else { "repomix produced no output (is it installed? try: npm install -g repomix)" }
-        throw $msg
-    }
-    $repomixResult = $repomixResultObj.output -join "`n"
-    $repomixExitCode = $repomixResultObj.exitCode
+    if ($repomixRun.Error) { throw $repomixRun.Error }
+    $repomixResult = $repomixRun.Output
+    $repomixExitCode = $repomixRun.ExitCode
     if ($repomixExitCode -ne 0) {
         # Truncate: this interpolated the entire capture, which was 16.9 MB on
         # the run that started collecting 72,378 files.
