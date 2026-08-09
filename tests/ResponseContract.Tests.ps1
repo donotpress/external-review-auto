@@ -107,10 +107,63 @@ Describe 'era.ps1 enforces the contract at the dispatcher layer' -Tag Unit {
     }
 
     It 'marks a contract failure the same way opencode marks a bad capture' {
+        # The marking lives in workflow.ps1's Assert-EraResponseContract, which
+        # era.ps1 calls at two points (see the fallback test below).
+        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $wf | Should -Match "response-contract"
+        $wf | Should -Match 'ExitCode\s*=\s*-1'
+        $wf | Should -Match 'ContentOk\s*=\s*\$false'
+    }
+}
+
+Describe 'Assert-EraResponseContract' -Tag Unit {
+    It 'marks a failing result and leaves a passing one alone' {
+        $results = @{
+            good = @{ Preset = 'good'; ExitCode = 0; Response = 'ORDER: x' }
+            bad  = @{ Preset = 'bad';  ExitCode = 0; Response = 'nothing here' }
+        }
+        $n = Assert-EraResponseContract -Results $results -Required @('ORDER:')
+        $n | Should -Be 1
+        $results['good'].ExitCode  | Should -Be 0
+        $results['bad'].ExitCode   | Should -Be -1
+        $results['bad'].ContentOk  | Should -BeFalse
+        $results['bad'].Error      | Should -Be 'response-contract'
+    }
+
+    It 'skips results that already failed, preserving the original error' {
+        $results = @{ x = @{ Preset = 'x'; ExitCode = -1; Response = $null; Error = 'timeout' } }
+        Assert-EraResponseContract -Results $results -Required @('ORDER:') | Should -Be 0
+        $results['x'].Error | Should -Be 'timeout'
+    }
+
+    It 'is a no-op when no contract is declared' {
+        $results = @{ x = @{ Preset = 'x'; ExitCode = 0; Response = 'whatever' } }
+        Assert-EraResponseContract -Results $results -Required @() | Should -Be 0
+        $results['x'].ExitCode | Should -Be 0
+    }
+
+    It 'is idempotent — a second pass finds nothing new' {
+        $results = @{ x = @{ Preset = 'x'; ExitCode = 0; Response = 'nope' } }
+        Assert-EraResponseContract -Results $results -Required @('ORDER:') | Should -Be 1
+        Assert-EraResponseContract -Results $results -Required @('ORDER:') | Should -Be 0
+    }
+}
+
+Describe 'The agy fallback response is contract-checked too' -Tag Unit {
+    It 'enforces the contract both BEFORE and AFTER the agy fallback block' {
+        # Measured 2026-08-09 on a live dispatch: with the check placed only
+        # before the fallback, a failing agy reviewer triggered a re-dispatch to
+        # gemini-api, and the FALLBACK's own answer was never checked. It was
+        # written as round-1-response.md with content_ok=true while missing the
+        # required token -- the exact failure mode this feature exists to stop,
+        # inside the feature itself.
         $src = Get-Content -Raw $script:EraPath
-        $src | Should -Match "response-contract"
-        $src | Should -Match '\$res\.ExitCode\s*=\s*-1'
-        $src | Should -Match '\$res\.ContentOk\s*=\s*\$false'
+        $calls = [regex]::Matches($src, 'Assert-EraResponseContract')
+        $calls.Count | Should -BeGreaterOrEqual 2
+        $fallbackIdx = $src.IndexOf('ERA_AGY_FALLBACK')
+        $fallbackIdx | Should -BeGreaterThan 0
+        @($calls | Where-Object { $_.Index -lt $fallbackIdx }).Count | Should -BeGreaterOrEqual 1
+        @($calls | Where-Object { $_.Index -gt $fallbackIdx }).Count | Should -BeGreaterOrEqual 1
     }
 }
 

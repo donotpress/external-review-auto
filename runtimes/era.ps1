@@ -1445,25 +1445,13 @@ Be terse. If a section is empty, write "(none)".
     # file stays on disk -- it is evidence, not garbage; only its promotion to
     # canonical is withheld.
     #
-    # Runs BEFORE the fallback block so a contract failure can trigger it.
+    # Runs BEFORE the fallback block so a contract failure can trigger it. It is
+    # applied AGAIN after that block (see below) — otherwise the fallback's own
+    # answer is never checked.
     $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw $promptPath -ErrorAction SilentlyContinue))
     if ($contractRequired.Count -gt 0) {
         Write-Host "[era] Response contract: $($contractRequired -join ', ')"
-        foreach ($k in @($results.Keys)) {
-            $res = $results[$k]
-            if (-not $res -or $res.ExitCode -ne 0) { continue }
-            $verdict = Test-ResponseContract -Response $res.Response -Required $contractRequired
-            if (-not $verdict.Ok) {
-                $miss = ($verdict.Missing -join ', ')
-                Write-Host "[era] $k FAILED the response contract; missing: $miss"
-                $res.ExitCode    = -1
-                $res.ContentOk   = $false
-                $res.Error       = 'response-contract'
-                $res.RetryReason = "response-contract: missing $miss"
-                $res.Warnings    = @($res.Warnings) + "Response contract failed; missing: $miss"
-                $results[$k] = $res
-            }
-        }
+        $null = Assert-EraResponseContract -Results $results -Required $contractRequired
     }
 
     # --- Item #1 (v1.10): agy auto-fallback on capture failure ---
@@ -1495,6 +1483,16 @@ Be terse. If a section is empty, write "(none)".
                 Write-Host "[era] agy capture failed and no non-agy fallback is available; leaving the result as-is."
             }
         }
+    }
+
+    # Re-apply the contract to anything the fallback just added. Measured
+    # 2026-08-09: a failing agy reviewer triggered a re-dispatch to gemini-api,
+    # and that fallback's answer went straight to round-1-response.md with
+    # content_ok=true while missing the required token — the very failure this
+    # feature exists to catch, inside the feature itself. Assert- is idempotent
+    # (already-failed results are skipped), so this is free when nothing changed.
+    if ($contractRequired.Count -gt 0) {
+        $null = Assert-EraResponseContract -Results $results -Required $contractRequired
     }
 
     # Unified response alias (Fix 4 / R3-Gemini-C4): copy the FIRST SUCCESSFUL

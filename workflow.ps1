@@ -1208,6 +1208,59 @@ function Test-ResponseContract {
     return @{ Ok = ($missing.Count -eq 0); Missing = @($missing) }
 }
 
+function Assert-EraResponseContract {
+    <#
+    .SYNOPSIS
+        Apply a response contract across a dispatch result set, in place.
+        Returns the number of results newly marked as failing.
+
+    .DESCRIPTION
+        Marks a violation exactly the way opencode marks a bad agentic capture
+        (ExitCode=-1 + ContentOk=$false), so every existing consumer already
+        behaves correctly: Copy-PrimaryResponseAlias skips it, the metadata
+        writer records content_ok=false, and the agy fallback re-dispatches. The
+        response file stays on disk -- it is evidence, not garbage; only its
+        promotion to canonical is withheld.
+
+        Results that already failed are skipped, so their original error is
+        preserved and the function is idempotent. That matters because era calls
+        it TWICE: once before the agy fallback, so a contract failure can trigger
+        a re-dispatch, and once after, because otherwise the fallback's own
+        answer is never checked.
+
+        That second call is not hypothetical. Measured 2026-08-09 on a live
+        dispatch: a failing agy reviewer triggered a fallback to gemini-api,
+        whose answer was written as round-1-response.md with content_ok=true
+        while missing the required token -- the exact failure mode this feature
+        exists to prevent, occurring inside the feature itself.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Results,
+        [AllowNull()][string[]]$Required
+    )
+    $req = @($Required | Where-Object { $_ })
+    if ($req.Count -eq 0) { return 0 }
+
+    $failed = 0
+    foreach ($k in @($Results.Keys)) {
+        $res = $Results[$k]
+        if (-not $res -or $res.ExitCode -ne 0) { continue }
+        $verdict = Test-ResponseContract -Response $res.Response -Required $req
+        if ($verdict.Ok) { continue }
+        $miss = ($verdict.Missing -join ', ')
+        Write-Host "[era] $k FAILED the response contract; missing: $miss"
+        $res.ExitCode    = -1
+        $res.ContentOk   = $false
+        $res.Error       = 'response-contract'
+        $res.RetryReason = "response-contract: missing $miss"
+        $res.Warnings    = @($res.Warnings) + "Response contract failed; missing: $miss"
+        $Results[$k] = $res
+        $failed++
+    }
+    return $failed
+}
+
 function Get-EraPorcelainPaths {
     <#
     .SYNOPSIS
