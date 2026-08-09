@@ -38,7 +38,7 @@ function Get-ReviewDiff {
             } else { @($resolved) }
             foreach ($cp in $concretePaths) {
                 # SECURITY: block path traversal — skip files outside repo root
-                if (-not $cp.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
                 $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                 $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
             }
@@ -200,7 +200,7 @@ function Write-ReviewManifest {
                 } else { @($resolved) }
                 foreach ($cp in $concretePaths) {
                     # SECURITY: block path traversal — skip files outside repo root
-                    if (-not $cp.StartsWith($RepoRoot, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                    if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
                     $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                     $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
                 }
@@ -1134,6 +1134,43 @@ function Write-ReviewMetadata {
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
+function Test-EraPathInsideRoot {
+    <#
+    .SYNOPSIS
+        Boundary-aware containment test: is $Path the same as, or beneath, $Root?
+
+    .DESCRIPTION
+        Replaces `$p.StartsWith($root, OrdinalIgnoreCase)`, which has no
+        directory-separator boundary. Measured 2026-08-09: with repo root
+        C:\a\era-p6, the SIBLING C:\a\era-p6-ext\outside.md tested as inside and
+        was relativized to '-ext/outside.md', which then failed Test-Path. The
+        old guard failed closed, so the harm was silent loss of an explicitly
+        requested file rather than exfiltration.
+
+        Pure string comparison after normalisation -- no filesystem access, so it
+        works for paths that do not exist yet.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Path,
+        [AllowNull()][AllowEmptyString()][string]$Root
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+
+    function Get-Normalized([string]$p) {
+        $n = $p
+        try { $n = [System.IO.Path]::GetFullPath($p) } catch { }
+        return ($n -replace '\\', '/').TrimEnd('/')
+    }
+
+    $normPath = Get-Normalized $Path
+    $normRoot = Get-Normalized $Root
+    if ($normRoot.Length -eq 0) { return $false }
+
+    if ([string]::Equals($normPath, $normRoot, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $normPath.StartsWith($normRoot + '/', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Get-EraTruncatedText {
     <#
     .SYNOPSIS
@@ -1216,12 +1253,20 @@ function Measure-EraBroadScope {
     # directory merely NAMED node_modules under-counted a monorepo by orders of
     # magnitude, which is worse than no gate at all: the notice is evidence the
     # user trusts.
-    $skipDirs = [System.Collections.Generic.HashSet[string]]::new($cmp)
-    $skipExts = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    # Two shapes, matching repomix exactly:
+    #   '<dir>/**'      -> root-anchored; prune that one relative path
+    #   '**/<dir>/**'   -> any depth;     prune any directory with that leaf name
+    # Nothing used to assert this parser understood the list era hands repomix,
+    # which is how the original under-count shipped. See the contract test in
+    # tests/IgnorePatternDepth.Tests.ps1.
+    $skipDirs     = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    $skipDirNames = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    $skipExts     = [System.Collections.Generic.HashSet[string]]::new($cmp)
     foreach ($p in @($IgnorePatterns)) {
         $n = "$p" -replace '\\', '/'
-        if ($n -match '^([^*]+)/\*\*$') { [void]$skipDirs.Add($matches[1].TrimEnd('/')); continue }
-        if ($n -match '^\*(\.[^*/]+)$') { [void]$skipExts.Add($matches[1]); continue }
+        if ($n -match '^\*\*/([^*/]+)/\*\*$') { [void]$skipDirNames.Add($matches[1]); continue }
+        if ($n -match '^([^*]+)/\*\*$')       { [void]$skipDirs.Add($matches[1].TrimEnd('/')); continue }
+        if ($n -match '^\*(\.[^*/]+)$')       { [void]$skipExts.Add($matches[1]); continue }
     }
 
     # Split includes into leaf matches ('**/*.md' -> '*.md', the shape every
@@ -1270,6 +1315,7 @@ function Measure-EraBroadScope {
         }
         try { $subDirs = @([System.IO.Directory]::EnumerateDirectories($dir)) } catch { $subDirs = @() }
         foreach ($s in $subDirs) {
+            if ($skipDirNames.Contains([System.IO.Path]::GetFileName($s))) { continue }
             $subRel = ($s.Substring($root.Length).TrimStart('\', '/')) -replace '\\', '/'
             if ($skipDirs.Contains($subRel)) { continue }
             # Never descend a reparse point: a junction back to an ancestor is a
