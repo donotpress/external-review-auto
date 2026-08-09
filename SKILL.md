@@ -531,6 +531,40 @@ drive-stripped mirror. Staged copies persist as round artifacts. Files only
 (out-of-repo dirs/globs throw). Relative traversal (`../secret`) remains
 blocked — typing the full absolute path is the explicit opt-in.
 
+## Omitted vs. empty `-IncludeFiles` — 2026-08-09
+
+Omitting `-IncludeFiles` is the documented broad-repo-audit mode. Passing it
+**explicitly with nothing in it** is now a hard error rather than a silent
+upgrade to that mode:
+
+```
+[era] ERROR: -IncludeFiles was supplied but resolved to zero paths (raw value: '')...
+```
+
+era keys this off `$PSBoundParameters.ContainsKey('IncludeFiles')`, not
+truthiness — PowerShell unwraps a single-element array, so `-IncludeFiles ""` is
+falsy and otherwise indistinguishable from omission. The normaliser can also
+*manufacture* the empty case from non-empty input: `-IncludeFiles ","` is truthy
+but reduces to `@()` after the split-and-drop-blanks pass.
+
+The usual cause is shell quoting, not intent. In bash `&` binds looser than
+`&&`, so
+
+```bash
+FILES="a.py,b.py" && setsid nohup pwsh -File era.ps1 ... -IncludeFiles "$FILES" &   # WRONG
+```
+
+runs the assignment in a **subshell**; a second dispatch on the same line
+receives `-IncludeFiles ""`. Export the variable on its own line, one reviewer
+per command. This exact shape once put 72,378 files through repomix.
+
+`-AutoDetect` gets the same treatment: on a clean tree it used to print an
+advisory and fall through to the repo-wide globs. It now refuses — unless an
+explicit `-IncludeFiles` or a spec-mode spec file still narrows the run.
+`-AutoDetect` also no longer proposes era's own `.external-reviews/` tree, which
+round reservation creates *before* the detection runs and which `git status`
+therefore reported as an untracked change.
+
 ## Review artifacts are never re-uploaded — 2026-08-09
 
 The repomix config sets `useGitignore=false` and `useDefaultPatterns=false`, so

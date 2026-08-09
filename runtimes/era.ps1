@@ -105,7 +105,17 @@ $ErrorActionPreference = 'Stop'
 # `pwsh -File era.ps1 -IncludeFiles @(...)` flattens the array into positional
 # args (the 2nd element binds to -Mode and errors); the comma-string form is
 # the portable alternative for non-PowerShell-native callers.
-if ($IncludeFiles) {
+#
+# 2026-08-09: key this off $PSBoundParameters, not truthiness. PowerShell unwraps
+# a single-element array, so -IncludeFiles "" is FALSY and indistinguishable from
+# omission — and omission is the documented repo-wide broad-audit mode. A caller
+# whose shell handed us an empty string therefore got "bundle everything"
+# (72,378 files, one crashed repomix, a 16.9 MB log). Record the raw value for
+# the error message; the refusal itself lives below, after Stop-EraWithError is
+# defined. Same idiom already used for -PromptOverrideFile and -Reviewer.
+$script:UserSuppliedIncludeFiles = $PSBoundParameters.ContainsKey('IncludeFiles')
+$script:RawIncludeFiles = if ($script:UserSuppliedIncludeFiles) { (@($IncludeFiles) -join ',') } else { '' }
+if ($script:UserSuppliedIncludeFiles) {
     $IncludeFiles = @($IncludeFiles |
         ForEach-Object { "$_" -split ',' } |
         ForEach-Object { $_.Trim().Trim('"', "'") } |
@@ -154,6 +164,21 @@ if ($Doctor) {
                (Test-Path (Join-Path $skillRoot 'backends/_registry.json'))
     Write-Host ("[{0}] era-alias skill-root resolution (runtimes/resolve.ps1 + backends/_registry.json reachable from {1})" -f ($(if ($aliasOk) { ' OK ' } else { 'FAIL' })), $skillRoot)
     return
+}
+
+# --- Explicit -IncludeFiles that resolves to nothing is a caller bug ----------
+# Placed after the -Doctor block so preflight still runs, and after
+# Stop-EraWithError is defined. The normaliser above can MANUFACTURE this case
+# from non-empty input: -IncludeFiles "," is truthy, but splitting on ',' and
+# dropping blanks reduces it to @(). Note the asymmetry this repairs — zero
+# files MATCHED is already fatal ("Bundle is empty" below); zero files SPECIFIED
+# used to become everything.
+if ($script:UserSuppliedIncludeFiles -and @($IncludeFiles).Count -eq 0) {
+    Stop-EraWithError ("-IncludeFiles was supplied but resolved to zero paths (raw value: '{0}'). " -f $script:RawIncludeFiles +
+        "Refusing to silently upgrade that to a repo-wide bundle. Omit -IncludeFiles entirely if you " +
+        "want the documented broad audit. Common cause: in bash `&` binds looser than `&&`, so " +
+        "`FILES=... && era ... &` leaves the assignment in a subshell and the next dispatch receives " +
+        "an empty string — export the variable on its own line instead.")
 }
 
 # Guard the git call: under $ErrorActionPreference='Stop', `& git` throws a raw
@@ -883,12 +908,36 @@ Be terse. If a section is empty, write "(none)".
         $recentCommit = @(& git diff --name-only HEAD~1..HEAD 2>$null |
             Where-Object { $_ })
 
+        # Drop era's OWN artifact tree (2026-08-09). Round reservation writes
+        # .external-reviews/<slug>/round-N-claim.json and -prompt.md BEFORE this
+        # block runs, so `git status --porcelain` reports '.external-reviews/' as
+        # untracked and it became a candidate — on a clean tree, the ONLY
+        # candidate. era then proposed its own review history for review.
         $autoCandidates = @($uncommitted + $recentCommit) |
             Sort-Object -Unique |
-            Where-Object { $_ -and $_.Trim() -ne '' }
+            Where-Object { $_ -and $_.Trim() -ne '' } |
+            Where-Object { ($_ -replace '\\', '/') -notmatch '(^|/)\.external-reviews(/|$)' }
 
         if ($autoCandidates.Count -eq 0) {
-            Write-Host "[era] -AutoDetect: no uncommitted or recent-commit files found. Pass -IncludeFiles explicitly."
+            # 2026-08-09: this used to print an advisory and fall through — onto
+            # the same repo-wide default globs the empty -IncludeFiles bug hit.
+            # -AutoDetect is an explicit "review what I changed"; answering it
+            # with "review everything" is the same silent widening. Refuse, but
+            # ONLY when we would actually land on the broad path: an explicit
+            # -IncludeFiles or a spec-mode spec file still narrows the run, and
+            # those branches are chosen below at "Determine effective include".
+            # Filter before counting: with -IncludeFiles omitted the param is
+            # $null, and @($null).Count is 1, not 0 — which reads as "an include
+            # list exists" and silently disarms this guard.
+            $narrowingIncludes = @($IncludeFiles | Where-Object { $_ })
+            $wouldFallBackToBroad = ($narrowingIncludes.Count -eq 0) -and
+                                    -not ($Mode -eq 'spec' -and $specFile)
+            if ($wouldFallBackToBroad) {
+                Stop-EraWithError ("-AutoDetect found no uncommitted or recent-commit files, and nothing " +
+                    "else narrows this run. Refusing to fall back to a repo-wide bundle — pass " +
+                    "-IncludeFiles explicitly, or omit -AutoDetect to request the broad audit deliberately.")
+            }
+            Write-Host "[era] -AutoDetect: no uncommitted or recent-commit files found; continuing with the existing include list."
         } else {
             if (-not (Get-ForceMode) -and -not $Force) {
                 Write-Host "[era] -AutoDetect candidate files:"
