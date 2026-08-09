@@ -1134,6 +1134,192 @@ function Write-ReviewMetadata {
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
+function Get-EraTruncatedText {
+    <#
+    .SYNOPSIS
+        Caps captured subprocess output before it goes into an exception message.
+
+    .DESCRIPTION
+        era.ps1 interpolated the whole of repomix's captured output into its
+        failure exception. The 2026-08-09 run that started collecting 72,378
+        files emitted a 16.9 MB log, so the "error message" was 16.9 MB of
+        bundle chatter — unreadable, and expensive to move around. Keep the head
+        (where the actual failure usually is) and say how much was dropped.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Text,
+        [int]$MaxChars = 4000
+    )
+    if ([string]::IsNullOrEmpty($Text)) { return '' }
+    if ($Text.Length -le $MaxChars) { return $Text }
+    # Head AND tail: a subprocess usually explains itself at the start, but the
+    # fatal line is just as often the last thing it wrote before dying.
+    $headLen = [int][Math]::Ceiling($MaxChars * 0.6)
+    $tailLen = $MaxChars - $headLen
+    return ($Text.Substring(0, $headLen) +
+        "`n... [truncated: $($Text.Length) chars total, showing first $headLen and last $tailLen] ...`n" +
+        $Text.Substring($Text.Length - $tailLen))
+}
+
+function Measure-EraBroadScope {
+    <#
+    .SYNOPSIS
+        Bounded enumeration of what the repo-wide default globs would actually
+        bundle, so era can announce the scope BEFORE repomix runs.
+
+    .DESCRIPTION
+        Omitting -IncludeFiles selects the documented broad audit. era used to
+        say nothing about what that meant: on a large repo repomix began
+        collecting 72,378 files and died ~18 minutes later with
+        ERR_IPC_CHANNEL_CLOSED after a 16.9 MB log.
+
+        Deliberately NOT `git ls-files`. The repomix config sets
+        useGitignore=$false, so the include set is a SUPERSET of tracked files —
+        git would under-report precisely the case that hurts (a repo whose
+        .gitignore is the only thing keeping a build tree out of the bundle).
+
+        Stops as soon as the count passes -Limit and reports Truncated, so the
+        cost of measuring a runaway repo is bounded. Directory pruning uses the
+        same ignore patterns handed to repomix, so 'node_modules/**' and
+        '.external-reviews/**' are skipped rather than walked.
+
+        The result is an ESTIMATE for a consent prompt, not a bundle manifest:
+        only the two ignore shapes that matter here ('<dir>/**' and '*.<ext>')
+        are honoured, and repomix remains the authority on what is bundled.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Include,
+        [string[]]$IgnorePatterns = @(),
+        [int]$Limit = 5000,
+        # The file limit alone does NOT bound the walk: directories holding no
+        # matching files never increment the counter, so a junction/symlink loop
+        # — or just a pathological tree — would enumerate forever.
+        [int]$MaxDirs = 20000
+    )
+    $cmp = [System.StringComparer]::OrdinalIgnoreCase
+    $skipDirs = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    $skipExts = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    foreach ($p in @($IgnorePatterns)) {
+        $n = "$p" -replace '\\', '/'
+        if ($n -match '^([^*/]+)/\*\*$') { [void]$skipDirs.Add($matches[1]); continue }
+        if ($n -match '^\*(\.[^*/]+)$')  { [void]$skipExts.Add($matches[1]); continue }
+    }
+
+    # Split includes into leaf matches ('**/*.md' -> '*.md', the shape every
+    # shipped default glob uses) and full-relative-path matches for anything
+    # else a caller set via ERA_DEFAULT_GLOBS.
+    $leafPatterns = [System.Collections.Generic.List[string]]::new()
+    $pathPatterns = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in @($Include)) {
+        $n = "$p" -replace '\\', '/'
+        if ($n.StartsWith('**/') -and -not $n.Substring(3).Contains('/')) {
+            $leafPatterns.Add($n.Substring(3))
+        } else {
+            $pathPatterns.Add(($n -replace '\*\*/', '*'))
+        }
+    }
+
+    $root = [System.IO.Path]::GetFullPath($RepoRoot)
+    $count = 0
+    $bytes = [long]0
+    $truncated = $false
+
+    $dirsSeen = 0
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($root)
+    while ($stack.Count -gt 0 -and -not $truncated) {
+        $dir = $stack.Pop()
+        $dirsSeen++
+        if ($dirsSeen -gt $MaxDirs) {
+            # Bailing early means the count is INCOMPLETE, which must read as
+            # truncated so the consent gate refuses rather than waving through a
+            # repo we failed to measure.
+            $truncated = $true
+            break
+        }
+        try { $subDirs = @([System.IO.Directory]::EnumerateDirectories($dir)) } catch { $subDirs = @() }
+        foreach ($s in $subDirs) {
+            if ($skipDirs.Contains([System.IO.Path]::GetFileName($s))) { continue }
+            # Never descend a reparse point: a junction back to an ancestor is a
+            # cycle, and a junction elsewhere is not part of this repo's tree.
+            try {
+                if (([System.IO.File]::GetAttributes($s) -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+            } catch { continue }
+            $stack.Push($s)
+        }
+        try { $files = [System.IO.Directory]::EnumerateFiles($dir) } catch { $files = @() }
+        foreach ($f in $files) {
+            $ext = [System.IO.Path]::GetExtension($f)
+            if ($ext -and $skipExts.Contains($ext)) { continue }
+            $leaf = [System.IO.Path]::GetFileName($f)
+            $hit = $false
+            foreach ($lp in $leafPatterns) { if ($leaf -like $lp) { $hit = $true; break } }
+            if (-not $hit -and $pathPatterns.Count -gt 0) {
+                $rel = ($f.Substring($root.Length).TrimStart('\', '/')) -replace '\\', '/'
+                foreach ($pp in $pathPatterns) { if ($rel -like $pp) { $hit = $true; break } }
+            }
+            if (-not $hit) { continue }
+            $count++
+            try { $bytes += ([System.IO.FileInfo]::new($f)).Length } catch { }
+            if ($count -gt $Limit) { $truncated = $true; break }
+        }
+    }
+    return @{ FileCount = $count; Bytes = $bytes; Truncated = $truncated }
+}
+
+function Test-EraBroadScopeAllowed {
+    <#
+    .SYNOPSIS
+        Consent decision for a broad bundle. $true = proceed, $false = refuse.
+
+    .DESCRIPTION
+        A truncated enumeration always refuses: an unknown count is not a safe
+        count, and truncation means the repo is already past the bound we were
+        willing to measure. -Force is the documented override.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Scope,
+        [Parameter(Mandatory)][int]$MaxFiles,
+        [Parameter(Mandatory)][long]$MaxBytes,
+        [switch]$Force
+    )
+    if ($Force) { return $true }
+    if ($Scope.Truncated) { return $false }
+    if ([int]$Scope.FileCount -gt $MaxFiles) { return $false }
+    if ([long]$Scope.Bytes -gt $MaxBytes) { return $false }
+    return $true
+}
+
+function Format-EraBroadScopeNotice {
+    <#
+    .SYNOPSIS
+        The human-readable "here is what you are about to upload" block.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Scope,
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [string[]]$Reviewers = @(),
+        [int]$Limit = 5000
+    )
+    $countText = if ($Scope.Truncated) { ">$Limit" } else { '{0:N0}' -f [int]$Scope.FileCount }
+    $mb = [Math]::Round(([long]$Scope.Bytes) / 1MB, 1)
+    $sizeText = if ($Scope.Truncated) { "> $mb MB" } else { "$mb MB" }
+    $lines = @(
+        "[era] BROAD BUNDLE — no -IncludeFiles was given, so the repo-wide default globs apply."
+        "[era]   repo root : $RepoRoot"
+        "[era]   files     : $countText"
+        "[era]   size      : $sizeText (approx, pre-bundle)"
+        "[era]   gitignore : NOT honoured (useGitignore=false) — ignored files are bundled too"
+        "[era]   sending to: $(if ($Reviewers) { $Reviewers -join ', ' } else { '(none resolved)' })"
+    )
+    return ($lines -join "`n")
+}
+
 function Get-EraReviewArtifactIgnorePatterns {
     <#
     .SYNOPSIS

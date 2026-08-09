@@ -155,10 +155,29 @@ digraph era_flow {
 |---|---|---|
 | Spec review | `-IncludeFiles spec.md,file1.py,file2.py,...` — spec + files it references | Focused context; reviewer sees what the implementation will touch |
 | Assessment of recent changes | `-IncludeFiles` from conversation context, or `--auto-detect` | Delta-focused; avoids reviewing unrelated code |
-| Broad repo audit | Omit `-IncludeFiles` (era.ps1 globs ~40 extensions) | Full coverage; only for small repos or when scope is unclear |
+| Broad repo audit | Omit `-IncludeFiles` (era.ps1 globs ~40 extensions) | Full coverage; only for small repos or when scope is unclear — **gated, see below** |
 | Round 2+ | `--diff` + `-IncludeFiles` of changed files only | 4x cheaper; reviewer focuses on fixes, not re-reading unchanged code |
 
 **`--auto-detect` vs omit:** `--auto-detect` derives the file list from `git status` + `HEAD~1` (recent changes only). Omitting `-IncludeFiles` entirely uses broad globs across the whole repo (~40 extensions). Use `--auto-detect` when reviewing recent work; omit only when the scope is genuinely repo-wide.
+
+**The broad path announces itself and is gated (2026-08-09).** Before repomix
+runs, era enumerates what the default globs actually resolve to and prints it:
+
+```
+[era] BROAD BUNDLE — no -IncludeFiles was given, so the repo-wide default globs apply.
+[era]   repo root : C:\Users\Joshua\Servers
+[era]   files     : >5000
+[era]   size      : > 1277.4 MB (approx, pre-bundle)
+[era]   gitignore : NOT honoured (useGitignore=false) — ignored files are bundled too
+[era]   sending to: gemini, opus
+```
+
+Above the ceiling (default **1000 files / 10 MB**, override with
+`ERA_BROAD_MAX_FILES` / `ERA_BROAD_MAX_BYTES`, bypass with `-Force`) era
+refuses. The enumeration short-circuits at 5001 entries, so measuring a runaway
+repo costs ~2s rather than the 18-minute repomix crash it replaces. It is
+deliberately **not** `git ls-files`: `useGitignore=false` makes the include set a
+superset of tracked files, so git would under-report exactly the repo that hurts.
 
 **Repo-root constraint:** All `-IncludeFiles` paths are resolved relative to the repo root. Files outside the repo (e.g., the SKILL.md itself at `~/.claude/skills/...`) cannot be included. To review external files, copy them into the repo first or reference them in the prompt text.
 

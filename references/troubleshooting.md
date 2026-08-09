@@ -68,6 +68,33 @@ Boolean parameters accept only Boolean values and numbers
 
 ---
 
+### repomix timeout does not kill the node child (known limitation)
+
+**Symptom:** era reports `repomix timed out after 300s`, but a `node` process
+keeps burning CPU (and disk) afterwards.
+
+**Cause:** the repomix guard uses `Start-ThreadJob` + `Wait-Job -Timeout` +
+`Stop-Job`. `Stop-Job` ends the *thread*; it cannot bound the **native child
+process** repomix spawned. The backend adapters do not have this problem — they
+hold a `Process` handle and call `.Kill($true)` for a tree-kill, an invariant
+`tests/ProcessTreeKill.Tests.ps1` asserts across agy/claude/opencode.
+
+**Why it is still this way:** `repomix` resolves to a `.ps1`/`.cmd` shim on
+Windows, so putting it behind a `Process` handle needs its own shim-resolution
+logic (and tests) rather than a one-line swap. Tracked as a follow-on.
+
+**Mitigations already in place (2026-08-09):** the timeout branch now calls
+`Receive-Job` *before* `Stop-Job`, so whatever repomix managed to emit reaches
+the error message instead of being discarded; and both failure paths run the
+capture through `Get-EraTruncatedText`, because the run that started collecting
+72,378 files interpolated a **16.9 MB** log into its exception string. The
+broad-bundle gate above should stop you reaching this state at all.
+
+**If you hit it:** kill the stray `node` process manually, then re-run with
+`-IncludeFiles` scoped to what you actually want reviewed.
+
+---
+
 ### agy settings.json `.era-backup` (deprecated crash-recovery)
 
 **Background:** Earlier versions selected the agy/Gemini model by **swapping** `~/.gemini/antigravity-cli/settings.json` before each dispatch and restoring it after, writing a crash-safe `settings.json.era-backup` first. A SIGKILL/Ctrl-C between swap and restore could leave the user pinned to the wrong interactive model; era.ps1 restored the orphaned backup on its next launch.

@@ -1007,6 +1007,10 @@ Be terse. If a section is empty, write "(none)".
             )
         }
         $effectiveInclude = $defaultGlobs
+        # This — and only this — is the broad repo-wide path. The consent gate
+        # below keys off it; the spec-file and explicit -IncludeFiles branches
+        # above are already narrow by construction.
+        $usedDefaultGlobs = $true
     }
 
     # --- Diff mode for round 2+ ---
@@ -1149,6 +1153,30 @@ Be terse. If a section is empty, write "(none)".
     $configJson = $configData | ConvertTo-Json -Depth 10
     $configJson | Set-Content -Path $configPath -Encoding utf8
 
+    # --- Broad-bundle consent gate (2026-08-09) -------------------------------
+    # The broad path never announced its scope and had no ceiling, so a repo-wide
+    # run on a big tree became an 18-minute repomix crash instead of an immediate
+    # "that's 72,378 files, are you sure?". Enumerate what the globs actually
+    # resolve to — bounded, and NOT via `git ls-files`, since useGitignore=$false
+    # makes the include set a superset of tracked files — then print it and
+    # refuse above the ceiling unless -Force.
+    if ($usedDefaultGlobs) {
+        $broadLimit    = 5000
+        $broadMaxFiles = if ($env:ERA_BROAD_MAX_FILES) { [int]$env:ERA_BROAD_MAX_FILES } else { 1000 }
+        $broadMaxBytes = if ($env:ERA_BROAD_MAX_BYTES) { [long]$env:ERA_BROAD_MAX_BYTES } else { [long]10MB }
+        $broadScope = Measure-EraBroadScope -RepoRoot $repoRoot -Include $effectiveInclude `
+            -IgnorePatterns $configData.ignore.customPatterns -Limit $broadLimit
+        Write-Host (Format-EraBroadScopeNotice -Scope $broadScope -RepoRoot $repoRoot `
+            -Reviewers $reviewerList -Limit $broadLimit)
+        $broadForce = $Force.IsPresent -or (Get-ForceMode)
+        if (-not (Test-EraBroadScopeAllowed -Scope $broadScope -MaxFiles $broadMaxFiles `
+                    -MaxBytes $broadMaxBytes -Force:$broadForce)) {
+            Stop-EraWithError ("Refusing this broad bundle: it exceeds the ceiling of $broadMaxFiles files / " +
+                "$([Math]::Round($broadMaxBytes / 1MB, 1)) MB (raise with ERA_BROAD_MAX_FILES / " +
+                "ERA_BROAD_MAX_BYTES). Pass -IncludeFiles to scope the review, or -Force to send it anyway.")
+        }
+    }
+
     # --- 2026-06-10 hardening P6: out-of-repo -IncludeFiles staging ----------
     # repomix can only bundle under repoRoot. An ABSOLUTE path outside the repo
     # is explicit caller intent (e.g. skill sources under ~/.claude), so stage
@@ -1234,9 +1262,25 @@ Be terse. If a section is empty, write "(none)".
     $repomixJob = Start-ThreadJob -Name repomix -ScriptBlock { param($c, $r) Push-Location $r; $o = repomix -c $c 2>&1; $ec = $LASTEXITCODE; Pop-Location; @{ output = $o; exitCode = $ec } } -ArgumentList $configPath, $repoRoot
     $completed = $repomixJob | Wait-Job -Timeout $repomixTimeoutSec
     if (-not $completed) {
+        # Drain the job BEFORE stopping it. Stop-Job discarded everything repomix
+        # had said, so an 18-minute timeout explained nothing at all.
+        #
+        # KNOWN LIMITATION: Wait-Job/Stop-Job cannot bound the NATIVE child
+        # process repomix spawns — Stop-Job ends the thread, node keeps running.
+        # The adapters solve the equivalent problem with Process.Kill($true)
+        # (tests/ProcessTreeKill.Tests.ps1), but repomix resolves to a .ps1/.cmd
+        # shim on Windows, so putting it behind a Process handle needs its own
+        # shim resolution and tests. See references/troubleshooting.md.
+        $partial = ''
+        try {
+            $partialObj = Receive-Job $repomixJob -ErrorAction SilentlyContinue
+            if ($partialObj) { $partial = (@($partialObj | ForEach-Object { "$_" }) -join "`n") }
+        } catch { }
         Stop-Job $repomixJob -ErrorAction SilentlyContinue
         Remove-Job $repomixJob -Force -ErrorAction SilentlyContinue
-        throw "repomix timed out after ${repomixTimeoutSec}s"
+        $partialText = Get-EraTruncatedText -Text $partial -MaxChars 4000
+        throw ("repomix timed out after ${repomixTimeoutSec}s." +
+            $(if ($partialText) { " Partial output:`n$partialText" } else { " No output was captured before the timeout." }))
     }
     $repomixJobError = $repomixJob.Error | ForEach-Object { $_.ToString() }
     $repomixResultObj = Receive-Job $repomixJob -ErrorAction SilentlyContinue
@@ -1249,7 +1293,9 @@ Be terse. If a section is empty, write "(none)".
     $repomixResult = $repomixResultObj.output -join "`n"
     $repomixExitCode = $repomixResultObj.exitCode
     if ($repomixExitCode -ne 0) {
-        throw "repomix failed with exit code $repomixExitCode`: $repomixResult"
+        # Truncate: this interpolated the entire capture, which was 16.9 MB on
+        # the run that started collecting 72,378 files.
+        throw ("repomix failed with exit code $repomixExitCode`:`n" + (Get-EraTruncatedText -Text $repomixResult -MaxChars 4000))
     }
 
     $tokenCount = 0
