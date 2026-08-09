@@ -1054,6 +1054,21 @@ function Copy-PrimaryResponseAlias {
         if (-not $ordered.Contains($r)) { $ordered.Add($r) }
     }
 
+    # Demote EVERY failed panel member's own file, not just the canonical. The
+    # first version only renamed the canonical, so on the shipped three-model
+    # default each failed reviewer's round-N-<preset>-response.md survived,
+    # still matched the {{PREVIOUS_ROUND}} glob, and carried off-contract content
+    # into the next round — the round-2 blocker, unfixed on the configuration
+    # that actually ships. Caught unanimously again in round 3.
+    foreach ($r in $ReviewerList) {
+        if (& $isOk $r) { continue }
+        $failedFile = Join-Path $ReviewDir "round-$Round-$r-response.md"
+        if (Test-Path $failedFile) {
+            Move-Item -Path $failedFile -Destination (Join-Path $ReviewDir (& $rejectedName $r)) `
+                -Force -ErrorAction SilentlyContinue
+        }
+    }
+
     $primary = $null
     foreach ($cand in $ordered) {
         if (& $isOk $cand) { $primary = $cand; break }
@@ -1179,7 +1194,11 @@ function Write-ReviewMetadata {
             # or single-attempt failure) the first attempt IS the final attempt,
             # so its $firstAttemptCost already covers the input spend.
             $estIn = [Math]::Round(($BundleTokens / 1000000.0) * $reg.pricing.input_per_m, 4)
-            $finalInputCost = if ($retryCount -gt 0) { $estIn } else { 0.0 }
+            # ...but only when there IS a first attempt to have covered it. A
+            # response-contract failure has retryCount==0 and no $firstAttempt
+            # record, so this reported $0.00 for a call that was fully paid for.
+            # Flagged by all three round-3 reviewers.
+            $finalInputCost = if ($retryCount -gt 0 -or -not $firstAttempt) { $estIn } else { 0.0 }
             $entry = @{
                 preset = $preset; backend = $reg.backend; model = $effectiveModelId
                 pricing_source = $pricingNote
@@ -1378,7 +1397,15 @@ function Invoke-EraTrackedProcess {
         RedirectStandardOutput = $outPath
         RedirectStandardError  = $errPath
     }
-    if ($Arguments -and $Arguments.Count -gt 0) { $startArgs['ArgumentList'] = $Arguments }
+    # Quote anything containing whitespace. Start-Process joins -ArgumentList
+    # with spaces WITHOUT quoting, so a config path or npm prefix containing a
+    # space silently split into two arguments and broke the child process.
+    if ($Arguments -and $Arguments.Count -gt 0) {
+        $startArgs['ArgumentList'] = @($Arguments | ForEach-Object {
+            $a = "$_"
+            if ($a -match '\s' -and $a -notmatch '^".*"$') { '"' + $a + '"' } else { $a }
+        })
+    }
 
     $proc = Start-Process @startArgs
     $procId = $proc.Id

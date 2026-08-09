@@ -119,6 +119,24 @@ Describe 'Invoke-EraTrackedProcess' -Tag Unit -Skip:(-not $script:OnWindows) {
         $r.Output   | Should -Match 'Pinging'
     }
 
+    It 'quotes arguments containing spaces' {
+        # Start-Process -ArgumentList joins array elements with spaces and does
+        # NOT quote them, so a repo path or npm prefix containing a space split
+        # into two arguments and broke repomix. Reported by opus as a regression
+        # introduced with the tracked-process change.
+        $tmp = Join-Path $env:TEMP "era space dir $(New-Guid)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            $f = Join-Path $tmp 'a file.txt'
+            Set-Content -Path $f -Value 'QUOTED-OK'
+            $r = Invoke-EraTrackedProcess -FilePath $env:ComSpec `
+                    -Arguments @('/c', 'type', $f) `
+                    -WorkingDirectory $tmp -TimeoutSec 30
+            $r.Output | Should -Match 'QUOTED-OK'
+            $r.ExitCode | Should -Be 0
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+
     It 'cleans up its redirect temp files' {
         $r = Invoke-EraTrackedProcess -FilePath $env:ComSpec `
                 -Arguments @('/c', 'echo', 'x') `

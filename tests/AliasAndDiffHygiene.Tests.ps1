@@ -175,6 +175,47 @@ Describe 'A demoted failure must not re-enter via {{PREVIOUS_ROUND}}' -Tag Unit 
         } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
     }
 
+    It 'demotes EVERY failed reviewer on a multi-reviewer panel, not just the canonical' {
+        # Round-3 panel, unanimous: the demotion only touched the canonical file,
+        # so on the shipped three-model default each failed reviewer's own
+        # round-N-<preset>-response.md survived, still matched the aggregation
+        # glob, and carried off-contract content into round N+1. Same defect as
+        # round 2, on the configuration that actually ships.
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-panel-demote-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-gemini-response.md') -Value 'PANEL-POISON'
+            Set-Content -Path (Join-Path $dir 'round-1-opus-response.md')   -Value 'GOOD-PANEL-ANSWER'
+            $results = @{
+                gemini = @{ Preset = 'gemini'; ExitCode = -1; ContentOk = $false; Error = 'response-contract' }
+                opus   = @{ Preset = 'opus';   ExitCode = 0 }
+            }
+            Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('gemini', 'opus') -Results $results
+
+            $prompt = Join-Path $dir 'p.md'
+            Set-Content -Path $prompt -Value '{{PREVIOUS_ROUND}}'
+            Invoke-PromptTokenSubstitution -PromptFile $prompt -ReviewDir $dir -RoundN 2
+            $text = Get-Content -Raw $prompt
+            $text | Should -Not -Match 'PANEL-POISON'
+            $text | Should -Match 'GOOD-PANEL-ANSWER'
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
+    It 'keeps each demoted panel member on disk as evidence' {
+        $dir = New-RoundDir (Join-Path $env:TEMP "era-panel-evid-$(New-Guid)")
+        try {
+            Set-Content -Path (Join-Path $dir 'round-1-gemini-response.md') -Value 'PANEL-POISON'
+            Set-Content -Path (Join-Path $dir 'round-1-opus-response.md')   -Value 'GOOD'
+            $results = @{
+                gemini = @{ Preset = 'gemini'; ExitCode = -1; ContentOk = $false; Error = 'response-contract' }
+                opus   = @{ Preset = 'opus';   ExitCode = 0 }
+            }
+            Copy-PrimaryResponseAlias -ReviewDir $dir -Round 1 -ReviewerList @('gemini', 'opus') -Results $results
+            Test-Path (Join-Path $dir 'round-1-gemini-response.rejected.md') | Should -BeTrue
+            # The successful member is untouched.
+            Test-Path (Join-Path $dir 'round-1-opus-response.md') | Should -BeTrue
+        } finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
+    }
+
     It 'reports an in-flight prior round rather than a partial panel' {
         # The per-preset branch preceded the claim-file branch, so a round still
         # in flight yielded whatever reviewers had finished, presented as if it
