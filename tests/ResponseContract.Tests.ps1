@@ -149,6 +149,22 @@ Describe 'Assert-EraResponseContract' -Tag Unit {
     }
 }
 
+Describe 'Contract failures recover on any backend, not just agy' -Tag Unit {
+    It 'triggers the fallback re-dispatch for a contract failure on ANY backend' {
+        # Two of three round-2 panel reviewers named this: the fallback fired
+        # only when a preset's backend was 'agy', so a REST or opencode reviewer
+        # that failed the contract spent the whole round with zero usable output
+        # and no recovery path at all.
+        $src = Get-Content -Raw $script:EraPath
+        $trigger = $src.IndexOf('ERA_AGY_FALLBACK')
+        $trigger | Should -BeGreaterThan 0
+        $window = $src.Substring($trigger, [Math]::Min(1400, $src.Length - $trigger))
+        # The trigger set must include contract failures regardless of backend.
+        $window | Should -Match "response-contract"
+        $window | Should -Match 'failedRecoverable|failedContract'
+    }
+}
+
 Describe 'The agy fallback response is contract-checked too' -Tag Unit {
     It 'enforces the contract both BEFORE and AFTER the agy fallback block' {
         # Measured 2026-08-09 on a live dispatch: with the check placed only
