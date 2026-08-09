@@ -39,6 +39,10 @@ function Get-ReviewDiff {
             foreach ($cp in $concretePaths) {
                 # SECURITY: block path traversal — skip files outside repo root
                 if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
+                # Never hash era's own review artifacts into the baseline: on the
+                # broad path the include list is globs, so this recursion used to
+                # sweep up .external-reviews and every later round saw it changed.
+                if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
                 $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                 $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
             }
@@ -122,7 +126,22 @@ function Invoke-PromptTokenSubstitution {
     $responseFile = Join-Path $ReviewDir "round-$previousN-response.md"
     $claimFile    = Join-Path $ReviewDir "round-$previousN-claim.json"
 
-    if (Test-Path $responseFile) {
+    # Carry the WHOLE panel forward, not just the promoted model (2026-08-09).
+    # Only the canonical file used to be substituted, so on a three-reviewer
+    # round two of the three reviews were silently discarded between rounds --
+    # the panel exists precisely because one reviewer is a single point of
+    # failure. Per-preset files are preferred when present; the canonical is the
+    # fallback for single-reviewer rounds, which have no suffixed files.
+    $perPreset = @(Get-ChildItem -Path $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
+        Sort-Object Name)
+    if ($perPreset.Count -gt 0) {
+        $sections = foreach ($f in $perPreset) {
+            if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
+            "### Reviewer: $preset`n`n" + (Get-Content $f.FullName -Raw)
+        }
+        $substitution = "## Previous round's review (round $previousN, $($perPreset.Count) reviewer(s))`n`n" +
+                        ($sections -join "`n`n---`n`n")
+    } elseif (Test-Path $responseFile) {
         $previousText  = Get-Content $responseFile -Raw
         $substitution  = "## Previous round's review (round $previousN)`n`n$previousText"
     } elseif (Test-Path $claimFile) {
@@ -201,6 +220,11 @@ function Write-ReviewManifest {
                 foreach ($cp in $concretePaths) {
                     # SECURITY: block path traversal — skip files outside repo root
                     if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
+                    # Never hash era's own review artifacts into the baseline: on
+                    # the broad path the include list is globs, so this recursion
+                    # used to sweep up .external-reviews and every later round saw
+                    # those artifacts as changed.
+                    if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
                     $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                     $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
                 }
@@ -948,9 +972,21 @@ function Copy-PrimaryResponseAlias {
     .DESCRIPTION
         Preference order for "primary" (R3-Gemini-nit2 / R4-nit — first SUCCESSFUL
         in preference order, NOT first present):
-          1) exact preset 'gemini'
-          2) any preset whose name contains 'gemini'
-          3) first successful reviewer in the approved list ($ReviewerList order)
+        SUPERSEDED 2026-08-09. The order was: exact 'gemini', then any
+        gemini-containing preset, then the approved list. That vendor hardcode
+        dated from when gemini was the only reviewer; on the shipped three-model
+        panel it promoted the cheapest model's answer regardless of substance,
+        and the promoted answer is what feeds round N+1 via {{PREVIOUS_ROUND}}.
+
+        Now: the FIRST SUCCESSFUL reviewer in the caller's own $ReviewerList
+        order. Default behaviour is unchanged, since the shipped panel lists
+        gemini first anyway.
+
+        Single-reviewer runs are NOT exempt. The adapter writes
+        round-N-response.md directly, so there is nothing to promote — but a
+        FAILED response must not be left there as canonical, because round N+1
+        reads it. It is demoted to round-N-<preset>-response.md (evidence is
+        kept) and the canonical is removed.
 
         "Successful" means ExitCode -eq 0 (a content_ok=false agentic capture is
         ExitCode=-1, so it is correctly excluded). Single-reviewer runs already
@@ -964,21 +1000,40 @@ function Copy-PrimaryResponseAlias {
         [Parameter(Mandatory)][string[]]$ReviewerList,
         [Parameter(Mandatory)][hashtable]$Results
     )
-    if ($ReviewerList.Count -le 1) { return }
-
     $isOk = {
         param($p)
         $res = $Results[$p]
         $res -and ($res.ExitCode -eq 0)
     }
 
-    # Build the candidate order: exact gemini, then gemini-containing, then the
-    # approved list order. De-dup while preserving order.
-    $ordered = [System.Collections.Generic.List[string]]::new()
-    if ($ReviewerList -contains 'gemini') { $ordered.Add('gemini') }
-    foreach ($r in $ReviewerList) {
-        if ($r -like '*gemini*' -and -not $ordered.Contains($r)) { $ordered.Add($r) }
+    # SINGLE-REVIEWER RUNS ARE NOT EXEMPT (2026-08-09). This used to return
+    # early for one reviewer, because the adapter writes round-N-response.md
+    # directly and there was nothing to promote. But that also meant a FAILED
+    # response stayed canonical -- and the canonical file feeds round N+1 via
+    # {{PREVIOUS_ROUND}}. All three reviewers of the graded panel independently
+    # named this the #1 blocker, on the very configuration the docs tell people
+    # to drop to. Demote it: keep the answer as evidence under its preset name,
+    # and leave no canonical behind.
+    if ($ReviewerList.Count -le 1) {
+        $solo = @($ReviewerList)[0]
+        if (-not $solo -or (& $isOk $solo)) { return }
+        $canonical = Join-Path $ReviewDir "round-$Round-response.md"
+        if (-not (Test-Path $canonical)) { return }
+        $evidence = Join-Path $ReviewDir "round-$Round-$solo-response.md"
+        if (-not (Test-Path $evidence)) {
+            Move-Item -Path $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
+        } else {
+            Remove-Item -Path $canonical -Force -ErrorAction SilentlyContinue
+        }
+        return
     }
+
+    # Candidate order is the CALLER's order (2026-08-09). It used to put 'gemini'
+    # first unconditionally, a leftover from when gemini was the only reviewer.
+    # On the shipped three-model panel that made the canonical answer always the
+    # cheapest model regardless of substance -- measured: gemini 10,658 bytes
+    # promoted over opus's 19,869 -- and only that answer reached round N+1.
+    $ordered = [System.Collections.Generic.List[string]]::new()
     foreach ($r in $ReviewerList) {
         if (-not $ordered.Contains($r)) { $ordered.Add($r) }
     }
@@ -987,7 +1042,12 @@ function Copy-PrimaryResponseAlias {
     foreach ($cand in $ordered) {
         if (& $isOk $cand) { $primary = $cand; break }
     }
-    if (-not $primary) { return }
+    if (-not $primary) {
+        # Nobody passed. Do not leave a stale canonical from an earlier attempt.
+        $stale = Join-Path $ReviewDir "round-$Round-response.md"
+        if (Test-Path $stale) { Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue }
+        return
+    }
 
     $src = Join-Path $ReviewDir "round-$Round-$primary-response.md"
     $dst = Join-Path $ReviewDir "round-$Round-response.md"
@@ -1236,7 +1296,12 @@ function Resolve-EraRepomixCommand {
         return @{ FilePath = $env:ComSpec; Arguments = @('/c', $Source) }
     }
 
-    if ($ext -eq '.ps1' -or $CommandType -eq 'ExternalScript') {
+    # Extension-driven, NOT CommandType-driven. A reviewer claimed POSIX shims
+    # were routed through `pwsh -File`; measured, they are not, because their
+    # CommandType is Application. But ORing on CommandType would have misrouted
+    # an ExternalScript that is not a .ps1 — on Linux that is a plain shell
+    # script and must run directly. Require the extension.
+    if ($ext -eq '.ps1') {
         # Prefer a sibling .cmd: one less process, and no pwsh startup cost.
         $sibling = Join-Path (Split-Path -Parent $Source) 'repomix.cmd'
         if ($env:ComSpec -and (Test-Path $sibling)) {

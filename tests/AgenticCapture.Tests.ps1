@@ -301,12 +301,31 @@ Describe 'Copy-PrimaryResponseAlias — first successful in preference order' {
         Remove-Item $script:Dir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    It 'prefers exact gemini when successful' {
+    # SUPERSEDED 2026-08-09. This asserted the old vendor hardcode: gemini was
+    # promoted even when the caller listed it second. On the shipped three-model
+    # panel that made the canonical answer always the cheapest model regardless
+    # of substance — measured, gemini's 10,658-byte answer was promoted over
+    # opus's 19,869-byte one, and only the promoted answer reached round N+1 via
+    # {{PREVIOUS_ROUND}}. Flagged as a blocker by the graded panel.
+    #
+    # Default behaviour is unchanged: the shipped panel is ordered
+    # gemini,opus,deepseek-flash, so gemini still wins by being FIRST rather than
+    # by being gemini.
+    It 'promotes the first successful reviewer in the caller''s order' {
         'GEMINI'  | Set-Content (Join-Path $script:Dir 'round-1-gemini-response.md')
         'MINIMAX' | Set-Content (Join-Path $script:Dir 'round-1-minimax-response.md')
         $results = @{ gemini = @{ ExitCode = 0 }; minimax = @{ ExitCode = 0 } }
         Copy-PrimaryResponseAlias -ReviewDir $script:Dir -Round 1 `
             -ReviewerList @('minimax','gemini') -Results $results
+        (Get-Content -Raw (Join-Path $script:Dir 'round-1-response.md')).Trim() | Should -Be 'MINIMAX'
+    }
+
+    It 'still promotes gemini when it is listed first, as the shipped panel does' {
+        'GEMINI'  | Set-Content (Join-Path $script:Dir 'round-1-gemini-response.md')
+        'MINIMAX' | Set-Content (Join-Path $script:Dir 'round-1-minimax-response.md')
+        $results = @{ gemini = @{ ExitCode = 0 }; minimax = @{ ExitCode = 0 } }
+        Copy-PrimaryResponseAlias -ReviewDir $script:Dir -Round 1 `
+            -ReviewerList @('gemini','minimax') -Results $results
         (Get-Content -Raw (Join-Path $script:Dir 'round-1-response.md')).Trim() | Should -Be 'GEMINI'
     }
 
