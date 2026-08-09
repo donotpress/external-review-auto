@@ -43,9 +43,13 @@ function Invoke-AnthropicReview {
     $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
     $fullContent = "$promptText`n`n--- BUNDLE ($BundlePath) ---`n`n$bundleText"
 
+    # Capability from the registry, falling back to the value this adapter used
+    # to hardcode. Raising a cap is now a config edit, not a code edit.
+    $maxTokens = if ($ModelInfo.max_tokens) { [int]$ModelInfo.max_tokens } else { 8192 }
+
     $body = @{
         model      = $modelId
-        max_tokens = 8192
+        max_tokens = $maxTokens
         messages   = @(
             @{ role = 'user'; content = $fullContent }
         )
@@ -80,7 +84,7 @@ function Invoke-AnthropicReview {
 
         # Check for truncation
         if ($resp.stop_reason -eq 'max_tokens') {
-            $truncationWarning = "Response hit max_tokens=8192; consider raising or tightening the prompt."
+            $truncationWarning = "Response hit max_tokens=$maxTokens; consider raising max_tokens for this preset in backends/_registry.json or tightening the prompt."
             $warnings += $truncationWarning
         } elseif ($resp.stop_reason -and $resp.stop_reason -notin @('end_turn','stop_sequence')) {
             $warnings += "Unusual stop_reason: $($resp.stop_reason)"

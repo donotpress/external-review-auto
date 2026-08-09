@@ -47,6 +47,10 @@ function Invoke-GeminiapiReview {
     $promptText = Get-Content -Raw $PromptPath -ErrorAction Stop
     $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
 
+    # Capability from the registry, falling back to the value this adapter used
+    # to hardcode. Raising a cap is now a config edit, not a code edit.
+    $maxTokens = if ($ModelInfo.max_tokens) { [int]$ModelInfo.max_tokens } else { 8192 }
+
     $body = @{
         contents = @(
             @{
@@ -59,7 +63,7 @@ function Invoke-GeminiapiReview {
         )
         generationConfig = @{
             temperature       = 0.3
-            maxOutputTokens   = 8192
+            maxOutputTokens   = $maxTokens
         }
     } | ConvertTo-Json -Depth 12 -Compress
 
@@ -94,7 +98,7 @@ function Invoke-GeminiapiReview {
 
         # Check for truncation (finishReason = MAX_TOKENS)
         if ($candidate.finishReason -eq 'MAX_TOKENS') {
-            $truncationWarning = "Response hit maxOutputTokens=8192; consider raising or tightening the prompt."
+            $truncationWarning = "Response hit maxOutputTokens=$maxTokens; consider raising max_tokens for this preset in backends/_registry.json or tightening the prompt."
             $warnings += $truncationWarning
         } elseif ($candidate.finishReason -and $candidate.finishReason -ne 'STOP') {
             $warnings += "Non-STOP finishReason: $($candidate.finishReason)"
