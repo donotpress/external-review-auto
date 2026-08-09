@@ -531,6 +531,30 @@ drive-stripped mirror. Staged copies persist as round artifacts. Files only
 (out-of-repo dirs/globs throw). Relative traversal (`../secret`) remains
 blocked — typing the full absolute path is the explicit opt-in.
 
+## Review artifacts are never re-uploaded — 2026-08-09
+
+The repomix config sets `useGitignore=false` and `useDefaultPatterns=false`, so
+nothing implicitly excludes `.external-reviews/`. It was not in `customPatterns`
+either, and the default globs (`**/*.md`, `**/*.json`, …) match all of it — so a
+round bundled every PRIOR round's prompt and response, the manifests and
+metadata (which carry `Stderr`), and every `round-N-external/HOME/…` copy staged
+from `~/.claude`. Round N shipped round N-1 to a third-party API.
+
+`Get-EraReviewArtifactIgnorePatterns` (workflow.ps1) now supplies the exclusion.
+repomix's ignore **beats** its include and does not honour `!negation`
+(measured, repomix 1.12.0), so a blanket `.external-reviews/**` would also drop
+the P6 staged files above — the very files the caller asked to review. Two
+shapes therefore:
+
+- no out-of-repo `-IncludeFiles` → blanket `.external-reviews/**`;
+- out-of-repo staging in play → the same exclusion with a hole for **this**
+  round's `round-N-external/`. Current-topic artifacts are matched by shape
+  (`<slug>/*.*` — round files have an extension, the staging dir does not), so
+  files era writes after the patterns are computed are still excluded.
+
+`tests/ReviewArtifactIgnore.Tests.ps1` asserts this by running real repomix and
+inspecting the paths that actually landed in the bundle.
+
 ## Conductor protocol (NORMATIVE — any calling model, any platform) — 2026-06-10
 
 The transport (era.ps1) is deterministic; review QUALITY depends on the

@@ -1134,6 +1134,79 @@ function Write-ReviewMetadata {
     $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
+function Get-EraReviewArtifactIgnorePatterns {
+    <#
+    .SYNOPSIS
+        repomix ignore patterns that keep era's OWN review artifacts out of the
+        bundle it is about to upload.
+
+    .DESCRIPTION
+        era writes every round under .external-reviews/<slug>/: the prompt, the
+        reviewer responses, the manifest and metadata (which carry Stderr), and
+        the staged copies of any out-of-repo -IncludeFiles. The repomix config
+        sets useGitignore=$false and useDefaultPatterns=$false, so nothing else
+        excludes that tree -- and the default globs ('**/*.md', '**/*.json', ...)
+        match all of it. Without these patterns, round N re-transmits round N-1
+        to a third-party API.
+
+        Two shapes, because repomix's ignore beats its include (measured against
+        repomix 1.12.0 -- an explicitly-listed file is still dropped if a
+        customPattern matches it, and '!negation' patterns are not honoured):
+
+          -AllowStaging absent  -> a single blanket '.external-reviews/**'.
+          -AllowStaging present -> the same exclusion with a hole cut for THIS
+             round's round-<N>-external/ staging dir, which holds files the
+             caller explicitly asked to review (era.ps1 P6 staging). A blanket
+             pattern would silently drop them from the bundle.
+
+        The carve-out ignores current-topic round artifacts by SHAPE
+        ('<slug>/*.*' -- every round-N-*.md/.json/.xml file sits directly in the
+        topic dir and has an extension, while the staging dir 'round-N-external'
+        has none), so artifacts written after this call (the round's own
+        config.json) are still excluded. Sibling directories are enumerated
+        because they must be matched by name to spare the one we keep.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$TopicSlug,
+        [Parameter(Mandatory)][int]$Round,
+        [switch]$AllowStaging
+    )
+    $base = '.external-reviews'
+    $blanket = @("$base/**")
+    if (-not $AllowStaging) { return $blanket }
+
+    $absBase = Join-Path $RepoRoot $base
+    if (-not (Test-Path $absBase)) { return $blanket }
+
+    $patterns = [System.Collections.Generic.List[string]]::new()
+
+    # Every unrelated topic goes wholesale.
+    foreach ($child in @(Get-ChildItem -LiteralPath $absBase -Force -ErrorAction SilentlyContinue)) {
+        if ($child.Name -eq $TopicSlug) { continue }
+        $patterns.Add("$base/$($child.Name)")
+        $patterns.Add("$base/$($child.Name)/**")
+    }
+
+    # This topic's own round artifacts, matched by shape so files created after
+    # this enumeration are covered too.
+    $patterns.Add("$base/$TopicSlug/*.*")
+
+    # Sibling directories inside this topic -- prior rounds' staging dirs -- go
+    # too; only the current round's survives.
+    $keepDir  = "round-$Round-external"
+    $absTopic = Join-Path $absBase $TopicSlug
+    if (Test-Path $absTopic) {
+        foreach ($child in @(Get-ChildItem -LiteralPath $absTopic -Force -Directory -ErrorAction SilentlyContinue)) {
+            if ($child.Name -eq $keepDir) { continue }
+            $patterns.Add("$base/$TopicSlug/$($child.Name)")
+            $patterns.Add("$base/$TopicSlug/$($child.Name)/**")
+        }
+    }
+    return @($patterns)
+}
+
 function Test-SlugPerRoundPattern {
     [CmdletBinding()]
     param(

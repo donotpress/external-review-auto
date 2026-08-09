@@ -1059,6 +1059,31 @@ Be terse. If a section is empty, write "(none)".
         }
     }
 
+    # --- Keep era's own review artifacts out of the bundle (2026-08-09) --------
+    # .external-reviews/ was never excluded, so on the default-glob path every
+    # prior round's prompt/response/manifest (Stderr included) and every staged
+    # ~/.claude copy was re-uploaded to the reviewer API. See
+    # Get-EraReviewArtifactIgnorePatterns in workflow.ps1.
+    #
+    # repomix's ignore beats its include, so the blanket pattern would also drop
+    # the P6 staged files below (:1089) — which are exactly what the caller asked
+    # to review. Detect that case here, using the same test the staging block
+    # applies, and ask for the carve-out shape instead.
+    $stagingInPlay = $false
+    if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
+        foreach ($e in $IncludeFiles) {
+            $entry = "$e"
+            if ($entry -match '[*?\[\]]') { continue }
+            if (-not [System.IO.Path]::IsPathRooted($entry)) { continue }
+            if (-not [System.IO.Path]::GetFullPath($entry).StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $stagingInPlay = $true
+                break
+            }
+        }
+    }
+    $artifactIgnore = Get-EraReviewArtifactIgnorePatterns -RepoRoot $repoRoot `
+        -TopicSlug $TopicSlug -Round $round -AllowStaging:$stagingInPlay
+
     $configData = @{
         # showLineNumbers (2026-06-10 hardening P4): reviewers fabricate
         # bundle-relative line numbers on large bundles — observed on BOTH
@@ -1069,7 +1094,7 @@ Be terse. If a section is empty, write "(none)".
         ignore = @{
             useGitignore = $false
             useDefaultPatterns = $false
-            customPatterns = @('node_modules/**', '.git/**', '__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db')
+            customPatterns = @('node_modules/**', '.git/**', '__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
         }
     }
     $configJson = $configData | ConvertTo-Json -Depth 10
