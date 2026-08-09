@@ -72,6 +72,14 @@ param(
     # dispatching a review. Never installs anything — it reports the fix commands.
     [switch]$Doctor,
     [switch]$Force,
+    # -ForceBroadScope: consent to a repo-wide bundle that exceeds the scale
+    # ceiling. Deliberately SEPARATE from -Force, which means "skip the COST
+    # prompt" (SKILL.md) and which the skill's own normative dispatch line passes
+    # on every call. Folding the two together would leave the scale gate inert
+    # for the only caller this skill documents — an agent dispatching
+    # non-interactively — which is how the 72,378-file run happened.
+    # ERA_BROAD_FORCE=1 is the env equivalent for CI.
+    [switch]$ForceBroadScope,
     [string[]]$IncludeFiles,
     [string]$PromptOverrideFile,
     # 2026-06-10 hardening P2: typed channel for the calling agent's
@@ -972,6 +980,10 @@ Be terse. If a section is empty, write "(none)".
 
     # --- Determine effective include list ---
     $effectiveInclude = @()
+    # Initialized explicitly (A6): only the else-branch below assigns it, and the
+    # gate reads it. Correct today because there is no Set-StrictMode in this
+    # repo, but that is a tripwire for whoever adds one.
+    $usedDefaultGlobs = $false
     if ($IncludeFiles) { $effectiveInclude = [array]$IncludeFiles }
     elseif ($Mode -eq 'spec' -and $specFile) {
         $relativeSpecPath = $specFile.FullName.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
@@ -1136,22 +1148,10 @@ Be terse. If a section is empty, write "(none)".
     }
     $artifactIgnore = Get-EraReviewArtifactIgnorePatterns -RepoRoot $repoRoot `
         -TopicSlug $TopicSlug -Round $round -AllowStaging:$stagingInPlay
+    # Hoisted so the broad-scope gate below can measure against the SAME ignore
+    # set repomix will use, while the config itself is built after staging.
+    $repomixIgnorePatterns = @('node_modules/**', '.git/**', '__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
 
-    $configData = @{
-        # showLineNumbers (2026-06-10 hardening P4): reviewers fabricate
-        # bundle-relative line numbers on large bundles — observed on BOTH
-        # correct and incorrect claims. True per-file numbers in the bundle +
-        # the citation instruction in the prompt templates kill the artifact.
-        output = @{ filePath = $bundlePath; style = 'xml'; showLineNumbers = $true; instructionFilePath = $promptPath; headerText = if ($isFollowUp) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
-        include = $effectiveInclude
-        ignore = @{
-            useGitignore = $false
-            useDefaultPatterns = $false
-            customPatterns = @('node_modules/**', '.git/**', '__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
-        }
-    }
-    $configJson = $configData | ConvertTo-Json -Depth 10
-    $configJson | Set-Content -Path $configPath -Encoding utf8
 
     # --- Broad-bundle consent gate (2026-08-09) -------------------------------
     # The broad path never announced its scope and had no ceiling, so a repo-wide
@@ -1161,19 +1161,36 @@ Be terse. If a section is empty, write "(none)".
     # makes the include set a superset of tracked files — then print it and
     # refuse above the ceiling unless -Force.
     if ($usedDefaultGlobs) {
-        $broadLimit    = 5000
-        $broadMaxFiles = if ($env:ERA_BROAD_MAX_FILES) { [int]$env:ERA_BROAD_MAX_FILES } else { 1000 }
-        $broadMaxBytes = if ($env:ERA_BROAD_MAX_BYTES) { [long]$env:ERA_BROAD_MAX_BYTES } else { [long]10MB }
+        $broadLimit = 5000
+        # TryParse, not a hard cast: ERA_BROAD_MAX_FILES=none is a natural attempt
+        # to disable the ceiling and used to produce a raw PowerShell cast error
+        # instead of era's clean single-line preflight shape.
+        $broadMaxFiles = 1000
+        if ($env:ERA_BROAD_MAX_FILES) {
+            $parsedFiles = 0
+            if ([int]::TryParse($env:ERA_BROAD_MAX_FILES, [ref]$parsedFiles)) { $broadMaxFiles = $parsedFiles }
+            else { Write-Host "[era] WARNING: ERA_BROAD_MAX_FILES='$($env:ERA_BROAD_MAX_FILES)' is not a number; using $broadMaxFiles." }
+        }
+        $broadMaxBytes = [long]10MB
+        if ($env:ERA_BROAD_MAX_BYTES) {
+            $parsedBytes = [long]0
+            if ([long]::TryParse($env:ERA_BROAD_MAX_BYTES, [ref]$parsedBytes)) { $broadMaxBytes = $parsedBytes }
+            else { Write-Host "[era] WARNING: ERA_BROAD_MAX_BYTES='$($env:ERA_BROAD_MAX_BYTES)' is not a number; using $broadMaxBytes." }
+        }
         $broadScope = Measure-EraBroadScope -RepoRoot $repoRoot -Include $effectiveInclude `
-            -IgnorePatterns $configData.ignore.customPatterns -Limit $broadLimit
+            -IgnorePatterns $repomixIgnorePatterns -Limit $broadLimit
         Write-Host (Format-EraBroadScopeNotice -Scope $broadScope -RepoRoot $repoRoot `
             -Reviewers $reviewerList -Limit $broadLimit)
-        $broadForce = $Force.IsPresent -or (Get-ForceMode)
+        # NOT $Force: that is cost consent, and the documented dispatch line always
+        # passes it. Scale consent needs its own deliberate signal.
+        $broadForce = $ForceBroadScope.IsPresent -or ($env:ERA_BROAD_FORCE -eq '1')
         if (-not (Test-EraBroadScopeAllowed -Scope $broadScope -MaxFiles $broadMaxFiles `
                     -MaxBytes $broadMaxBytes -Force:$broadForce)) {
             Stop-EraWithError ("Refusing this broad bundle: it exceeds the ceiling of $broadMaxFiles files / " +
                 "$([Math]::Round($broadMaxBytes / 1MB, 1)) MB (raise with ERA_BROAD_MAX_FILES / " +
-                "ERA_BROAD_MAX_BYTES). Pass -IncludeFiles to scope the review, or -Force to send it anyway.")
+                "ERA_BROAD_MAX_BYTES). Pass -IncludeFiles to scope the review, or -ForceBroadScope " +
+                "(or ERA_BROAD_FORCE=1) to send it anyway. Note -Force does NOT bypass this — it only " +
+                "skips the cost prompt.")
         }
     }
 
@@ -1188,6 +1205,7 @@ Be terse. If a section is empty, write "(none)".
     # as round-N-bundle.xml). RELATIVE traversal (..\..) stays blocked below —
     # that shape is accidental, not intent. Files only; out-of-repo dirs/globs
     # throw (pass individual files).
+    $includeRewrites = @{}
     if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
         $IncludeFiles = @($IncludeFiles | ForEach-Object {
             $entry = "$_"
@@ -1196,7 +1214,11 @@ Be terse. If a section is empty, write "(none)".
             $full = [System.IO.Path]::GetFullPath($entry)
             if ($full.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
                 # Absolute but inside the repo — relativize for repomix.
-                return ($full.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
+                $relIn = ($full.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
+                # Same reason as the staged case below: $effectiveInclude must
+                # learn about this rewrite or repomix keeps the absolute path.
+                $includeRewrites[$entry] = $relIn
+                return $relIn
             }
             if (-not (Test-Path $full -PathType Leaf)) {
                 Stop-EraWithError "out-of-repo -IncludeFiles entry must be an existing FILE (dirs/globs unsupported): $entry"
@@ -1216,9 +1238,45 @@ Be terse. If a section is empty, write "(none)".
             Copy-Item -Path $full -Destination $stagedAbs -Force
             $stagedRel = ($stagedAbs.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
             Write-Host "[era] Staged out-of-repo file for bundling: $full -> $stagedRel"
+            $includeRewrites[$entry] = $stagedRel
             return $stagedRel
         })
     }
+
+    # --- Carry the staging rewrite into the repomix include list (2026-08-09) ---
+    # This block rebinds $IncludeFiles, but repomix reads $effectiveInclude, which
+    # was frozen from $IncludeFiles further up. So the config still named the raw
+    # ABSOLUTE out-of-repo path, which matches nothing under the repo root: era
+    # staged the file, printed "Staged out-of-repo file for bundling", passed path
+    # validation and recorded it in the manifest -- and the bundle never contained
+    # it. Measured, not inferred. The empty-bundle guard cannot catch it, because
+    # the bundle is not empty whenever any other file was requested.
+    #
+    # Remap entry-by-entry rather than reassigning $effectiveInclude wholesale, so
+    # diff mode (which replaces it with the changed-file list) and spec mode are
+    # left alone.
+    if ($includeRewrites.Count -gt 0) {
+        $effectiveInclude = @($effectiveInclude | ForEach-Object {
+            if ($includeRewrites.ContainsKey("$_")) { $includeRewrites["$_"] } else { $_ }
+        })
+    }
+
+    # --- repomix config (built AFTER staging, see above) ----------------------
+    $configData = @{
+        # showLineNumbers (2026-06-10 hardening P4): reviewers fabricate
+        # bundle-relative line numbers on large bundles — observed on BOTH
+        # correct and incorrect claims. True per-file numbers in the bundle +
+        # the citation instruction in the prompt templates kill the artifact.
+        output = @{ filePath = $bundlePath; style = 'xml'; showLineNumbers = $true; instructionFilePath = $promptPath; headerText = if ($isFollowUp) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
+        include = $effectiveInclude
+        ignore = @{
+            useGitignore = $false
+            useDefaultPatterns = $false
+            customPatterns = $repomixIgnorePatterns
+        }
+    }
+    $configJson = $configData | ConvertTo-Json -Depth 10
+    $configJson | Set-Content -Path $configPath -Encoding utf8
 
     # Fix (PR 2 C): Validate -IncludeFiles paths against Test-Path BEFORE invoking
     # repomix. repomix runs 3+ seconds before returning an empty bundle for typo'd

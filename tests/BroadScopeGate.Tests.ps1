@@ -120,6 +120,42 @@ Describe 'Measure-EraBroadScope' -Tag Unit {
     }
 }
 
+Describe 'Measure-EraBroadScope fidelity to repomix' -Tag Unit {
+    It 'prunes ignored directories at the ROOT only, as repomix does' {
+        # Measured against repomix 1.12.0: a bare 'node_modules/**' is anchored at
+        # cwd and does NOT match packages/p/node_modules/d/a.md — repomix bundles
+        # that file. Pruning by directory NAME at any depth under-counted it, so
+        # the notice printed a reassuring number while repomix collected the tree.
+        $tmp = Join-Path $env:TEMP "era-scope-anchor-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $tmp 'packages/p/node_modules/d') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $tmp 'node_modules') -Force | Out-Null
+        try {
+            Set-Content -Path (Join-Path $tmp 'root.md') -Value 'x'
+            Set-Content -Path (Join-Path $tmp 'packages/p/node_modules/d/a.md') -Value 'x'
+            Set-Content -Path (Join-Path $tmp 'node_modules/top.md') -Value 'x'
+            $s = Measure-EraBroadScope -RepoRoot $tmp -Include @('**/*.md') `
+                    -IgnorePatterns @('node_modules/**')
+            # root.md + the NESTED one repomix would bundle; the root-level one is pruned.
+            $s.FileCount | Should -Be 2
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'refuses to guess at a glob shape -like cannot match (brace alternation)' {
+        # ERA_DEFAULT_GLOBS is documented as a repomix glob list, so '**/*.{ts,tsx}'
+        # is legitimate. PowerShell -like has no brace alternation, so it matched
+        # nothing and reported 0 files while repomix bundled the whole tree.
+        $tmp = Join-Path $env:TEMP "era-scope-brace-$(New-Guid)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            Set-Content -Path (Join-Path $tmp 'a.ts') -Value 'x'
+            $s = Measure-EraBroadScope -RepoRoot $tmp -Include @('**/*.{ts,tsx}')
+            # Unmatchable pattern => report it as unmeasured so the gate refuses,
+            # rather than reporting a confident zero.
+            $s.Truncated | Should -BeTrue
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+}
+
 Describe 'Test-EraBroadScopeAllowed' -Tag Unit {
     It 'allows a scope under both ceilings' {
         $s = @{ FileCount = 10; Bytes = 1000; Truncated = $false }
@@ -137,9 +173,63 @@ Describe 'Test-EraBroadScopeAllowed' -Tag Unit {
         $s = @{ FileCount = 5001; Bytes = 1000; Truncated = $true }
         Test-EraBroadScopeAllowed -Scope $s -MaxFiles 100000 -MaxBytes 100MB | Should -BeFalse
     }
-    It '-Force overrides every ceiling' {
+    It 'the dedicated scale override bypasses the ceiling' {
         $s = @{ FileCount = 72378; Bytes = 900MB; Truncated = $true }
         Test-EraBroadScopeAllowed -Scope $s -MaxFiles 1000 -MaxBytes 10MB -Force | Should -BeTrue
+    }
+}
+
+Describe 'A1: cost consent is not scale consent' -Tag Unit {
+    # SKILL.md's NORMATIVE dispatch line (step 5) always passes -Force, and
+    # -Force is documented as "skip the COST prompt". If -Force also disarmed the
+    # scale ceiling, the gate would be inert for the only caller this skill
+    # documents — an LLM dispatching non-interactively — and the 18-minute crash
+    # comes straight back with a reassuring notice printed first.
+    It 'SKILL.md still documents -Force on the normative dispatch (the premise)' {
+        $skill = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'SKILL.md')
+        $skill | Should -Match 'runtimes/era\.ps1[^\r\n]*-Force'
+    }
+
+    It 'refuses above the ceiling even WITH -Force' {
+        $tmp = Join-Path $env:TEMP "era-gate-force-$(New-Guid)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            New-ScopeRepo -Root $tmp -MdFiles 5
+            $out = & pwsh -NonInteractive -Command @"
+Set-Location '$tmp'
+`$env:ERA_BROAD_MAX_FILES = '2'
+try {
+    & '$($script:EraPath)' -TopicSlug 'gate-test' -Force 2>&1 | Out-String
+} catch {
+    Write-Output "CAUGHT: `$(`$_.Exception.Message)"
+}
+"@ 2>&1 | Out-String
+            $out | Should -Match '(?i)refusing'
+            $out | Should -Not -Match 'Running repomix'
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'proceeds past the ceiling with the dedicated ERA_BROAD_FORCE override' {
+        $tmp = Join-Path $env:TEMP "era-gate-bforce-$(New-Guid)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            New-ScopeRepo -Root $tmp -MdFiles 5
+            # Pair with a missing explicit path? No — the broad path takes no
+            # -IncludeFiles. Assert only that the gate did not refuse; the run is
+            # then stopped by the missing reviewer CLI or the cost cap downstream.
+            $out = & pwsh -NonInteractive -Command @"
+Set-Location '$tmp'
+`$env:ERA_BROAD_MAX_FILES = '2'
+`$env:ERA_BROAD_FORCE = '1'
+`$env:ERA_DEFAULT_GLOBS = 'nothing-matches-this-glob.zzz'
+try {
+    & '$($script:EraPath)' -TopicSlug 'gate-test' -Force 2>&1 | Out-String
+} catch {
+    Write-Output "CAUGHT: `$(`$_.Exception.Message)"
+}
+"@ 2>&1 | Out-String
+            $out | Should -Not -Match '(?i)refusing this broad bundle'
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
     }
 }
 
@@ -155,11 +245,22 @@ Describe 'Format-EraBroadScopeNotice' -Tag Unit {
         $t | Should -Match '(?i)2(\.0)? MB'
     }
 
-    It 'reports a truncated enumeration as ">limit" rather than a false exact count' {
-        $s = @{ FileCount = 5001; Bytes = 12345; Truncated = $true }
+    It 'reports a file-limit truncation as ">limit" rather than a false exact count' {
+        $s = @{ FileCount = 5001; Bytes = 12345; Truncated = $true; Reason = 'file-limit' }
         $t = Format-EraBroadScopeNotice -Scope $s -RepoRoot 'C:\repo' `
                 -Reviewers @('gemini') -Limit 5000
         $t | Should -Match '>5000'
+    }
+
+    It 'does not present a bounded-walk byte total as a meaningful lower bound' {
+        # When the walk stopped on the directory budget, the accumulated bytes can
+        # be an arbitrarily small fraction of the tree. "> 0.1 MB" would read as a
+        # reassuring lower bound; it is not one.
+        $s = @{ FileCount = 12; Bytes = 12345; Truncated = $true; Reason = 'dir-budget' }
+        $t = Format-EraBroadScopeNotice -Scope $s -RepoRoot 'C:\repo' `
+                -Reviewers @('gemini') -Limit 5000
+        $t | Should -Match 'unmeasured'
+        $t | Should -Not -Match '>\s*0\.0 MB'
     }
 }
 
@@ -202,6 +303,29 @@ try {
             $out | Should -Not -Match '(?i)broad bundle'
             $out | Should -Match 'definitely-missing\.py'
         } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'A3: a non-numeric ceiling env var does not throw a raw cast error' {
+        $tmp = Join-Path $env:TEMP "era-gate-badenv-$(New-Guid)"
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        try {
+            New-ScopeRepo -Root $tmp -MdFiles 2
+            $out = & pwsh -NonInteractive -Command @"
+Set-Location '$tmp'
+`$env:ERA_BROAD_MAX_FILES = 'none'
+try {
+    & '$($script:EraPath)' -TopicSlug 'gate-test' 2>&1 | Out-String
+} catch {
+    Write-Output "CAUGHT: `$(`$_.Exception.Message)"
+}
+"@ 2>&1 | Out-String
+            $out | Should -Not -Match 'Cannot convert value'
+        } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
+    }
+
+    It 'A6: $usedDefaultGlobs is initialized, not merely assigned in one branch' {
+        $src = Get-Content -Raw $script:EraPath
+        $src | Should -Match '\$usedDefaultGlobs\s*=\s*\$false'
     }
 
     It 'gates BEFORE invoking repomix (source ordering)' {

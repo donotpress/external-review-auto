@@ -172,9 +172,14 @@ runs, era enumerates what the default globs actually resolve to and prints it:
 [era]   sending to: gemini, opus
 ```
 
-Above the ceiling (default **1000 files / 10 MB**, override with
-`ERA_BROAD_MAX_FILES` / `ERA_BROAD_MAX_BYTES`, bypass with `-Force`) era
-refuses. The enumeration short-circuits at 5001 entries, so measuring a runaway
+Above the ceiling (default **1000 files / 10 MB**, moved with
+`ERA_BROAD_MAX_FILES` / `ERA_BROAD_MAX_BYTES`) era refuses.
+
+**`-Force` does NOT bypass this.** `-Force` means "skip the *cost* prompt", and
+the normative dispatch line in step 5 above passes it on every call — folding
+scale consent into it would leave this gate inert for the only caller the skill
+documents. Scale consent has its own signal: **`-ForceBroadScope`**, or
+`ERA_BROAD_FORCE=1`. The enumeration short-circuits at 5001 entries, so measuring a runaway
 repo costs ~2s rather than the 18-minute repomix crash it replaces. It is
 deliberately **not** `git ls-files`: `useGitignore=false` makes the include set a
 superset of tracked files, so git would under-report exactly the repo that hurts.
@@ -543,7 +548,14 @@ A prompt-only dispatch (no source bundle) remains forbidden.
 sources under `~/.claude/`): era.ps1 stages a copy into the round's artifact
 dir with the source path mirrored —
 `.external-reviews/<slug>/round-N-external/HOME/.claude/.../file.ps1` — so
-bundle citations still identify the real file. **Privacy:** home-rooted
+bundle citations still identify the real file. **Fixed 2026-08-09:** the staged
+copy previously never reached the bundle — the staging block rebinds
+`$IncludeFiles`, but repomix reads `$effectiveInclude`, which was frozen from it
+earlier, so the config still named the raw absolute out-of-repo path and matched
+nothing under the repo root. era staged the file, announced it, passed path
+validation and recorded it in the manifest, and the bundle did not contain it.
+The rewrite is now carried into `$effectiveInclude` (and the config is built
+after staging). **Privacy:** home-rooted
 sources mirror under `HOME/` so the bundle (which is sent to an external
 reviewer API) never embeds `Users/<name>`; non-home paths keep a
 drive-stripped mirror. Staged copies persist as round artifacts. Files only

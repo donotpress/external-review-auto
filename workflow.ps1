@@ -1210,12 +1210,18 @@ function Measure-EraBroadScope {
         [int]$MaxDirs = 20000
     )
     $cmp = [System.StringComparer]::OrdinalIgnoreCase
+    # Root-RELATIVE directory paths, not bare names. Measured against repomix
+    # 1.12.0: a bare 'node_modules/**' is anchored at cwd and does NOT match
+    # packages/p/node_modules/d/a.md — repomix bundles that file. Pruning every
+    # directory merely NAMED node_modules under-counted a monorepo by orders of
+    # magnitude, which is worse than no gate at all: the notice is evidence the
+    # user trusts.
     $skipDirs = [System.Collections.Generic.HashSet[string]]::new($cmp)
     $skipExts = [System.Collections.Generic.HashSet[string]]::new($cmp)
     foreach ($p in @($IgnorePatterns)) {
         $n = "$p" -replace '\\', '/'
-        if ($n -match '^([^*/]+)/\*\*$') { [void]$skipDirs.Add($matches[1]); continue }
-        if ($n -match '^\*(\.[^*/]+)$')  { [void]$skipExts.Add($matches[1]); continue }
+        if ($n -match '^([^*]+)/\*\*$') { [void]$skipDirs.Add($matches[1].TrimEnd('/')); continue }
+        if ($n -match '^\*(\.[^*/]+)$') { [void]$skipExts.Add($matches[1]); continue }
     }
 
     # Split includes into leaf matches ('**/*.md' -> '*.md', the shape every
@@ -1223,13 +1229,23 @@ function Measure-EraBroadScope {
     # else a caller set via ERA_DEFAULT_GLOBS.
     $leafPatterns = [System.Collections.Generic.List[string]]::new()
     $pathPatterns = [System.Collections.Generic.List[string]]::new()
+    $unmatchable  = $false
     foreach ($p in @($Include)) {
         $n = "$p" -replace '\\', '/'
+        # PowerShell -like understands only *, ? and [...]. globby also does brace
+        # alternation ('**/*.{ts,tsx}') and extglob, and ERA_DEFAULT_GLOBS is
+        # documented as a repomix glob list, so those are legitimate input. Report
+        # them as unmeasured rather than silently matching nothing and handing the
+        # gate a confident zero while repomix bundles the whole tree.
+        if ($n -match '[{}]' -or $n -match '[+@!?]\(') { $unmatchable = $true; continue }
         if ($n.StartsWith('**/') -and -not $n.Substring(3).Contains('/')) {
             $leafPatterns.Add($n.Substring(3))
         } else {
             $pathPatterns.Add(($n -replace '\*\*/', '*'))
         }
+    }
+    if ($unmatchable) {
+        return @{ FileCount = 0; Bytes = [long]0; Truncated = $true; Reason = 'unmatchable-glob' }
     }
 
     $root = [System.IO.Path]::GetFullPath($RepoRoot)
@@ -1238,6 +1254,7 @@ function Measure-EraBroadScope {
     $truncated = $false
 
     $dirsSeen = 0
+    $reason = ''
     $stack = [System.Collections.Generic.Stack[string]]::new()
     $stack.Push($root)
     while ($stack.Count -gt 0 -and -not $truncated) {
@@ -1248,11 +1265,13 @@ function Measure-EraBroadScope {
             # truncated so the consent gate refuses rather than waving through a
             # repo we failed to measure.
             $truncated = $true
+            $reason = 'dir-budget'
             break
         }
         try { $subDirs = @([System.IO.Directory]::EnumerateDirectories($dir)) } catch { $subDirs = @() }
         foreach ($s in $subDirs) {
-            if ($skipDirs.Contains([System.IO.Path]::GetFileName($s))) { continue }
+            $subRel = ($s.Substring($root.Length).TrimStart('\', '/')) -replace '\\', '/'
+            if ($skipDirs.Contains($subRel)) { continue }
             # Never descend a reparse point: a junction back to an ancestor is a
             # cycle, and a junction elsewhere is not part of this repo's tree.
             try {
@@ -1274,10 +1293,10 @@ function Measure-EraBroadScope {
             if (-not $hit) { continue }
             $count++
             try { $bytes += ([System.IO.FileInfo]::new($f)).Length } catch { }
-            if ($count -gt $Limit) { $truncated = $true; break }
+            if ($count -gt $Limit) { $truncated = $true; $reason = 'file-limit'; break }
         }
     }
-    return @{ FileCount = $count; Bytes = $bytes; Truncated = $truncated }
+    return @{ FileCount = $count; Bytes = $bytes; Truncated = $truncated; Reason = $reason }
 }
 
 function Test-EraBroadScopeAllowed {
@@ -1316,16 +1335,27 @@ function Format-EraBroadScopeNotice {
         [string[]]$Reviewers = @(),
         [int]$Limit = 5000
     )
-    $countText = if ($Scope.Truncated) { ">$Limit" } else { '{0:N0}' -f [int]$Scope.FileCount }
+    # A4: when the walk was cut short by the directory budget (or an unmatchable
+    # glob), the accumulated byte total can be an arbitrarily small fraction of
+    # the tree. Printing "> 12.3 MB" there invites the trust the gate exists to
+    # withhold, so say plainly that it was not measured.
     $mb = [Math]::Round(([long]$Scope.Bytes) / 1MB, 1)
-    $sizeText = if ($Scope.Truncated) { "> $mb MB" } else { "$mb MB" }
+    $partialWalk = $Scope.Truncated -and $Scope.Reason -ne 'file-limit'
+    $countText = if ($partialWalk) { 'unmeasured (walk bounded)' }
+                 elseif ($Scope.Truncated) { ">$Limit" }
+                 else { '{0:N0}' -f [int]$Scope.FileCount }
+    $sizeText  = if ($partialWalk) { 'unmeasured' }
+                 elseif ($Scope.Truncated) { "> $mb MB" }
+                 else { "$mb MB" }
     $lines = @(
         "[era] BROAD BUNDLE — no -IncludeFiles was given, so the repo-wide default globs apply."
         "[era]   repo root : $RepoRoot"
         "[era]   files     : $countText"
         "[era]   size      : $sizeText (approx, pre-bundle)"
         "[era]   gitignore : NOT honoured (useGitignore=false) — ignored files are bundled too"
-        "[era]   sending to: $(if ($Reviewers) { $Reviewers -join ', ' } else { '(none resolved)' })"
+        # "requested" not "sending to" (A7): the cost prompt downstream can still
+        # drop reviewers, so this list is what was asked for, not what was agreed.
+        "[era]   requested : $(if ($Reviewers) { $Reviewers -join ', ' } else { '(none resolved)' }) (before cost approval)"
     )
     return ($lines -join "`n")
 }

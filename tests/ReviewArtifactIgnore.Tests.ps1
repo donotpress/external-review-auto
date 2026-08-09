@@ -167,16 +167,58 @@ Describe 'Bundle contents (real repomix measurement)' -Tag Integration -Skip:(-n
     }
 }
 
+Describe 'P6 staged files actually reach the bundle' -Tag Integration -Skip:(-not $script:HasRepomix) {
+    # Measured 2026-08-09: era printed "[era] Staged out-of-repo file for
+    # bundling", wrote the staged copy to disk, passed path validation and
+    # recorded the file in the manifest -- and the bundle did NOT contain it.
+    # $effectiveInclude is frozen from $IncludeFiles BEFORE the staging block
+    # rebinds $IncludeFiles to the staged relative paths, so the config repomix
+    # reads still names the raw absolute out-of-repo path, which matches nothing
+    # under the repo root. P6 has never worked; the empty-bundle guard cannot see
+    # it because the bundle is not empty when other files were requested.
+    It 'bundles an absolute out-of-repo -IncludeFiles entry, not just stages it' {
+        $repo = Join-Path $env:TEMP "era-p6-bundle-$(New-Guid)"
+        $ext  = Join-Path $env:TEMP "era-p6-src-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $repo '.git') -Force | Out-Null
+        New-Item -ItemType Directory -Path $ext -Force | Out-Null
+        try {
+            Set-Content -Path (Join-Path $repo 'inrepo.md') -Value '# in-repo'
+            Set-Content -Path (Join-Path $ext 'outside.md') -Value 'OUTSIDE-REPO-MARKER-12345'
+            $extFile = Join-Path $ext 'outside.md'
+
+            # Let the run proceed through repomix, then stop it at the cost cap /
+            # dispatch. The bundle is written before either, so inspect the file.
+            $null = & pwsh -NonInteractive -Command @"
+Set-Location '$repo'
+`$env:ERA_FORCE = '1'
+try {
+    & '$($script:EraPath)' -TopicSlug 'p6bundle' -Reviewer gemini -Force -IncludeFiles 'inrepo.md,$extFile' 2>&1 | Out-String
+} catch { }
+"@ 2>&1
+
+            $bundle = Join-Path $repo '.external-reviews/p6bundle/round-1-bundle.xml'
+            Test-Path $bundle | Should -BeTrue
+            $text = Get-Content -Raw $bundle
+            $text | Should -Match 'OUTSIDE-REPO-MARKER-12345'
+        } finally { Remove-Item -Recurse -Force $repo, $ext -ErrorAction SilentlyContinue }
+    }
+}
+
 Describe 'era.ps1 wires the artifact ignore into its repomix config' -Tag Unit {
     It 'builds customPatterns from Get-EraReviewArtifactIgnorePatterns, not a bare literal list' {
+        # Anchor on the CALL and its wiring, not on the bare function name: a
+        # comment above the call ("See Get-EraReviewArtifactIgnorePatterns in
+        # workflow.ps1") satisfies a bare name match, so deleting the call and
+        # keeping the comment would leave this test green while every bundle
+        # re-uploaded the review history.
         $src = Get-Content -Raw $script:EraPath
-        $src | Should -Match 'Get-EraReviewArtifactIgnorePatterns'
-        # The call must feed customPatterns rather than sit unused.
-        $cfgIdx = $src.IndexOf('customPatterns')
-        $callIdx = $src.IndexOf('Get-EraReviewArtifactIgnorePatterns')
-        $cfgIdx  | Should -BeGreaterThan 0
+        $src | Should -Match '\$artifactIgnore\s*=\s*Get-EraReviewArtifactIgnorePatterns'
+        # The patterns must reach customPatterns, via the hoisted list the gate
+        # also measures against.
+        $src | Should -Match '\$repomixIgnorePatterns\s*=[^\r\n]*\+\s*\$artifactIgnore'
+        $src | Should -Match 'customPatterns\s*=\s*\$repomixIgnorePatterns'
+        $callIdx = $src.IndexOf('$artifactIgnore = Get-EraReviewArtifactIgnorePatterns')
         $callIdx | Should -BeGreaterThan 0
-        # ...and it must be computed before repomix is invoked.
         $callIdx | Should -BeLessThan $src.IndexOf('"Running repomix..."')
     }
 }
