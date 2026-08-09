@@ -499,7 +499,7 @@ if ($SpecReview) {
     # Build IncludeFiles: spec + related + any user-supplied extras (additive)
     $specRelPath = $specReviewPath
     # Make relative to repoRoot if inside the repo
-    if ($specReviewPath.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (Test-EraPathInsideRoot -Path $specReviewPath -Root $repoRoot) {
         $specRelPath = $specReviewPath.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
     }
     $specIncludeFiles = @($specRelPath) + @($relatedFiles | Where-Object { $_ })
@@ -1140,7 +1140,7 @@ Be terse. If a section is empty, write "(none)".
             $entry = "$e"
             if ($entry -match '[*?\[\]]') { continue }
             if (-not [System.IO.Path]::IsPathRooted($entry)) { continue }
-            if (-not [System.IO.Path]::GetFullPath($entry).StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (-not (Test-EraPathInsideRoot -Path ([System.IO.Path]::GetFullPath($entry)) -Root $repoRoot)) {
                 $stagingInPlay = $true
                 break
             }
@@ -1150,7 +1150,15 @@ Be terse. If a section is empty, write "(none)".
         -TopicSlug $TopicSlug -Round $round -AllowStaging:$stagingInPlay
     # Hoisted so the broad-scope gate below can measure against the SAME ignore
     # set repomix will use, while the config itself is built after staging.
-    $repomixIgnorePatterns = @('node_modules/**', '.git/**', '__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
+    # '**/' prefixes because a bare '<dir>/**' is ROOT-ANCHORED in repomix
+    # (measured 1.12.0: 'node_modules/**' still bundles
+    # packages/p/node_modules/d/a.md). repomix's own defaults spell these the
+    # same way. Only node_modules changes real output; the other two are aligned
+    # so sibling patterns that look alike behave alike.
+    # NOTE: '.external-reviews/**' arrives via $artifactIgnore and stays
+    # deliberately ROOT-anchored -- era's artifact dir is always at the repo
+    # root, and the staging carve-out enumerates root-relative siblings.
+    $repomixIgnorePatterns = @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
 
 
     # --- Broad-bundle consent gate (2026-08-09) -------------------------------
@@ -1212,7 +1220,7 @@ Be terse. If a section is empty, write "(none)".
             if ($entry -match '[*?\[\]]') { return $entry }   # globs are in-repo by definition
             if (-not [System.IO.Path]::IsPathRooted($entry)) { return $entry }
             $full = [System.IO.Path]::GetFullPath($entry)
-            if ($full.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (Test-EraPathInsideRoot -Path $full -Root $repoRoot) {
                 # Absolute but inside the repo — relativize for repomix.
                 $relIn = ($full.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
                 # Same reason as the staged case below: $effectiveInclude must
@@ -1228,7 +1236,7 @@ Be terse. If a section is empty, write "(none)".
             # mirror under 'HOME/'; non-home paths keep the drive-stripped
             # mirror.
             $homeFull = [System.IO.Path]::GetFullPath($HOME)
-            if ($full.StartsWith($homeFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+            if (Test-EraPathInsideRoot -Path $full -Root $homeFull) {
                 $mirror = 'HOME/' + (($full.Substring($homeFull.Length).TrimStart('\', '/')) -replace '\\', '/')
             } else {
                 $mirror = (($full -replace ':', '') -replace '\\', '/').TrimStart('/')
@@ -1299,7 +1307,7 @@ Be terse. If a section is empty, write "(none)".
                 if ($_ -match '[*?\[\]]') { return $false }
                 $resolved = (Resolve-Path $_ -ErrorAction SilentlyContinue).Path
                 if (-not $resolved) { return $false }
-                -not $resolved.StartsWith($repoRoot, [System.StringComparison]::OrdinalIgnoreCase)
+                -not (Test-EraPathInsideRoot -Path $resolved -Root $repoRoot)
             })
             if ($traversal) {
                 Stop-EraWithError "-IncludeFiles paths escape the repo root (path traversal blocked): $($traversal -join ', ')"
@@ -1492,6 +1500,10 @@ Be terse. If a section is empty, write "(none)".
         Write-Host "Done. Wall clock: $($firstResult.WallClockSec)s | Tokens: $tokenCount"
     }
 
+    # Reached only on a clean run. The finally block below keeps the repomix
+    # config when this is not set, so a failed run leaves a receipt.
+    $runSucceeded = $true
+
 } finally {
     # Clean up the round-claim file regardless of dispatch outcome. Previously
     # this delete lived inside the try block at the end, so if Invoke-ReviewerDispatch
@@ -1502,5 +1514,15 @@ Be terse. If a section is empty, write "(none)".
     if ($claimPath -and (Test-Path $claimPath)) { Remove-Item $claimPath -Force -ErrorAction SilentlyContinue }
     # configPath may not be defined if we threw before it was assigned (e.g. in
     # Reserve-ReviewRound), so guard the removal.
-    if ($configPath -and (Test-Path $configPath)) { Remove-Item $configPath -Force -ErrorAction SilentlyContinue }
+    #
+    # Deleted ONLY on success. era used to delete it either way (PowerShell
+    # unwinds `exit` through `finally`), and the manifest that would replace it
+    # is written only after repomix succeeds -- so a failed run left no bundle,
+    # no manifest and no config, and nothing to diagnose from. The claim-file
+    # delete above stays unconditional: that one really is per-process state.
+    if ($runSucceeded) {
+        if ($configPath -and (Test-Path $configPath)) { Remove-Item $configPath -Force -ErrorAction SilentlyContinue }
+    } elseif ($configPath -and (Test-Path $configPath)) {
+        Write-Host "[era] Retained repomix config for diagnosis: $configPath"
+    }
 }
