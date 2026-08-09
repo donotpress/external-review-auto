@@ -1323,6 +1323,13 @@ Be terse. If a section is empty, write "(none)".
         # Drain the job BEFORE stopping it. Stop-Job discarded everything repomix
         # had said, so an 18-minute timeout explained nothing at all.
         #
+        # HONEST CAVEAT: this drain is currently INERT. The job body above
+        # captures all of repomix's stdout/stderr into its local $o and emits
+        # nothing until the final hashtable, so a job that has NOT completed has
+        # no job output to receive. The ordering is correct and costs nothing;
+        # making it useful requires the job body to stream, which belongs with
+        # the Process-handle change. See references/troubleshooting.md.
+        #
         # KNOWN LIMITATION: Wait-Job/Stop-Job cannot bound the NATIVE child
         # process repomix spawns — Stop-Job ends the thread, node keeps running.
         # The adapters solve the equivalent problem with Process.Kill($true)

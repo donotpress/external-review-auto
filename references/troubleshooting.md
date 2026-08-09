@@ -83,12 +83,22 @@ hold a `Process` handle and call `.Kill($true)` for a tree-kill, an invariant
 Windows, so putting it behind a `Process` handle needs its own shim-resolution
 logic (and tests) rather than a one-line swap. Tracked as a follow-on.
 
-**Mitigations already in place (2026-08-09):** the timeout branch now calls
-`Receive-Job` *before* `Stop-Job`, so whatever repomix managed to emit reaches
-the error message instead of being discarded; and both failure paths run the
-capture through `Get-EraTruncatedText`, because the run that started collecting
-72,378 files interpolated a **16.9 MB** log into its exception string. The
-broad-bundle gate above should stop you reaching this state at all.
+**Mitigations in place (2026-08-09):** both failure paths run the capture
+through `Get-EraTruncatedText`, because the run that started collecting 72,378
+files interpolated a **16.9 MB** log into its exception string. The broad-bundle
+gate above should stop you reaching this state at all.
+
+**The timeout branch's `Receive-Job` is currently inert — known.** It is called
+before `Stop-Job` (correct ordering, so nothing is discarded), but the ThreadJob
+body is `{ $o = repomix -c $c 2>&1; ...; @{ output = $o; exitCode = $ec } }`:
+every byte of repomix's stdout and stderr is captured into the local `$o` and
+nothing reaches the job's output stream until the final hashtable is emitted at
+completion. On the timeout path the job has by definition *not* completed, so
+the drain always returns nothing and the message reads "No output was captured
+before the timeout." Making it useful means streaming from the job body (e.g.
+`repomix … | Tee-Object` or writing progress to a file the parent can read),
+which belongs with the `Process`-handle change above. Surfaced by external
+review; recorded rather than papered over.
 
 **If you hit it:** kill the stray `node` process manually, then re-run with
 `-IncludeFiles` scoped to what you actually want reviewed.
