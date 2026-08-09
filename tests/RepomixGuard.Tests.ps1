@@ -40,6 +40,20 @@ Describe 'Get-EraTruncatedText' -Tag Unit {
         $out.Length | Should -BeLessThan 800
     }
 
+    It 'never returns MORE text than it was given' {
+        # Truncating 101 chars against a 100-char budget used to yield 168 chars,
+        # because the "[truncated: ...]" marker cost more than it saved.
+        $t = 'x' * 101
+        (Get-EraTruncatedText -Text $t -MaxChars 100).Length | Should -BeLessOrEqual $t.Length
+    }
+
+    It 'does not throw on a negative budget — it runs inside error handling' {
+        # Both call sites pass 4000, but this is a shared helper invoked while
+        # building an exception message. Throwing there would mask the original
+        # error with an ArgumentOutOfRangeException.
+        { Get-EraTruncatedText -Text ('x' * 1000) -MaxChars -5 } | Should -Not -Throw
+    }
+
     It 'keeps the tail as well as the head — a subprocess error is usually last' {
         $text = ('a' * 100000) + 'FINAL-ERROR-LINE'
         $out = Get-EraTruncatedText -Text $text -MaxChars 600

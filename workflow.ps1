@@ -1152,14 +1152,21 @@ function Get-EraTruncatedText {
         [int]$MaxChars = 4000
     )
     if ([string]::IsNullOrEmpty($Text)) { return '' }
+    # Clamp: this runs while BUILDING an exception message, so a bad budget must
+    # not throw an ArgumentOutOfRangeException over the top of the real error.
+    if ($MaxChars -lt 0) { $MaxChars = 0 }
     if ($Text.Length -le $MaxChars) { return $Text }
     # Head AND tail: a subprocess usually explains itself at the start, but the
     # fatal line is just as often the last thing it wrote before dying.
     $headLen = [int][Math]::Ceiling($MaxChars * 0.6)
     $tailLen = $MaxChars - $headLen
-    return ($Text.Substring(0, $headLen) +
+    $result = ($Text.Substring(0, $headLen) +
         "`n... [truncated: $($Text.Length) chars total, showing first $headLen and last $tailLen] ...`n" +
         $Text.Substring($Text.Length - $tailLen))
+    # Just past the budget the marker costs more than it saves; never hand back
+    # something longer than what we were given.
+    if ($result.Length -ge $Text.Length) { return $Text }
+    return $result
 }
 
 function Measure-EraBroadScope {
@@ -1187,6 +1194,9 @@ function Measure-EraBroadScope {
         The result is an ESTIMATE for a consent prompt, not a bundle manifest:
         only the two ignore shapes that matter here ('<dir>/**' and '*.<ext>')
         are honoured, and repomix remains the authority on what is bundled.
+        Matching is PowerShell -like, which has no brace expansion — a custom
+        ERA_DEFAULT_GLOBS entry such as '**/*.{js,ts}' would therefore be
+        under-counted. None of the shipped default globs use braces.
     #>
     [CmdletBinding()]
     param(
