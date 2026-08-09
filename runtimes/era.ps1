@@ -1081,7 +1081,18 @@ Cite locations as file:line using the line numbers shown in the bundle; if unsur
 
 Be terse. If a section is empty, write "(none)".
 "@
-            $diffPrompt | Set-Content -Path $promptPath -Encoding utf8
+            # Do NOT clobber a caller-supplied prompt. This used to overwrite
+            # $promptPath outright, so -Diff silently discarded
+            # -PromptOverrideFile, -ConversationFile injection, AND any
+            # <!-- era-require --> marker — turning the response contract off
+            # exactly when a follow-up round most needs it. Prepend the diff
+            # context instead and keep the caller's prompt intact.
+            if ($script:UserSuppliedPromptOverride) {
+                $existingPrompt = Get-Content -Raw $promptPath -ErrorAction SilentlyContinue
+                ($diffPrompt + "`n`n---`n`n" + $existingPrompt) | Set-Content -Path $promptPath -Encoding utf8
+            } else {
+                $diffPrompt | Set-Content -Path $promptPath -Encoding utf8
+            }
             Write-Host "[era] Diff bundle: $($diffResult.BundleFiles.Count) changed, $($diffResult.Deleted.Count) deleted"
         }
     }

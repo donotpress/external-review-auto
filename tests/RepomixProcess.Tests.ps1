@@ -137,6 +137,29 @@ Describe 'Invoke-EraTrackedProcess' -Tag Unit -Skip:(-not $script:OnWindows) {
         } finally { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
     }
 
+    It 'survives TWO quoted arguments through cmd /c — the real repomix shape' {
+        # Measured: quoting each argument separately produces
+        #   cmd /c "C:\...\my shim.cmd" -c "C:\...\my config.json"
+        # and cmd.exe strips the OUTERMOST quote pair, yielding
+        #   'C:\Users\...\era' is not recognized as an internal or external command
+        # The single-quoted-argument test above passes and hides this entirely,
+        # which is why it shipped broken. cmd needs /s plus one outer quote pair.
+        $root = Join-Path $env:TEMP "era quote two $(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $root 'bin')  -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $root 'work') -Force | Out-Null
+        try {
+            $shim = Join-Path $root 'bin\my shim.cmd'
+            Set-Content -Path $shim -Value "@echo off`r`necho SHIM-RAN"
+            $cfg = Join-Path $root 'work\my config.json'
+            Set-Content -Path $cfg -Value '{}'
+            $r = Invoke-EraTrackedProcess -FilePath $env:ComSpec `
+                    -Arguments @('/c', $shim, '-c', $cfg) `
+                    -WorkingDirectory (Join-Path $root 'work') -TimeoutSec 30
+            $r.Output   | Should -Match 'SHIM-RAN'
+            $r.ExitCode | Should -Be 0
+        } finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
+    }
+
     It 'cleans up its redirect temp files' {
         $r = Invoke-EraTrackedProcess -FilePath $env:ComSpec `
                 -Arguments @('/c', 'echo', 'x') `

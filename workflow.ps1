@@ -1064,8 +1064,13 @@ function Copy-PrimaryResponseAlias {
         if (& $isOk $r) { continue }
         $failedFile = Join-Path $ReviewDir "round-$Round-$r-response.md"
         if (Test-Path $failedFile) {
-            Move-Item -Path $failedFile -Destination (Join-Path $ReviewDir (& $rejectedName $r)) `
-                -Force -ErrorAction SilentlyContinue
+            $target = Join-Path $ReviewDir (& $rejectedName $r)
+            Move-Item -Path $failedFile -Destination $target -Force -ErrorAction SilentlyContinue
+            # This Move IS the boundary that keeps rejected content out of round
+            # N+1 — a silently swallowed failure reopens the exact hole. Say so.
+            if (Test-Path $failedFile) {
+                Write-Host "[era] WARNING: could not demote $failedFile; round N+1 may read a rejected response."
+            }
         }
     }
 
@@ -1401,10 +1406,26 @@ function Invoke-EraTrackedProcess {
     # with spaces WITHOUT quoting, so a config path or npm prefix containing a
     # space silently split into two arguments and broke the child process.
     if ($Arguments -and $Arguments.Count -gt 0) {
-        $startArgs['ArgumentList'] = @($Arguments | ForEach-Object {
+        $quoted = @($Arguments | ForEach-Object {
             $a = "$_"
             if ($a -match '\s' -and $a -notmatch '^".*"$') { '"' + $a + '"' } else { $a }
         })
+        # cmd.exe needs special handling: it strips the OUTERMOST quote pair of
+        # everything after /c. With two quoted arguments -- the real repomix
+        # shape, `cmd /c "<shim>" -c "<config>"` -- that mangles the command into
+        # an unrecognised program. Measured directly. `/s` plus a single outer
+        # quote pair tells cmd to strip exactly that pair and use the rest
+        # verbatim. A one-quoted-argument test passes either way, which is how
+        # this shipped broken.
+        # Only when there is MORE than one argument after /c. A single argument
+        # is already a complete command string ("ping -n 30 127.0.0.1"); wrapping
+        # that again produces ""ping -n 30 ..."" and cmd tries to execute a
+        # program with that literal name.
+        if ($env:ComSpec -and $FilePath -eq $env:ComSpec -and $quoted.Count -gt 2 -and $quoted[0] -eq '/c') {
+            $inner = ($quoted[1..($quoted.Count - 1)] -join ' ')
+            $quoted = @('/s', '/c', '"' + $inner + '"')
+        }
+        $startArgs['ArgumentList'] = $quoted
     }
 
     $proc = Start-Process @startArgs
