@@ -347,10 +347,7 @@ if ($Command -eq 'review-this') {
     if ($gitAvailable) {
         $isGitWorkTree = $null -ne (& git rev-parse --is-inside-work-tree 2>$null)
         if ($isGitWorkTree) {
-            $uncommitted = @(& git status --porcelain 2>$null |
-                Where-Object { $_ -match '^\S\S\s+(.+)$' -or $_ -match '^\s+(.+)$' } |
-                ForEach-Object { ($_ -replace '^.{3}', '').Trim() } |
-                Where-Object { $_ })
+            $uncommitted = @(Get-EraPorcelainPaths -RepoRoot $repoRoot)
             $recentCommit = @(& git diff --name-only HEAD~1..HEAD 2>$null | Where-Object { $_ })
             $recentFiles = @($uncommitted + $recentCommit) | Sort-Object -Unique | Where-Object { $_ -and $_.Trim() -ne '' }
             if ($recentFiles.Count -gt 0) {
@@ -906,10 +903,7 @@ Be terse. If a section is empty, write "(none)".
         }
 
         # Uncommitted changes (both staged and unstaged)
-        $uncommitted = @(& git status --porcelain 2>$null |
-            Where-Object { $_ -match '^\S\S\s+(.+)$' -or $_ -match '^\s+(.+)$' } |
-            ForEach-Object { ($_ -replace '^.{3}', '').Trim() } |
-            Where-Object { $_ })
+        $uncommitted = @(Get-EraPorcelainPaths -RepoRoot $repoRoot)
 
         # Files changed in the most-recent commit (HEAD~1..HEAD).
         # Use HEAD~1 only (not HEAD~5) — narrower window avoids pulling in unrelated work.
@@ -1436,6 +1430,42 @@ Be terse. If a section is empty, write "(none)".
         -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
         -BundleTokens $tokenCount
 
+    # --- Response contract (P1) ---------------------------------------------
+    # Nothing verified that an answer matched the request: adapters check
+    # non-empty text plus a finish reason, then return ExitCode=0, and
+    # Copy-PrimaryResponseAlias promotes on ExitCode alone. A reviewer returned
+    # zero of ten requested verdicts three times, each recorded as a success --
+    # and the promoted file feeds Invoke-PromptTokenSubstitution into round N+1,
+    # so a bad round poisons the next one.
+    #
+    # A failure is marked exactly the way opencode marks a bad agentic capture
+    # (ExitCode=-1 + ContentOk=$false), so every existing consumer already does
+    # the right thing: the alias skips it, the metadata writer records
+    # content_ok=false, and the agy fallback below re-dispatches. The response
+    # file stays on disk -- it is evidence, not garbage; only its promotion to
+    # canonical is withheld.
+    #
+    # Runs BEFORE the fallback block so a contract failure can trigger it.
+    $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw $promptPath -ErrorAction SilentlyContinue))
+    if ($contractRequired.Count -gt 0) {
+        Write-Host "[era] Response contract: $($contractRequired -join ', ')"
+        foreach ($k in @($results.Keys)) {
+            $res = $results[$k]
+            if (-not $res -or $res.ExitCode -ne 0) { continue }
+            $verdict = Test-ResponseContract -Response $res.Response -Required $contractRequired
+            if (-not $verdict.Ok) {
+                $miss = ($verdict.Missing -join ', ')
+                Write-Host "[era] $k FAILED the response contract; missing: $miss"
+                $res.ExitCode    = -1
+                $res.ContentOk   = $false
+                $res.Error       = 'response-contract'
+                $res.RetryReason = "response-contract: missing $miss"
+                $res.Warnings    = @($res.Warnings) + "Response contract failed; missing: $miss"
+                $results[$k] = $res
+            }
+        }
+    }
+
     # --- Item #1 (v1.10): agy auto-fallback on capture failure ---
     # When an agy reviewer fails to produce a usable review (ExitCode != 0) even after
     # its in-adapter retry, re-dispatch to a non-agy fallback so a flaky default
@@ -1476,8 +1506,13 @@ Be terse. If a section is empty, write "(none)".
         -ReviewerList $approvedList -Results $results
 
     # Convergence: compute warnings + metadata enrichment
-    $primaryResult = @($results.Values) | Where-Object { $_.ContentOk } | Select-Object -First 1
-    $currentResponseChars = if ($primaryResult) { $primaryResult.ResponseChars } else { 0 }
+    # Filter on ExitCode, not ContentOk: only agy and opencode ever set that key,
+    # so a REST-only run selected nothing. And no adapter sets ResponseChars at
+    # all -- the length is computed later in the metadata writer -- so this was
+    # always 0 and two of the three convergence signals could never fire.
+    # A contract-failed reviewer is ExitCode=-1, so it is correctly excluded.
+    $primaryResult = @($results.Values) | Where-Object { $_.ExitCode -eq 0 } | Select-Object -First 1
+    $currentResponseChars = if ($primaryResult -and $primaryResult.Response) { $primaryResult.Response.Length } else { 0 }
     $convergenceWarnings = @(Test-ConvergenceDivergence -ReviewDir $reviewDir -Round $round -CurrentResponseChars $currentResponseChars)
     if ($slugWarning) { $convergenceWarnings = @($slugWarning) + $convergenceWarnings }
     foreach ($w in ($convergenceWarnings | Where-Object { $_ -and $_ -ne $slugWarning })) { Write-Host $w }
