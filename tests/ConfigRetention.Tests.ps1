@@ -70,7 +70,9 @@ Describe 'Repomix config survives a failed run' -Tag Integration {
     It 'deletes the config only on success (source check)' {
         $src = Get-Content -Raw $script:EraPath
         $src | Should -Match '\$runSucceeded'
-        # The delete must be guarded by the flag, not unconditional.
-        $src | Should -Match 'if\s*\(\s*\$runSucceeded[^\r\n]*\$configPath'
+        # The delete must be guarded by the flag, not unconditional. (?s) so the
+        # match spans lines — the guard wraps the delete in a block rather than
+        # sitting on the same line as it.
+        $src | Should -Match '(?s)if\s*\(\s*\$runSucceeded\s*\)\s*\{\s*if\s*\(\s*\$configPath'
     }
 }

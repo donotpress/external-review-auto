@@ -97,7 +97,10 @@ try {
 
             # Before the fix this printed "paths not found ... -ext/outside.md".
             $out | Should -Match 'Staged out-of-repo file'
-            $out | Should -Not -Match '\-ext[\\/]outside\.md'
+            # Anchor the negative to the ERROR line: the correct staging message
+            # legitimately echoes the full source path, which also ends in
+            # '-ext\outside.md', so a bare negative match would reject the fix.
+            $out | Should -Not -Match 'not found relative to repo root[^\r\n]*-ext[\\/]outside\.md'
         } finally {
             Remove-Item -Recurse -Force $repo, $ext -ErrorAction SilentlyContinue
         }
