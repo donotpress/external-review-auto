@@ -478,7 +478,10 @@ function Write-ReviewManifest {
         [Nullable[int]]$PreviousRound,
         [Parameter(Mandatory)][string[]]$Files,
         [string[]]$SourceFiles,
-        [string]$RepoRoot
+        [string]$RepoRoot,
+        # HEAD sha / branch / dirty list at dispatch time, from
+        # era.ps1's Get-EraGitState. Null outside a git work tree.
+        $GitState
     )
     $arr = New-Object System.Collections.ArrayList
     foreach ($f in $Files) {
@@ -500,6 +503,17 @@ function Write-ReviewManifest {
         timestamp      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
         previous_round = $PreviousRound
         files          = $arr.ToArray()
+    }
+    # Anchor the round to a COMMIT. Without this there is no way, after the
+    # fact, to say which code a round actually saw — and rounds get cited as
+    # evidence in commit messages, where "reviewed in round N" reads as a claim
+    # about a specific tree. `git_clean=false` means the bundle contained work
+    # that was in no commit, so the round covers no reproducible range.
+    if ($GitState) {
+        $manifest.git_head   = $GitState.Head
+        $manifest.git_branch = $GitState.Branch
+        $manifest.git_clean  = ($GitState.Dirty.Count -eq 0)
+        $manifest.git_dirty  = [array]$GitState.Dirty
     }
     if ($SourceFiles -and $RepoRoot) {
         $manifest.sources = [array]$SourceFiles

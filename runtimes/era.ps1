@@ -80,6 +80,19 @@ param(
     # non-interactively — which is how the 72,378-file run happened.
     # ERA_BROAD_FORCE=1 is the env equivalent for CI.
     [switch]$ForceBroadScope,
+    # -AllowDirtyTree: dispatch even though the working tree has uncommitted
+    # changes. Deliberately SEPARATE from -Force for the same reason as
+    # -ForceBroadScope: -Force means "skip the COST prompt" and the skill's own
+    # normative dispatch line passes it on every call, so folding them together
+    # would leave this gate inert for the only caller the skill documents.
+    #
+    # WHY THE GATE EXISTS. A review bundles the WORKING TREE, but the round is
+    # reasoned about as "commits X..Y". When the tree is dirty those are
+    # different things: the reviewer sees uncommitted edits, the author later
+    # commits them, and the resulting commit was never reviewed by the round
+    # that appears to cover it. That produced an unreviewed layer THREE TIMES in
+    # one session, purely from ordering. ERA_ALLOW_DIRTY=1 is the env equivalent.
+    [switch]$AllowDirtyTree,
     [string[]]$IncludeFiles,
     [string]$PromptOverrideFile,
     # 2026-06-10 hardening P2: typed channel for the calling agent's
@@ -197,6 +210,42 @@ $repoRoot = if (Test-Path -LiteralPath ".git") { (Get-Location).Path }
             elseif (Get-Command git -ErrorAction SilentlyContinue) { $(& git rev-parse --show-toplevel 2>$null) }
             else { $null }
 if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+
+function Get-EraGitState {
+    <#
+    .SYNOPSIS
+        HEAD sha, branch and uncommitted-file list for $RepoRoot, or $null when
+        this is not a git work tree / git is unavailable.
+    .DESCRIPTION
+        Stamped into the round manifest so a review round is anchored to a
+        COMMIT rather than to "whatever the tree happened to contain". Without
+        it there is no way, after the fact, to tell which code a given round
+        actually saw — and rounds are cited as evidence in commit messages.
+
+        `--porcelain` omits ignored files, so era's own artifacts under
+        .external-reviews (gitignored in every repo that uses it) do not count
+        as dirt. Untracked-but-not-ignored files DO count: a new source file the
+        reviewer reads and the author then commits is exactly the unreviewed
+        layer this is meant to catch.
+    #>
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) { return $null }
+    if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot '.git'))) { return $null }
+
+    $head = & git -C $RepoRoot rev-parse HEAD 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $head) { return $null }
+    $branch = & git -C $RepoRoot rev-parse --abbrev-ref HEAD 2>$null
+    $porcelain = @(& git -C $RepoRoot status --porcelain 2>$null | Where-Object { $_ })
+
+    return [pscustomobject]@{
+        Head   = $head.Trim()
+        Branch = if ($branch) { $branch.Trim() } else { '(unknown)' }
+        Dirty  = $porcelain
+    }
+}
+
+$eraGitState = Get-EraGitState -RepoRoot $repoRoot
 
 function Get-SpecGlob {
     <#
@@ -720,6 +769,39 @@ if (-not $TopicSlug) {
 # Sanitize slug: strip path separators, parent-refs, and special chars
 $TopicSlug = $TopicSlug -replace '[/\\]', '-' -replace '\.\.', '' -replace '[^a-zA-Z0-9_-]', ''
 if (-not $TopicSlug) { throw "Topic slug is empty after sanitization. Use a valid slug (letters, numbers, hyphens, underscores)." }
+# --- Dirty-working-tree gate (2026-08-10) ---------------------------------
+# A review bundles the WORKING TREE but is reasoned about, cited and
+# committed as "round N covers commits X..Y". On a dirty tree those are
+# different things, and the gap is invisible afterwards: the reviewer reads
+# uncommitted edits, the author commits them, and the commit that lands was
+# never covered by the round whose findings its message quotes. That created
+# an unreviewed layer three times in a single session, purely from ordering.
+#
+# Refusal, not a warning: a warning printed into a non-interactive agent's
+# stdout is not a decision point. -Force does NOT bypass this (see
+# -AllowDirtyTree). Skipped entirely outside a git work tree.
+if ($eraGitState -and $eraGitState.Dirty.Count -gt 0) {
+    $dirtyAllowed = $AllowDirtyTree.IsPresent -or ($env:ERA_ALLOW_DIRTY -eq '1')
+    $preview = ($eraGitState.Dirty | Select-Object -First 15) -join "`n           "
+    if (-not $dirtyAllowed) {
+        Write-Host ""
+        Write-Host "[era] REFUSING TO DISPATCH — the working tree has uncommitted changes." -ForegroundColor Red
+        Write-Host "[era]   branch : $($eraGitState.Branch)"
+        Write-Host "[era]   HEAD   : $($eraGitState.Head)"
+        Write-Host "[era]   dirty  : $($eraGitState.Dirty.Count) path(s)"
+        Write-Host "           $preview"
+        Write-Host ""
+        Write-Host "[era] The bundle would contain code that is not in any commit, so the round"
+        Write-Host "[era] cannot be anchored to the range it will be cited as covering."
+        Write-Host "[era] Commit (or stash) first, or pass -AllowDirtyTree / ERA_ALLOW_DIRTY=1"
+        Write-Host "[era] if you deliberately want the uncommitted state reviewed."
+        exit 1
+    }
+    $dirtyMsg = "[era] WARNING: dispatching over a DIRTY tree ($($eraGitState.Dirty.Count) path(s)); " +
+                "the manifest records them, but this round covers no single commit."
+    Write-Host $dirtyMsg -ForegroundColor Yellow
+}
+
 $reviewDir = Join-Path $repoRoot ".external-reviews/$TopicSlug"
 New-Item -ItemType Directory -Path $reviewDir -Force -ErrorAction SilentlyContinue | Out-Null
 
@@ -1437,7 +1519,7 @@ Be terse. If a section is empty, write "(none)".
     $aggregateCost = ($perReviewerCosts.Values | Measure-Object -Sum).Sum
     $approvedList = Invoke-CostPrompt -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
 
-    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot
+    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState
 
     Write-Host "Round $round. Reviewer(s): $($approvedList -join ', ')."
 
