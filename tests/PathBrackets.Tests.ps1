@@ -125,6 +125,26 @@ Describe 'workflow.ps1 on wildcard-metacharacter paths' -Tag Unit {
         $m.files[0].sha256 | Should -Match '^[0-9a-f]{64}$'
     }
 
+    It 'Get-ReviewDiff sees a bracketed source change round-over-round' {
+        New-Item -ItemType Directory -Path (Join-Path $script:RepoRoot 'src\app\[id]') -Force | Out-Null
+        $tracked = Join-Path $script:RepoRoot 'src\app\[id]\page.tsx'
+        Set-Content -LiteralPath $tracked -Value 'v1' -Encoding UTF8
+        $bundle = Join-Path $script:TmpDir 'bundle.xml'
+        Set-Content -LiteralPath $bundle -Value 'x' -Encoding UTF8
+
+        Write-ReviewManifest -ReviewDir $script:TmpDir -Round 1 -TopicSlug 'topic' -Files @($bundle) `
+            -SourceFiles @('src/app/[id]/page.tsx') -RepoRoot $script:RepoRoot | Out-Null
+
+        Set-Content -LiteralPath $tracked -Value 'v2-CHANGED' -Encoding UTF8
+
+        $diff = Get-ReviewDiff -ReviewDir $script:TmpDir -PriorRound 1 `
+            -CurrentFiles @('src/app/[id]/page.tsx') -RepoRoot $script:RepoRoot
+
+        # Before the fix this file was in neither baseline nor current, so an
+        # edit to it was invisible: the delta reported nothing changed.
+        $diff.Changed | Should -Contain 'src/app/[id]/page.tsx'
+    }
+
     It 'Copy-PrimaryResponseAlias promotes and demotes under a bracketed dir' {
         Set-Content -LiteralPath (Join-Path $script:TmpDir 'round-1-gemini-response.md') `
             -Value 'GEMINI-BAD' -Encoding UTF8
@@ -144,5 +164,55 @@ Describe 'workflow.ps1 on wildcard-metacharacter paths' -Tag Unit {
         # ...and the passing member becomes the canonical.
         (Get-Content -LiteralPath (Join-Path $script:TmpDir 'round-1-response.md') -Raw).Trim() |
             Should -Be 'OPUS-GOOD'
+    }
+}
+
+Describe 'era.ps1 on wildcard-metacharacter paths' -Tag Unit {
+    BeforeAll {
+        $script:SkillRoot = Split-Path $PSScriptRoot -Parent
+        $script:EraPath   = Join-Path $script:SkillRoot 'runtimes/era.ps1'
+
+        function Invoke-EraIn {
+            <# Runs era.ps1 out-of-process in a throwaway git repo; returns stdout+stderr. #>
+            param([string]$WorkDir, [string]$ArgLiteral)
+            & pwsh -NonInteractive -Command @"
+Set-Location -LiteralPath '$WorkDir'
+try {
+    & '$($script:EraPath)' -TopicSlug 'bracket-test' -Force $ArgLiteral 2>&1 | Out-String
+} catch {
+    Write-Output "CAUGHT: `$(`$_.Exception.Message)"
+}
+"@ 2>&1 | Out-String
+        }
+    }
+
+    # Each case pairs the path under test with a genuinely missing file, so the
+    # run stops at -IncludeFiles validation instead of dispatching a real
+    # (slow, billable) reviewer. The assertion is which paths get named missing.
+    It 'accepts a bracketed literal -IncludeFiles path' {
+        $tmp = Join-Path $env:TEMP "era-brk-inc-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $tmp '.git') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $tmp 'src\app\[id]') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $tmp 'src\app\[id]\page.tsx') -Value 'export default 1' -Encoding UTF8
+        try {
+            $out = Invoke-EraIn -WorkDir $tmp `
+                -ArgLiteral '-IncludeFiles "src/app/[id]/page.tsx,definitely-missing.py"'
+            # The control: era must still notice the genuinely absent file.
+            $out | Should -Match 'definitely-missing\.py'
+            # The regression: the bracketed file exists and must not be called missing.
+            $out | Should -Not -Match 'paths not found[^\r\n]*page\.tsx'
+        } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'runs from a repo root containing brackets' {
+        $base = Join-Path $env:TEMP "era-brk-root-$(New-Guid)"
+        $tmp  = Join-Path $base 'proj[old]'
+        New-Item -ItemType Directory -Path (Join-Path $tmp '.git') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $tmp 'a.md') -Value '# a' -Encoding UTF8
+        try {
+            $out = Invoke-EraIn -WorkDir $tmp -ArgLiteral '-IncludeFiles "a.md,definitely-missing.py"'
+            $out | Should -Match 'definitely-missing\.py'
+            $out | Should -Not -Match 'paths not found[^\r\n]*a\.md'
+        } finally { Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

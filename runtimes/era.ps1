@@ -164,12 +164,12 @@ function Stop-EraWithError {
 
 # --- Doctor preflight: report prereq + backend status, then exit (no dispatch) ---
 if ($Doctor) {
-    $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+    $rawRegistry = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     Write-Host (Format-EraDoctorReport -Checks (Get-EraDoctorReport -Registry $rawRegistry))
     # 2026-06-10 P5.3: the /era alias SKILL.md directs callers here — verify
     # this skill root actually has the runtimes the alias promises.
-    $aliasOk = (Test-Path (Join-Path $PSScriptRoot 'resolve.ps1')) -and
-               (Test-Path (Join-Path $skillRoot 'backends/_registry.json'))
+    $aliasOk = (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'resolve.ps1')) -and
+               (Test-Path -LiteralPath (Join-Path $skillRoot 'backends/_registry.json'))
     Write-Host ("[{0}] era-alias skill-root resolution (runtimes/resolve.ps1 + backends/_registry.json reachable from {1})" -f ($(if ($aliasOk) { ' OK ' } else { 'FAIL' })), $skillRoot)
     return
 }
@@ -193,7 +193,7 @@ if ($script:UserSuppliedIncludeFiles -and @($IncludeFiles).Count -eq 0) {
 # "term 'git' is not recognized" when git isn't on PATH (no .git in cwd). Only invoke
 # git when it exists; otherwise fall back to cwd (line below). repomix still bundles
 # explicit -IncludeFiles from a non-git directory.
-$repoRoot = if (Test-Path ".git") { (Get-Location).Path }
+$repoRoot = if (Test-Path -LiteralPath ".git") { (Get-Location).Path }
             elseif (Get-Command git -ErrorAction SilentlyContinue) { $(& git rev-parse --show-toplevel 2>$null) }
             else { $null }
 if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
@@ -219,11 +219,11 @@ function Get-SpecGlob {
 # Safe to delete once all installs have run a post-upgrade era at least once.
 # See references/troubleshooting.md ("agy settings.json .era-backup").
 $agyBackupPath = Join-Path $HOME '.gemini/antigravity-cli/settings.json.era-backup'
-if (Test-Path $agyBackupPath) {
+if (Test-Path -LiteralPath $agyBackupPath) {
     $agySettingsPath = Join-Path $HOME '.gemini/antigravity-cli/settings.json'
     try {
-        Copy-Item -Path $agyBackupPath -Destination $agySettingsPath -Force
-        Remove-Item -Path $agyBackupPath -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $agyBackupPath -Destination $agySettingsPath -Force
+        Remove-Item -LiteralPath $agyBackupPath -Force -ErrorAction SilentlyContinue
         Write-Host "[era] Restored agy settings from prior interrupted session."
     } catch {
         # Restore FAILED -- KEEP the backup so a later run can retry. Deleting it
@@ -239,11 +239,11 @@ if (Test-Path $agyBackupPath) {
 # (Ctrl-C, OOM, Stop-Process) before the in-memory restore could run, this
 # block recovers the user's interactive opencode state at the next era launch.
 $opencodeBackupPath = Join-Path $HOME '.local/state/opencode/model.json.era-backup'
-if (Test-Path $opencodeBackupPath) {
+if (Test-Path -LiteralPath $opencodeBackupPath) {
     $opencodeStatePath = Join-Path $HOME '.local/state/opencode/model.json'
     try {
-        Copy-Item -Path $opencodeBackupPath -Destination $opencodeStatePath -Force
-        Remove-Item -Path $opencodeBackupPath -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $opencodeBackupPath -Destination $opencodeStatePath -Force
+        Remove-Item -LiteralPath $opencodeBackupPath -Force -ErrorAction SilentlyContinue
         Write-Host "[era] Restored opencode model.json from prior interrupted session."
     } catch {
         # Restore FAILED -- KEEP the backup so a later run can retry, rather than
@@ -261,14 +261,14 @@ if ($Command -eq 'update-models') {
 
 # --- doctor command (same as -Doctor switch, reachable via Command flag) ---
 if ($Command -eq 'doctor') {
-    $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+    $rawRegistry = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     Write-Host (Format-EraDoctorReport -Checks (Get-EraDoctorReport -Registry $rawRegistry))
     return
 }
 
 # --- list command: show selectable reviewers + readiness (/era models) -------
 if ($Command -eq 'list') {
-    $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+    $rawRegistry = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     $listEnvs = @($rawRegistry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } |
         ForEach-Object { $_.Value.api_key_env })
     Resolve-EraAuthJsonKeys -ApiKeyEnvs $listEnvs
@@ -294,7 +294,7 @@ if ($Command -eq 'set-default') {
         throw "set-default requires at least one reviewer preset. Got: $Reviewer"
     }
     # Validate every preset against the registry before writing anything.
-    $rawRegistry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+    $rawRegistry = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
     $validPresets = @($rawRegistry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach-Object { $_.Name })
     $unknown = @($presets | Where-Object { $_ -notin $validPresets })
     if ($unknown) {
@@ -422,8 +422,8 @@ if ($Command -eq 'suggest') {
 
     # 3. Existing review topics
     $reviewDir = Join-Path $repoRoot '.external-reviews'
-    if (Test-Path $reviewDir) {
-        $topics = Get-ChildItem $reviewDir -Directory -ErrorAction SilentlyContinue |
+    if (Test-Path -LiteralPath $reviewDir) {
+        $topics = Get-ChildItem -LiteralPath $reviewDir -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -ne 'test' } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 10
@@ -431,7 +431,7 @@ if ($Command -eq 'suggest') {
             $suggestions.Add("")
             $suggestions.Add("=== Existing review topics ===")
             foreach ($t in $topics) {
-                $rounds = @(Get-ChildItem $t.FullName -Filter 'round-*-response.md' -ErrorAction SilentlyContinue).Count
+                $rounds = @(Get-ChildItem -LiteralPath $t.FullName -Filter 'round-*-response.md' -ErrorAction SilentlyContinue).Count
                 $age = [math]::Round(((Get-Date) - $t.LastWriteTime).TotalDays, 1)
                 $suggestions.Add("  $($t.Name)  ($rounds rounds, last: $age days ago)")
             }
@@ -452,10 +452,10 @@ if ($SpecReview) {
     if ($PromptOverrideFile) {
         throw "-SpecReview and -PromptOverrideFile are mutually exclusive. -SpecReview generates the prompt from a template; -PromptOverrideFile uses your prompt verbatim. Pick one."
     }
-    if (-not (Test-Path $SpecReview)) {
+    if (-not (Test-Path -LiteralPath $SpecReview)) {
         throw "-SpecReview: spec file not found: $SpecReview"
     }
-    $specReviewPath = (Resolve-Path $SpecReview).Path
+    $specReviewPath = (Resolve-Path -LiteralPath $SpecReview).Path
 
     # Auto-derive -TopicSlug from spec filename if not provided
     if (-not $TopicSlug) {
@@ -471,7 +471,7 @@ if ($SpecReview) {
     #   block-list   :  related_files:\n  - a.ps1\n  - "b.ps1"
     #   inline-list  :  related_files: ["a.ps1","b.ps1"]
     #   inline Related: line anywhere in the doc:  Related: "a.ps1", 'b.ps1'
-    $specContent = Get-Content $specReviewPath -Raw
+    $specContent = Get-Content -LiteralPath $specReviewPath -Raw
     $relatedFiles = @()
     # YAML frontmatter block (between --- markers)
     if ($specContent -match '^---\s*\n([\s\S]*?)\n---') {
@@ -554,7 +554,7 @@ Be terse. Don't pad. If a section is empty, write "(none)".
     $tmpTopicDir = Join-Path $repoRoot ".external-reviews/$TopicSlug"
     New-Item -ItemType Directory -Path $tmpTopicDir -Force -ErrorAction SilentlyContinue | Out-Null
     $tmpPromptPath = Join-Path $tmpTopicDir 'spec-review-generated-prompt.md'
-    Set-Content -Path $tmpPromptPath -Value $specPromptContent -Encoding UTF8
+    Set-Content -LiteralPath $tmpPromptPath -Value $specPromptContent -Encoding UTF8
     $PromptOverrideFile = $tmpPromptPath
     Write-Host "[era] -SpecReview: generated spec-review prompt at $tmpPromptPath"
     if ($relatedFiles.Count -gt 0) {
@@ -565,7 +565,7 @@ Be terse. Don't pad. If a section is empty, write "(none)".
 # --- Normal review workflow starts here ---
 $reviewerList = @($Reviewer -split ',' | ForEach-Object { $_.Trim().ToLower() })
 
-$registry = Get-Content -Raw (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
+$registry = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'backends/_registry.json') | ConvertFrom-Json
 
 # --- Adaptive default reviewer (only when -Reviewer was NOT explicitly passed) ---
 # Don't blindly default to agy and error out if it isn't installed. Detect what's
@@ -729,7 +729,7 @@ New-Item -ItemType Directory -Path $reviewDir -Force -ErrorAction SilentlyContin
 # via -PromptOverrideFile. If both are provided, the explicit arg wins.
 if (-not $PromptOverrideFile) {
     $pendingPromptPath = Join-Path $reviewDir 'pending-prompt.md'
-    if (Test-Path $pendingPromptPath) {
+    if (Test-Path -LiteralPath $pendingPromptPath) {
         $PromptOverrideFile = $pendingPromptPath
         # Pre-written prompt = user-authored for -ConversationFile purposes
         # (honored only via {{CONVERSATION_CONTEXT}} placeholder).
@@ -828,17 +828,17 @@ Be terse. If a section is empty, write "(none)".
     }
 
     if ($PromptOverrideFile) {
-        if (-not (Test-Path $PromptOverrideFile)) { throw "Prompt override file not found: $PromptOverrideFile" }
-        $srcResolved = (Resolve-Path $PromptOverrideFile).Path
-        $dstResolved = if (Test-Path $promptPath) { (Resolve-Path $promptPath).Path } else { $null }
+        if (-not (Test-Path -LiteralPath $PromptOverrideFile)) { throw "Prompt override file not found: $PromptOverrideFile" }
+        $srcResolved = (Resolve-Path -LiteralPath $PromptOverrideFile).Path
+        $dstResolved = if (Test-Path -LiteralPath $promptPath) { (Resolve-Path -LiteralPath $promptPath).Path } else { $null }
         if ($null -ne $dstResolved -and $srcResolved -eq $dstResolved) {
             Write-Host "[era] Prompt already at target path, skipping copy"
         } else {
-            Copy-Item -Path $PromptOverrideFile -Destination $promptPath -Force
+            Copy-Item -LiteralPath $PromptOverrideFile -Destination $promptPath -Force
             Write-Host "[era] Using pre-written prompt from $PromptOverrideFile"
         }
-    } elseif (-not (Test-Path $promptPath)) {
-        $promptTemplate -replace '{{TOPIC_TITLE}}', $promptTitle | Set-Content -Path $promptPath -Encoding utf8
+    } elseif (-not (Test-Path -LiteralPath $promptPath)) {
+        $promptTemplate -replace '{{TOPIC_TITLE}}', $promptTitle | Set-Content -LiteralPath $promptPath -Encoding utf8
     }
 
     # --- -ConversationFile injection (2026-06-10 hardening P2) ---
@@ -846,13 +846,13 @@ Be terse. If a section is empty, write "(none)".
     # so '## Session context' precedes the previous-round block (stable context
     # first, then the delta the reviewer must react to).
     if ($ConversationFile) {
-        if (-not (Test-Path $ConversationFile)) { throw "Conversation file not found: $ConversationFile" }
-        $convText = (Get-Content -Raw $ConversationFile).TrimEnd()
-        $promptText = Get-Content -Raw $promptPath
+        if (-not (Test-Path -LiteralPath $ConversationFile)) { throw "Conversation file not found: $ConversationFile" }
+        $convText = (Get-Content -Raw -LiteralPath $ConversationFile).TrimEnd()
+        $promptText = Get-Content -Raw -LiteralPath $promptPath
         if ($promptText -match '\{\{CONVERSATION_CONTEXT\}\}') {
             # .Replace = literal (no regex metacharacter surprises in $convText)
             $promptText = $promptText.Replace('{{CONVERSATION_CONTEXT}}', $convText)
-            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+            Set-Content -LiteralPath $promptPath -Value $promptText -Encoding utf8
             Write-Host "[era] -ConversationFile: injected into {{CONVERSATION_CONTEXT}} placeholder."
         } elseif ($script:UserSuppliedPromptOverride) {
             # Hard error (smoke-review round 1): silently dropping session
@@ -871,17 +871,17 @@ Be terse. If a section is empty, write "(none)".
             } else {
                 $promptText = $promptText.TrimEnd() + "`n`n" + $section
             }
-            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+            Set-Content -LiteralPath $promptPath -Value $promptText -Encoding utf8
             Write-Host "[era] -ConversationFile: appended as '## Session context'."
         }
     } else {
         # Degraded mode (P2.2): a dangling placeholder must not reach the
         # reviewer verbatim.
-        $promptText = Get-Content -Raw $promptPath
+        $promptText = Get-Content -Raw -LiteralPath $promptPath
         if ($promptText -match '\{\{CONVERSATION_CONTEXT\}\}') {
             Write-Host "[era] WARNING: prompt has {{CONVERSATION_CONTEXT}} but no -ConversationFile was passed (degraded mode — see SKILL.md conversation hand-off)."
             $promptText = $promptText.Replace('{{CONVERSATION_CONTEXT}}', '(none provided)')
-            Set-Content -Path $promptPath -Value $promptText -Encoding utf8
+            Set-Content -LiteralPath $promptPath -Value $promptText -Encoding utf8
         }
     }
 
@@ -1037,7 +1037,7 @@ Be terse. If a section is empty, write "(none)".
         if ($diffResult) {
             $effectiveInclude = [array]$diffResult.BundleFiles
             $priorResponsePath = Join-Path $reviewDir "round-$priorRound-response.md"
-            $priorResponse = if (Test-Path $priorResponsePath) { Get-Content -Raw $priorResponsePath } else { $null }
+            $priorResponse = if (Test-Path -LiteralPath $priorResponsePath) { Get-Content -Raw -LiteralPath $priorResponsePath } else { $null }
             $changesSummary = @()
             if ($diffResult.Added) { $changesSummary += "Added: $($diffResult.Added -join ', ')" }
             if ($diffResult.Changed) { $changesSummary += "Changed: $($diffResult.Changed -join ', ')" }
@@ -1088,10 +1088,10 @@ Be terse. If a section is empty, write "(none)".
             # exactly when a follow-up round most needs it. Prepend the diff
             # context instead and keep the caller's prompt intact.
             if ($script:UserSuppliedPromptOverride) {
-                $existingPrompt = Get-Content -Raw $promptPath -ErrorAction SilentlyContinue
-                ($diffPrompt + "`n`n---`n`n" + $existingPrompt) | Set-Content -Path $promptPath -Encoding utf8
+                $existingPrompt = Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue
+                ($diffPrompt + "`n`n---`n`n" + $existingPrompt) | Set-Content -LiteralPath $promptPath -Encoding utf8
             } else {
-                $diffPrompt | Set-Content -Path $promptPath -Encoding utf8
+                $diffPrompt | Set-Content -LiteralPath $promptPath -Encoding utf8
             }
             Write-Host "[era] Diff bundle: $($diffResult.BundleFiles.Count) changed, $($diffResult.Deleted.Count) deleted"
         }
@@ -1233,7 +1233,7 @@ Be terse. If a section is empty, write "(none)".
                 $includeRewrites[$entry] = $relIn
                 return $relIn
             }
-            if (-not (Test-Path $full -PathType Leaf)) {
+            if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
                 Stop-EraWithError "out-of-repo -IncludeFiles entry must be an existing FILE (dirs/globs unsupported): $entry"
             }
             # Privacy: bundles are sent to external reviewer APIs - never
@@ -1248,7 +1248,7 @@ Be terse. If a section is empty, write "(none)".
             }
             $stagedAbs = Join-Path $reviewDir "round-$round-external/$mirror"
             New-Item -ItemType Directory -Path (Split-Path -Parent $stagedAbs) -Force | Out-Null
-            Copy-Item -Path $full -Destination $stagedAbs -Force
+            Copy-Item -LiteralPath $full -Destination $stagedAbs -Force
             $stagedRel = ($stagedAbs.Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/')
             Write-Host "[era] Staged out-of-repo file for bundling: $full -> $stagedRel"
             $includeRewrites[$entry] = $stagedRel
@@ -1289,7 +1289,7 @@ Be terse. If a section is empty, write "(none)".
         }
     }
     $configJson = $configData | ConvertTo-Json -Depth 10
-    $configJson | Set-Content -Path $configPath -Encoding utf8
+    $configJson | Set-Content -LiteralPath $configPath -Encoding utf8
 
     # Fix (PR 2 C): Validate -IncludeFiles paths against Test-Path BEFORE invoking
     # repomix. repomix runs 3+ seconds before returning an empty bundle for typo'd
@@ -1297,9 +1297,18 @@ Be terse. If a section is empty, write "(none)".
     # SECURITY: Also block path traversal (e.g. ../../../../.ssh/id_rsa) that would
     # cause repomix to bundle out-of-repo sensitive files and send them to APIs.
     if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
-        Push-Location $repoRoot
+        Push-Location -LiteralPath $repoRoot
         try {
-            $missing = @($IncludeFiles | Where-Object { -not (Test-Path $_) })
+            # Literal-OR-glob. An entry may legitimately be either, and the two
+            # need opposite parameters: '[' and ']' are wildcard metacharacters,
+            # so Test-Path -Path reports a real file like 'src/app/[id]/page.tsx'
+            # (any Next.js dynamic route) as missing, while -LiteralPath reports
+            # a genuine glob like 'src/**/*.ts' as missing. Accepting either
+            # keeps both shapes working and can only ever be more permissive
+            # than the old single -Path check, never less.
+            $missing = @($IncludeFiles | Where-Object {
+                -not (Test-Path -LiteralPath $_) -and -not (Test-Path -Path $_)
+            })
             if ($missing) {
                 Stop-EraWithError "-IncludeFiles paths not found relative to repo root ($repoRoot): $($missing -join ', ')"
             }
@@ -1371,7 +1380,7 @@ Be terse. If a section is empty, write "(none)".
     # an empty <files> section and responds with "no files to review", wasting
     # the dispatch round. Count <file ... > opening tags (note trailing space to
     # avoid matching the outer <files> wrapper).
-    $bundleContent = if (Test-Path $bundlePath) { Get-Content -Raw $bundlePath -ErrorAction SilentlyContinue } else { '' }
+    $bundleContent = if (Test-Path -LiteralPath $bundlePath) { Get-Content -Raw -LiteralPath $bundlePath -ErrorAction SilentlyContinue } else { '' }
     $fileTagCount = ([regex]::Matches($bundleContent, '<file\s+[^>]*>')).Count
     if ($fileTagCount -eq 0) {
         $includeHint = if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
@@ -1382,7 +1391,7 @@ Be terse. If a section is empty, write "(none)".
         Stop-EraWithError "Bundle is empty -- repomix matched 0 files.$includeHint"
     }
 
-    $bundleBytes = if (Test-Path $bundlePath) { (Get-Item $bundlePath).Length } else { 0 }
+    $bundleBytes = if (Test-Path -LiteralPath $bundlePath) { (Get-Item -LiteralPath $bundlePath).Length } else { 0 }
 
     $perReviewerCosts = @{}
     $perReviewerCaps = @{}
@@ -1439,7 +1448,7 @@ Be terse. If a section is empty, write "(none)".
     # Runs BEFORE the fallback block so a contract failure can trigger it. It is
     # applied AGAIN after that block (see below) — otherwise the fallback's own
     # answer is never checked.
-    $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw $promptPath -ErrorAction SilentlyContinue))
+    $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
     if ($contractRequired.Count -gt 0) {
         Write-Host "[era] Response contract: $($contractRequired -join ', ')"
         $null = Assert-EraResponseContract -Results $results -Required $contractRequired
@@ -1541,11 +1550,11 @@ Be terse. If a section is empty, write "(none)".
     if ($slugWarning) { $convergenceWarnings = @($slugWarning) + $convergenceWarnings }
     foreach ($w in ($convergenceWarnings | Where-Object { $_ -and $_ -ne $slugWarning })) { Write-Host $w }
 
-    $topicRoundCount = @(Get-ChildItem -Path $reviewDir -Filter 'round-*-metadata.json' -ErrorAction SilentlyContinue).Count + 1
+    $topicRoundCount = @(Get-ChildItem -LiteralPath $reviewDir -Filter 'round-*-metadata.json' -ErrorAction SilentlyContinue).Count + 1
     $bundleFileCount = 0
     $manifestPath = Join-Path $reviewDir "round-$round-manifest.json"
-    if (Test-Path $manifestPath) {
-        try { $bundleFileCount = @((Get-Content -Raw $manifestPath | ConvertFrom-Json).sources).Count } catch {}
+    if (Test-Path -LiteralPath $manifestPath) {
+        try { $bundleFileCount = @((Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json).sources).Count } catch {}
     }
 
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
@@ -1570,7 +1579,7 @@ Be terse. If a section is empty, write "(none)".
     # blocked that round number. The claim is per-process state -- once this
     # process is done with it (success or failure), it shouldn't be a tombstone
     # for future runs. Pro 4-7 validation finding.
-    if ($claimPath -and (Test-Path $claimPath)) { Remove-Item $claimPath -Force -ErrorAction SilentlyContinue }
+    if ($claimPath -and (Test-Path -LiteralPath $claimPath)) { Remove-Item -LiteralPath $claimPath -Force -ErrorAction SilentlyContinue }
     # configPath may not be defined if we threw before it was assigned (e.g. in
     # Reserve-ReviewRound), so guard the removal.
     #
@@ -1580,8 +1589,8 @@ Be terse. If a section is empty, write "(none)".
     # no manifest and no config, and nothing to diagnose from. The claim-file
     # delete above stays unconditional: that one really is per-process state.
     if ($runSucceeded) {
-        if ($configPath -and (Test-Path $configPath)) { Remove-Item $configPath -Force -ErrorAction SilentlyContinue }
-    } elseif ($configPath -and (Test-Path $configPath)) {
+        if ($configPath -and (Test-Path -LiteralPath $configPath)) { Remove-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue }
+    } elseif ($configPath -and (Test-Path -LiteralPath $configPath)) {
         Write-Host "[era] Retained repomix config for diagnosis: $configPath"
     }
 }
