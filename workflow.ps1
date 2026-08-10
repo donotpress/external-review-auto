@@ -350,6 +350,62 @@ function Invoke-PromptTokenSubstitution {
     Set-Content -LiteralPath $PromptFile -Value $newText -Encoding UTF8
 }
 
+function Test-EraStragglerExpired {
+    <#
+    .SYNOPSIS
+        Decide whether the dispatcher should stop waiting for outstanding jobs.
+
+    .DESCRIPTION
+        Pure decision function, extracted so the policy is testable without
+        spawning real jobs. Returns '' to keep waiting, or the reason to stop:
+
+            'budget' — the absolute dispatch budget is spent (old behaviour)
+            'grace'  — a LONE straggler outlived its grace period
+
+        WHY A GRACE PERIOD, AND WHY THIS SIZE.
+        The dispatcher used to block on Wait-Job across all jobs, so one hung
+        member held the round for the entire scaled budget (up to 1830s) even
+        with everyone else finished. But cutting stragglers off cheaply is
+        actively harmful: the slowest reviewer is often the most valuable one
+        (measured on round 1 of the era-grade panel, opus took 374s and produced
+        19,869 bytes while gemini took 50s and produced 10,658).
+
+        So the grace is sized from the measured healthy spread. Per-reviewer
+        wall-clock across four real rounds, slowest minus second-slowest:
+
+            round 1:   8.0s      round 2: 135.8s
+            round 3: 115.7s      round 4:  78.9s
+
+        Healthy stragglers trail by at most ~136s. The 300s default is ~2.2x
+        that, so it would not have fired in any observed round, while still
+        reclaiming ~25 minutes when a member genuinely hangs. Raise it with
+        ERA_STRAGGLER_GRACE_SEC, or set 0 to restore wait-for-the-full-budget.
+
+        The grace applies ONLY when exactly one job is outstanding. With two or
+        more still running the round is legitimately still working, and there is
+        no straggler to single out.
+
+    .OUTPUTS
+        [string] — '' | 'budget' | 'grace'
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$ElapsedSec,
+        [Parameter(Mandatory)][int]$Outstanding,
+        [Parameter(Mandatory)][int]$Total,
+        [Parameter(Mandatory)][int]$BudgetSec,
+        [int]$GraceSec = 300,
+        [int]$LoneSinceSec = -1
+    )
+    if ($ElapsedSec -ge $BudgetSec) { return 'budget' }
+    if ($GraceSec -le 0)            { return '' }   # explicitly disabled
+    if ($Total -lt 2)               { return '' }   # solo run: nothing to straggle behind
+    if ($Outstanding -ne 1)         { return '' }   # still a real panel in flight
+    if ($LoneSinceSec -lt 0)        { return '' }   # grace clock not started
+    if (($ElapsedSec - $LoneSinceSec) -ge $GraceSec) { return 'grace' }
+    return ''
+}
+
 function Get-NextReviewRound {
     [CmdletBinding()]
     param(
@@ -1108,16 +1164,52 @@ function Invoke-ReviewerDispatch {
     # claude.exe) as orphaned zombies because Stop-Job only kills the thread,
     # not the thread's children. The margin lets the adapter's own throw fire
     # cleanly, which kills its native process before this Stop-Job touches it.
-    $null = Wait-Job -Job $allJobs -Timeout ($TimeoutSec + 30)
+    #
+    # This used to be a single blocking wait across the whole job array, which
+    # returns only when ALL jobs finish. One hung member therefore held the
+    # round for the full scaled budget -- up to 1830s -- even with every other
+    # reviewer long since done.
+    # It is now a poll loop so a LONE straggler gets a bounded grace period
+    # instead of the entire remaining budget. See Test-EraStragglerExpired for
+    # why the grace default is what it is.
+    $graceSec = 300
+    if ($env:ERA_STRAGGLER_GRACE_SEC) {
+        $g = 0
+        if ([int]::TryParse($env:ERA_STRAGGLER_GRACE_SEC, [ref]$g) -and $g -ge 0) { $graceSec = $g }
+    }
+    $budgetSec  = $TimeoutSec + 30
+    $sw         = [System.Diagnostics.Stopwatch]::StartNew()
+    $loneSince  = -1
+    $stopReason = ''
+    $doneStates = @('Completed', 'Failed', 'Stopped')
+    while ($true) {
+        $outstanding = @($allJobs | Where-Object { $_.State -notin $doneStates }).Count
+        if ($outstanding -eq 0) { break }
+        $elapsed = [int]$sw.Elapsed.TotalSeconds
+        if ($outstanding -eq 1 -and $loneSince -lt 0 -and @($allJobs).Count -ge 2) {
+            $loneSince = $elapsed
+            Write-Host "[dispatch] One reviewer still running at ${elapsed}s; allowing ${graceSec}s grace before abandoning it (ERA_STRAGGLER_GRACE_SEC)."
+        }
+        $stopReason = Test-EraStragglerExpired -ElapsedSec $elapsed -Outstanding $outstanding `
+            -Total @($allJobs).Count -BudgetSec $budgetSec -GraceSec $graceSec -LoneSinceSec $loneSince
+        if ($stopReason) { break }
+        Start-Sleep -Milliseconds 500
+    }
 
     $results = @{}
     foreach ($d in $dispatched) {
         try {
             if ($d.Job.State -ne 'Completed') {
                 Stop-Job -Job $d.Job -ErrorAction SilentlyContinue
+                $why = if ($stopReason -eq 'grace') {
+                    "Abandoned after ${graceSec}s grace as the last outstanding reviewer" +
+                    " (every other panel member had finished). Raise ERA_STRAGGLER_GRACE_SEC to wait longer."
+                } else {
+                    "Timed out after $TimeoutSec seconds (global)."
+                }
                 $results[$d.Preset] = @{
                     Preset = $d.Preset; ExitCode = -1; Response = $null
-                    Warnings = @("Timed out after $TimeoutSec seconds (global).")
+                    Warnings = @($why)
                     Error = 'timeout'
                 }
             } else {
