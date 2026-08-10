@@ -129,6 +129,70 @@ Describe 'Get-EraReviewArtifactIgnorePatterns' -Tag Unit {
     }
 }
 
+Describe 'The manifest layer agrees with the ignore layer about staging' -Tag Unit {
+    # The ignore layer already gets this right: it carves
+    # '.external-reviews/<topic>/round-N-external/**' OUT of the blanket
+    # '.external-reviews/**' exclusion, so THIS round's staged out-of-repo file
+    # reaches the bundle while every other artifact is dropped (see the
+    # 'carves out ONLY the current round staging dir' case above).
+    #
+    # The manifest layer used a BLANKET '.external-reviews' skip, so it
+    # disagreed. Measured: a staged file appeared in manifest.sources and was
+    # absent from manifest.source_hashes --
+    #   sources       : normal.md | .external-reviews/t/round-1-external/HOME/.../SKILL.md
+    #   source_hashes : normal.md
+    # meaning a file era deliberately uploaded could never register as changed,
+    # and every later round's delta was blind to it. Two layers, one rule.
+    BeforeEach {
+        $script:Root = Join-Path $env:TEMP "era-staged-$(New-Guid)"
+        $script:RD   = Join-Path $script:Root '.external-reviews\t'
+        $script:Staged = Join-Path $script:RD 'round-1-external\HOME\.claude\skills\era\SKILL.md'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $script:Staged) -Force | Out-Null
+        Set-Content -LiteralPath $script:Staged -Value 'STAGED-V1' -Encoding UTF8
+        Set-Content -LiteralPath (Join-Path $script:Root 'normal.md') -Value 'n' -Encoding UTF8
+        $script:Bundle = Join-Path $script:RD 'b.xml'
+        Set-Content -LiteralPath $script:Bundle -Value 'x' -Encoding UTF8
+        # era's own artifact: the thing the blanket guard exists to exclude.
+        Set-Content -LiteralPath (Join-Path $script:RD 'round-1-prompt.md') -Value 'era artifact' -Encoding UTF8
+        $script:StagedRel = ($script:Staged.Substring($script:Root.Length).TrimStart('\') -replace '\\', '/')
+    }
+    AfterEach {
+        Remove-Item -LiteralPath $script:Root -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'hashes a staged out-of-repo file into source_hashes' {
+        $mp = Write-ReviewManifest -ReviewDir $script:RD -Round 1 -TopicSlug 't' `
+            -Files @($script:Bundle) -SourceFiles @('normal.md', $script:StagedRel) -RepoRoot $script:Root
+        $keys = @((Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json).source_hashes.PSObject.Properties.Name)
+        $keys | Should -Contain $script:StagedRel
+        $keys | Should -Contain 'normal.md'
+    }
+
+    It "still refuses to hash era's own round artifacts" {
+        # The guard must narrow, not disappear. A prompt/response/manifest under
+        # .external-reviews is era's own output and must stay out of the
+        # baseline, or every later round sees its own artifacts as changed.
+        $mp = Write-ReviewManifest -ReviewDir $script:RD -Round 1 -TopicSlug 't' `
+            -Files @($script:Bundle) `
+            -SourceFiles @('normal.md', '.external-reviews/t/round-1-prompt.md') -RepoRoot $script:Root
+        $keys = @((Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json).source_hashes.PSObject.Properties.Name)
+        $keys | Should -Not -Contain '.external-reviews/t/round-1-prompt.md'
+        $keys | Should -Contain 'normal.md'
+    }
+
+    It 'an edit to a staged out-of-repo file registers as Changed' {
+        Write-ReviewManifest -ReviewDir $script:RD -Round 1 -TopicSlug 't' `
+            -Files @($script:Bundle) -SourceFiles @('normal.md', $script:StagedRel) -RepoRoot $script:Root | Out-Null
+
+        Set-Content -LiteralPath $script:Staged -Value 'STAGED-V2-CHANGED' -Encoding UTF8
+
+        $diff = Get-ReviewDiff -ReviewDir $script:RD -PriorRound 1 `
+            -CurrentFiles @('normal.md', $script:StagedRel) -RepoRoot $script:Root
+
+        $diff.Changed | Should -Contain $script:StagedRel
+    }
+}
+
 Describe 'Bundle contents (real repomix measurement)' -Tag Integration -Skip:(-not $script:HasRepomix) {
     It 'default-glob bundle contains NO .external-reviews path' {
         $tmp = Join-Path $env:TEMP "era-ign-glob-$(New-Guid)"

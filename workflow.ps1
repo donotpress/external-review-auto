@@ -147,7 +147,18 @@ function Get-ReviewDiff {
             # Never hash era's own review artifacts into the baseline: on the
             # broad path the include list is globs, so this recursion used to
             # sweep up .external-reviews and every later round saw it changed.
-            if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
+            #
+            # EXCEPT round-N-external/, which is P6 staging — out-of-repo files
+            # the caller explicitly asked to review, mirrored under the review
+            # dir because repomix can only bundle beneath repoRoot. Those are
+            # review SUBJECTS, not era output. The repomix ignore layer already
+            # draws exactly this line (Get-EraReviewArtifactIgnorePatterns carves
+            # round-N-external/** out of the blanket .external-reviews/**), so a
+            # blanket skip here made the two layers disagree: the file was
+            # uploaded and then never hashed, and no later round could see it
+            # change. Two layers, one rule.
+            $normCp = $cp -replace '\\', '/'
+            if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
             $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
             $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
         }
@@ -402,7 +413,8 @@ function Write-ReviewManifest {
                 # the broad path the include list is globs, so this recursion
                 # used to sweep up .external-reviews and every later round saw
                 # those artifacts as changed.
-                if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
+                $normCp = $cp -replace '\\', '/'
+                if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
                 $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                 $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
             }
