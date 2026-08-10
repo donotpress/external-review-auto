@@ -1212,7 +1212,33 @@ function Invoke-ReviewerDispatch {
                     $commonArgs['PidFile'] = $pidFile
                 }
                 $h = & $fnName @commonArgs
-                $h.Preset = $mi.preset
+                # An adapter -- or any module it dot-sources -- can emit to the
+                # SUCCESS stream, which makes $h an ARRAY rather than the result
+                # hashtable. Select the structured result BEFORE stamping Preset
+                # onto it.
+                #
+                # Measured 2026-08-10: assigning to a property of an array (or of
+                # a bare string) throws "The property 'Preset' cannot be found on
+                # this object", the catch below converts the whole reviewer into
+                # an "Adapter exception", and the dispatcher's own "filter to the
+                # last hashtable" defence at collection time can then NEVER run,
+                # because the job never returns the array it was meant to filter.
+                # The 'no-structured-output' branch was unreachable for the same
+                # reason. One stray Write-Output anywhere in an adapter's load
+                # path was enough to turn a good review into a failure.
+                # NOTE the FULLY-QUALIFIED type. `$_ -is [pscustomobject]` is
+                # True for EVERY pipeline item -- including a bare string --
+                # because Where-Object binds $_ as a PSObject-wrapped value.
+                # Measured 2026-08-10: scalar `'x' -is [pscustomobject]` is
+                # False, but the same test inside Where-Object is True, so the
+                # accelerator form is a filter that filters nothing.
+                $h = @($h) |
+                    Where-Object { $_ -is [hashtable] -or $_ -is [System.Management.Automation.PSCustomObject] } |
+                    Select-Object -Last 1
+                # $null here means the adapter produced nothing structured; the
+                # collection path turns an empty job result into
+                # Error='no-structured-output', which is the honest label.
+                if ($h) { $h.Preset = $mi.preset }
                 return $h
             } catch {
                 # Bug 2 fix: never let the adapter's exception silently kill the ThreadJob --
@@ -1326,7 +1352,15 @@ function Invoke-ReviewerDispatch {
                 # array elements alongside the final structured hashtable.
                 # Filter to the last hashtable/PSCustomObject to be defensive.
                 $rawJobOutput = Receive-Job -Job $d.Job -ErrorAction Stop
-                $h = $rawJobOutput | Where-Object { $_ -is [hashtable] -or $_ -is [pscustomobject] } | Select-Object -Last 1
+                # Fully-qualified type, for the reason documented at the
+                # in-job filter above: `-is [pscustomobject]` matches every
+                # pipeline item, so this "filter to the last hashtable" kept
+                # everything and Select -Last 1 then returned whatever the
+                # adapter happened to emit LAST -- trailing junk beat the real
+                # result, and 'no-structured-output' was unreachable.
+                $h = $rawJobOutput |
+                    Where-Object { $_ -is [hashtable] -or $_ -is [System.Management.Automation.PSCustomObject] } |
+                    Select-Object -Last 1
                 if (-not $h) {
                     $h = @{
                         Preset = $d.Preset; ExitCode = -1; Response = $null
