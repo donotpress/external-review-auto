@@ -44,6 +44,42 @@ function Expand-EraIncludePath {
         [Parameter(Mandatory)][string]$Entry,
         [Parameter(Mandatory)][string]$RepoRoot
     )
+    # --- globstar ----------------------------------------------------------
+    # '**/' is minimatch's "every depth, including this one", and that is the
+    # meaning repomix applies when it bundles. PowerShell has NO globstar --
+    # '**' is just two '*' -- so handing the same string to Get-ChildItem -Path
+    # asks a different question and gets a different answer. Measured on a
+    # root.md / sub/mid.md / sub/deep/deep.md tree:
+    #
+    #   -Path <root>\**\*.md -File -Recurse    -> root.md   only
+    #   -Path <root>\**\*.md -File             -> mid.md    only
+    #   -LiteralPath <root> -Filter *.md -Rec  -> all three
+    #
+    # era's broad-audit path is built entirely from '**/*.ext' globs
+    # (era.ps1:991), so pre-fix repomix bundled every matching file at every
+    # depth while the manifest hashed whatever that first line happened to
+    # return. Everything else was uploaded but never hashed, so it could never
+    # register as changed and the round-over-round delta was blind to it.
+    #
+    # -Filter is the fast form (the FileSystem provider pushes it down), but on
+    # volumes with 8.3 name generation it can over-match (*.md catching .mdx),
+    # so the -like pass makes the result deterministic regardless of volume
+    # settings. Keep both: -Filter for speed, -like for correctness.
+    if ($Entry -match '^(.*?)\*\*[\\/](.+)$') {
+        $prefix = $matches[1]
+        $leaf   = $matches[2]
+        # Only a trailing filename pattern is handled here. A '**' with further
+        # path structure after it ('**/sub/*.ts') needs real glob machinery;
+        # fall through to the generic branch rather than answer it wrongly.
+        if ($leaf -notmatch '[\\/]') {
+            $base = if ($prefix) { Join-Path $RepoRoot ($prefix -replace '[\\/]+$', '') } else { $RepoRoot }
+            if (-not (Test-Path -LiteralPath $base -PathType Container)) { return @() }
+            return @(Get-ChildItem -LiteralPath $base -Filter $leaf -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like $leaf } |
+                ForEach-Object { $_.FullName })
+        }
+    }
+
     $resolved = Join-Path $RepoRoot $Entry
     if ($Entry -match '[*?]') {
         if (-not (Test-Path -Path $resolved)) { return @() }
@@ -74,10 +110,26 @@ function Get-ReviewDiff {
 
     $priorManifest = Get-Content -Raw -LiteralPath $priorManifestPath | ConvertFrom-Json
     $priorHashes = @{}
-    if ($priorManifest.sources -and $priorManifest.source_hashes) {
-        foreach ($s in $priorManifest.sources) {
-            $h = $priorManifest.source_hashes.$s
-            if ($null -ne $h) { $priorHashes[$s] = "$h" }
+    if ($priorManifest.source_hashes) {
+        # Read source_hashes DIRECTLY. It was previously indexed via
+        # $priorManifest.sources -- but `sources` is the include list AS
+        # WRITTEN (globs) while `source_hashes` is keyed by CONCRETE relative
+        # path, so on the broad path every lookup was
+        #   source_hashes['**/*.md']   -> $null
+        # and $priorHashes came out empty. With an empty baseline every current
+        # file classifies as Added, so the round-over-round delta reported
+        # nothing Changed and nothing Unchanged, every round, forever.
+        #
+        # Measured after fixing the globstar expansion but before this: editing
+        # sub/deep/deep.md gave
+        #   Added: sub/deep/deep.md, root.md   Changed: (none)   Unchanged: (none)
+        # — root.md was untouched and still reported as new.
+        #
+        # This stayed invisible on the -IncludeFiles path because there
+        # `sources` holds literal paths, so it coincided with the hash keys.
+        # Only the glob path diverged, which is the documented broad-audit mode.
+        foreach ($p in $priorManifest.source_hashes.PSObject.Properties) {
+            if ($p.Name -and $null -ne $p.Value) { $priorHashes[$p.Name] = "$($p.Value)" }
         }
     } else {
         foreach ($f in $priorManifest.files) {
