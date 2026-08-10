@@ -72,7 +72,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "Direct Anthropic Messages API, Claude Opus 5 (no claude CLI / no TTY / no console pollution). Requires $env:ANTHROPIC_API_KEY."
+    "notes": "Direct Anthropic Messages API, Claude Opus 5. NOT yet verified live — needs $env:ANTHROPIC_API_KEY, which was unset when the model id was updated 2026-08-10. (no claude CLI / no TTY / no console pollution). Requires $env:ANTHROPIC_API_KEY."
   },
   "sonnet-api": {
     "backend": "anthropic",
@@ -84,7 +84,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "Direct Anthropic Messages API, Claude Sonnet 5. Requires $env:ANTHROPIC_API_KEY."
+    "notes": "Direct Anthropic Messages API, Claude Sonnet 5. NOT yet verified live — needs $env:ANTHROPIC_API_KEY, which was unset when the model id was updated 2026-08-10. Requires $env:ANTHROPIC_API_KEY."
   },
   "haiku-api": {
     "backend": "anthropic",
@@ -147,7 +147,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "claude CLI --print --model claude-opus-5. Bundle piped via stdin. Verified 2026-08-02: the CLI errors on a bogus model id, so this one is real."
+    "notes": "claude CLI --print --model claude-opus-5. Bundle piped via stdin. Re-verified 2026-08-10 against the live CLI: replied 'ok', while a bogus id (claude-bogus-9-9) exits 1 — so this one is real."
   },
   "sonnet": {
     "backend": "claude",
@@ -159,7 +159,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "claude CLI --print --model claude-sonnet-5. Bundle piped via stdin."
+    "notes": "claude CLI --print --model claude-sonnet-5. Bundle piped via stdin. Verified 2026-08-10 against the live CLI: replied 'ok', while a bogus id (claude-bogus-9-9) exits 1 — so this one is real."
   },
   "haiku": {
     "backend": "claude",
