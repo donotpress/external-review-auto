@@ -94,9 +94,12 @@ function Invoke-PromptTokenSubstitution {
         written from template) and BEFORE repomix runs (the bundle picks up the prompt
         via instructionFilePath at bundle time).
 
-        Three outcomes:
-            - round-(N-1)-response.md exists: substituted with a fenced header.
-            - round-(N-1)-claim.json exists (in-flight): substituted with a [in flight] note.
+        Three outcomes, in this precedence order:
+            - round-(N-1)-claim.json exists (in-flight): a [in flight] note, and
+              NO round N-1 content is carried forward from any source. This is
+              checked first and outranks both branches below.
+            - round-(N-1) responses exist (per-preset files, else the canonical
+              round-(N-1)-response.md): substituted with a fenced header.
             - Neither exists: substituted with a [not found] note.
 
         If {{PREVIOUS_ROUND}} is absent from the prompt, no action is taken (callers
@@ -137,16 +140,35 @@ function Invoke-PromptTokenSubstitution {
     # round still running yielded whichever reviewers had already finished,
     # presented as though it were the complete panel.
     #
+    # It also gates EVERY content branch, not just the per-preset glob. It used
+    # to gate only $perPreset, so a round holding a live claim while a canonical
+    # round-N-response.md existed fell through to the canonical branch below and
+    # was handed to round N+1 as a finished review — the same "partial round
+    # presented as complete" failure, reached by the other door. Measured before
+    # the fix: the canonical body was inlined under "## Previous round's review
+    # (round N)" with no in-flight note at all.
+    #
+    # A live claim is the ONLY authority on in-flight-ness here. The manifest is
+    # NOT a completion signal — era.ps1 writes round-N-manifest.json pre-dispatch
+    # (era.ps1:1398), before any reviewer returns — so "claim + manifest" must
+    # never be read as "finished". Do not add that shortcut. An orphaned claim
+    # from a hard kill is reclaimed by Reserve-ReviewRound's 24h TTL; until then
+    # withholding content is the safe direction, because a hard-killed round's
+    # responses are partial by construction.
+    #
     # The glob is 'round-N-*-response.md'. Rejected answers are deliberately
     # written as 'round-N-<preset>-response.rejected.md' by
     # Copy-PrimaryResponseAlias so they cannot match here — that is the whole
     # point of the naming, do not "tidy" it.
+    $inFlight  = Test-Path $claimFile
     $perPreset = @()
-    if (-not (Test-Path $claimFile)) {
+    if (-not $inFlight) {
         $perPreset = @(Get-ChildItem -Path $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
             Sort-Object Name)
     }
-    if ($perPreset.Count -gt 0) {
+    if ($inFlight) {
+        $substitution  = "[Round $previousN is in flight; not yet available]"
+    } elseif ($perPreset.Count -gt 0) {
         $sections = foreach ($f in $perPreset) {
             if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
             "### Reviewer: $preset`n`n" + (Get-Content $f.FullName -Raw)
@@ -154,10 +176,10 @@ function Invoke-PromptTokenSubstitution {
         $substitution = "## Previous round's review (round $previousN, $($perPreset.Count) reviewer(s))`n`n" +
                         ($sections -join "`n`n---`n`n")
     } elseif (Test-Path $responseFile) {
+        # Single-reviewer rounds have no suffixed files; the canonical is their
+        # only artifact. Reachable only when $inFlight is false — see above.
         $previousText  = Get-Content $responseFile -Raw
         $substitution  = "## Previous round's review (round $previousN)`n`n$previousText"
-    } elseif (Test-Path $claimFile) {
-        $substitution  = "[Round $previousN is in flight; not yet available]"
     } else {
         $substitution  = "[Round $previousN response not found]"
     }

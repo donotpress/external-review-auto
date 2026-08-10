@@ -64,6 +64,52 @@ Describe 'Invoke-PromptTokenSubstitution' -Tag Unit {
         $result | Should -Not -Match '\{\{PREVIOUS_ROUND\}\}'
     }
 
+    # --- in-flight guard must beat EVERY content branch, not just the glob ---
+    # The guard used to gate only the per-preset $perPreset glob, so a round with
+    # a live claim AND a canonical round-N-response.md fell through to the
+    # canonical branch and was presented to round N+1 as a complete review.
+    # Measured before the fix: the canonical body was inlined under
+    # "## Previous round's review (round 1)" with no in-flight note.
+    # The manifest is NOT a completion signal here — era.ps1 writes it
+    # pre-dispatch — so a live claim is the only authority on in-flight-ness.
+    It 'round-1 in flight AND a canonical response exists: canonical must NOT leak' {
+        Set-Content (Join-Path $script:TmpDir 'round-1-claim.json') `
+            -Value '{"pid":9999,"started":"2026-05-28T00:00:00Z","reviewer":"opus"}' -Encoding UTF8
+        Set-Content (Join-Path $script:TmpDir 'round-1-response.md') `
+            -Value 'CANONICAL-PARTIAL-CONTENT' -Encoding UTF8
+
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile -Value "See prior: {{PREVIOUS_ROUND}}" -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        $result | Should -Match 'in flight'
+        $result | Should -Not -Match 'CANONICAL-PARTIAL-CONTENT'
+        $result | Should -Not -Match "Previous round's review"
+        $result | Should -Not -Match '\{\{PREVIOUS_ROUND\}\}'
+    }
+
+    It 'round-1 in flight AND per-preset + canonical responses exist: nothing leaks' {
+        Set-Content (Join-Path $script:TmpDir 'round-1-claim.json') `
+            -Value '{"pid":9999,"started":"2026-05-28T00:00:00Z","reviewer":"opus"}' -Encoding UTF8
+        Set-Content (Join-Path $script:TmpDir 'round-1-gemini-response.md') `
+            -Value 'GEMINI-EARLY-FINISHER' -Encoding UTF8
+        Set-Content (Join-Path $script:TmpDir 'round-1-response.md') `
+            -Value 'CANONICAL-PARTIAL-CONTENT' -Encoding UTF8
+
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile -Value "See prior: {{PREVIOUS_ROUND}}" -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        $result | Should -Match 'in flight'
+        $result | Should -Not -Match 'GEMINI-EARLY-FINISHER'
+        $result | Should -Not -Match 'CANONICAL-PARTIAL-CONTENT'
+        $result | Should -Not -Match '\{\{PREVIOUS_ROUND\}\}'
+    }
+
     It 'round-2 prompt WITH token, round-1 missing entirely, gets [not found] string' {
         # Neither response nor claim file exists
         $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
