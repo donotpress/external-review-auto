@@ -981,6 +981,27 @@ Be terse. If a section is empty, write "(none)".
         }
     }
 
+    # --- Response contract capture (P1) --------------------------------------
+    # Read here, from the finalized prompt, and BEFORE the {{PREVIOUS_ROUND}}
+    # substitution below. It used to be read at application time, downstream of
+    # that substitution -- so the file it parsed already contained the previous
+    # round's REVIEW TEXT, and Get-EraResponseContract takes the first -match.
+    # A reviewer that merely QUOTED an `<!-- era-require: ... -->` marker
+    # installed the contract for round N+1: reviewer-controlled text became
+    # control plane.
+    #
+    # Reachable precisely because no shipped prompt carries a marker -- with no
+    # real marker to win the race, ANY marker a reviewer quotes becomes the
+    # contract, every reviewer then fails it, and that also triggers the
+    # billable fallback dispatch. Not hypothetical for this repo: it reviews
+    # itself, and its own round-1/2 responses under .external-reviews/era-grade/
+    # quote era-require markers verbatim.
+    #
+    # Placed after the prompt is finalized so a -PromptOverrideFile /
+    # -ConversationFile contract is still picked up: the contract travels WITH
+    # the prompt, it just must be read before untrusted text is spliced in.
+    $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
+
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
     # If the finalized prompt contains {{PREVIOUS_ROUND}}, replace it with the
     # prior round's response text. Must run AFTER the prompt file is finalized
@@ -1563,7 +1584,10 @@ Be terse. If a section is empty, write "(none)".
     # Runs BEFORE the fallback block so a contract failure can trigger it. It is
     # applied AGAIN after that block (see below) — otherwise the fallback's own
     # answer is never checked.
-    $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
+    # $contractRequired was captured from the finalized prompt BEFORE the
+    # {{PREVIOUS_ROUND}} substitution -- see the comment at the capture site.
+    # Do NOT re-read it from $promptPath here: by this point the file contains
+    # the previous round's reviewer text, which would reopen the injection hole.
     if ($contractRequired.Count -gt 0) {
         Write-Host "[era] Response contract: $($contractRequired -join ', ')"
         $null = Assert-EraResponseContract -Results $results -Required $contractRequired
