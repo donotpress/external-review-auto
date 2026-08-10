@@ -58,8 +58,14 @@ Describe 'PR2-C: Test-Path validation before repomix' -Tag Unit {
         try {
             # Create a minimal .git marker so era.ps1 treats tmpDir as repo root
             New-Item -ItemType Directory -Path (Join-Path $tmpDir '.git') -Force | Out-Null
+            # ...and actually RUN there. This Set-Location was missing, so the
+            # child inherited Pester's cwd and era.ps1 resolved $repoRoot to the
+            # era skill repo itself — the temp dir above was never used. Latent
+            # since the test was written; surfaced when the dirty-tree gate
+            # (9808e80) started refusing on the real repo's untracked files.
             $output = & pwsh -NonInteractive -Command @"
 `$ErrorActionPreference = 'Stop'
+Set-Location -LiteralPath '$tmpDir'
 try {
     & '$($script:EraPath)' -TopicSlug 'era-test' -IncludeFiles 'this-file-does-not-exist.md' -Force 2>&1 | Out-String
 } catch {

@@ -64,11 +64,23 @@ Describe '#2 git guard (source check)' {
 
 Describe '#4 clean preflight error (out-of-process)' {
     It 'a bad -IncludeFiles prints [era] ERROR: and exits 1 with no exception stack' {
-        $out = & pwsh -NoProfile -File $script:Era -TopicSlug t -Reviewer gemini-api `
-            -IncludeFiles 'totally-missing-xyz-12345.md' -Force 2>&1 | Out-String
-        $code = $LASTEXITCODE
-        $code | Should -Be 1
-        $out  | Should -Match '\[era\] ERROR:'
-        $out  | Should -Not -Match 'System\.Management\.Automation'
+        # Run in a throwaway repo. Previously this ran from whatever cwd Pester
+        # had, i.e. the era skill repo itself, so it was never hermetic — and
+        # once the dirty-tree gate (9808e80) landed, the real repo's untracked
+        # files made era refuse before it ever reached include validation.
+        $tmp = Join-Path $env:TEMP "era-preflight-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $tmp '.git') -Force | Out-Null
+        Push-Location $tmp
+        try {
+            $out = & pwsh -NoProfile -File $script:Era -TopicSlug t -Reviewer gemini-api `
+                -IncludeFiles 'totally-missing-xyz-12345.md' -Force 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            $code | Should -Be 1
+            $out  | Should -Match '\[era\] ERROR:'
+            $out  | Should -Not -Match 'System\.Management\.Automation'
+        } finally {
+            Pop-Location
+            Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
