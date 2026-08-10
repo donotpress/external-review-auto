@@ -838,7 +838,21 @@ Be terse. If a section is empty, write "(none)".
             Write-Host "[era] Using pre-written prompt from $PromptOverrideFile"
         }
     } elseif (-not (Test-Path -LiteralPath $promptPath)) {
-        $promptTemplate -replace '{{TOPIC_TITLE}}', $promptTitle | Set-Content -LiteralPath $promptPath -Encoding utf8
+        # [regex]::Replace + MatchEvaluator, NOT -replace: PowerShell's -replace
+        # treats the replacement as a regex substitution string, so '$&', "$'"
+        # and '$`' in the title are EXPANDED rather than inserted literally.
+        # $promptTitle comes from a spec FILENAME here ($TopicSlug is sanitised
+        # to [a-zA-Z0-9_-] at line 721, so it cannot carry them), and '$' is
+        # legal in a filename. Measured on the raw form:
+        #   title 'a$&b'  -> 'a{{TOPIC_TITLE}}b'   (token reinserted)
+        #   title "a$'b"  -> splices the whole SUFFIX of the prompt in
+        #   title 'a$`b'  -> splices the whole PREFIX of the prompt in
+        # The last two duplicate real instruction text into the title position.
+        # workflow.ps1's {{PREVIOUS_ROUND}} substitution already documents this
+        # as "the only safe approach"; this call site had not followed it.
+        $rendered = [regex]::Replace($promptTemplate, [regex]::Escape('{{TOPIC_TITLE}}'),
+            [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $promptTitle })
+        $rendered | Set-Content -LiteralPath $promptPath -Encoding utf8
     }
 
     # --- -ConversationFile injection (2026-06-10 hardening P2) ---

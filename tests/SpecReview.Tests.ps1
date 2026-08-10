@@ -218,3 +218,66 @@ Related: "src/one.ps1", 'src/two.ps1'
             -Because 'a YAML inline-list related_files: [...] branch must exist'
     }
 }
+
+Describe '{{TOPIC_TITLE}} is inserted literally, not as a regex replacement' -Tag Integration {
+    # era.ps1 rendered the prompt with
+    #     $promptTemplate -replace '{{TOPIC_TITLE}}', $promptTitle
+    # and PowerShell's -replace treats the replacement as a regex SUBSTITUTION
+    # string, so '$&', "$'" and '$`' in the title are expanded. Measured on the
+    # raw form against a template 'HEADER. Review of {{TOPIC_TITLE}} now. FOOTER.':
+    #     'a$&b' -> 'a{{TOPIC_TITLE}}b'          (the token reinserted)
+    #     "a$'b" -> splices the whole SUFFIX in
+    #     'a$`b' -> splices the whole PREFIX in
+    # The last two duplicate real instruction text into the title position.
+    #
+    # Reachability is narrow and worth stating: $TopicSlug is sanitised to
+    # [a-zA-Z0-9_-] (era.ps1:721) so it can never carry these. Only a spec
+    # FILENAME can, and it must ALSO survive the `BaseName -match $TopicSlug`
+    # lookup — which a mid-name metachar breaks (the sanitised slug no longer
+    # occurs in the filename). A TRAILING '$&' does survive both, which is the
+    # shape exercised here.
+    BeforeAll {
+        $script:SkillRootTT = Split-Path $PSScriptRoot -Parent
+        $script:EraTT       = Join-Path $script:SkillRootTT 'runtimes/era.ps1'
+    }
+
+    It 'renders a spec filename containing $& literally' {
+        $repo = Join-Path $env:TEMP "era-tt-$(New-Guid)"
+        New-Item -ItemType Directory -Path (Join-Path $repo '.git') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $repo 'docs\specs') -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $repo 'a.md') -Value '# a' -Encoding UTF8
+        $specName = "2026-08-10-audit`$&-design.md"
+        Set-Content -LiteralPath (Join-Path (Join-Path $repo 'docs\specs') $specName) -Value '# spec' -Encoding UTF8
+        $priorGlob = $env:ERA_SPEC_GLOB
+        try {
+            $env:ERA_SPEC_GLOB = 'docs/specs/*-design.md'
+            Push-Location $repo
+            try {
+                # Pair with a missing include so the run stops at validation —
+                # after the prompt is written, before any reviewer is dispatched.
+                & pwsh -NonInteractive -File $script:EraTT -Force `
+                    -IncludeFiles "a.md,definitely-missing.py" 2>&1 | Out-Null
+            } finally { Pop-Location }
+
+            $prompt = Get-ChildItem -LiteralPath (Join-Path $repo '.external-reviews') -Recurse `
+                        -Filter 'round-*-prompt.md' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            $prompt | Should -Not -BeNullOrEmpty -Because 'the prompt must be written before include validation fails'
+            $txt = Get-Content -LiteralPath $prompt.FullName -Raw
+
+            # The token must NOT reappear — that is what $& expansion produces.
+            $txt | Should -Not -Match '\{\{TOPIC_TITLE\}\}'
+            # And the title must survive verbatim.
+            $txt | Should -Match 'audit\$&'
+        } finally {
+            if ($null -ne $priorGlob) { $env:ERA_SPEC_GLOB = $priorGlob }
+            else { Remove-Item Env:\ERA_SPEC_GLOB -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'era.ps1 no longer uses the unsafe -replace for the title' {
+        $src = Get-Content -Raw $script:EraTT
+        $src | Should -Not -Match "-replace '\{\{TOPIC_TITLE\}\}'"
+        $src | Should -Match 'MatchEvaluator'
+    }
+}
