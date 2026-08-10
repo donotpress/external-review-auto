@@ -114,6 +114,9 @@ This skill follows a **single-entry-point** architecture. When the slash command
 4. **Write or select prompt** — `-SpecReview` for spec reviews; `-PromptOverrideFile` for custom; omit for generic
 5. **Dispatch** — `pwsh <skill-root>/runtimes/era.ps1 <flags> -Force`
 6. **Wait for completion** — era.ps1 handles polling/capture internally. If era.ps1 exits non-zero, report the error message to the user verbatim — do not retry or attempt recovery.
+   - **Exit 0** — a reviewer produced a readable review. Proceed to triage.
+   - **Exit 1** — preflight refusal (bad `-IncludeFiles`, empty bundle, dirty tree). Nothing was dispatched and nothing was spent, so fixing the named problem and re-running is free.
+   - **Exit 2** — the round ran and produced **no usable review**: every reviewer either wrote no response file or had its answer rejected. Real money was already spent and the artifacts are kept for diagnosis, so **never silently re-dispatch**. Report the per-reviewer breakdown era printed, and ask the user before spending again. Exit 2 never means "no findings" — it means nothing was reviewed.
 7. **Triage response** — classify each claim before incorporating (see Handling the response)
 8. **Decide: done or round 2?** — if 0 critical issues, report to user (converged). Otherwise go to Round 2+ Workflow.
 

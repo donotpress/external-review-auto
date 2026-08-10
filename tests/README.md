@@ -40,7 +40,7 @@ Tests are pure PowerShell with no network or live backend spawning. Most are fas
 | `Registry.Tests.ps1` | `_registry.json` structural integrity — required fields, backend↔`.ps1` resolution, REST presets declare `api_base`/`api_key_env`. |
 | `EnvScrub.Tests.ps1` | CLI adapters scrub agent-context env vars, use `CreateNoWindow=$true`, avoid `Start-Process -NoNewWindow`. |
 | `ClaudeTruncation.Tests.ps1` | `Test-ClaudeTruncation` precision-anchored stderr detection (true positives + tricky false positives). |
-| `VoidRound.Tests.ps1` | A round that produced no usable review must not report success: `content_ok` is grounded in the response artifact on disk, not in the adapter's `ContentOk` flag (which agy sets `$true` even when its process was killed) and not in a clean exit code (which for REST backends only means the HTTP call worked). |
+| `VoidRound.Tests.ps1` | A round that produced no usable review must not report success. `content_ok` and `Test-EraReviewerArtifact` are grounded in the response artifact on disk, not in the adapter's `ContentOk` flag (which agy sets `$true` even when its process was killed) and not in a clean exit code (which for REST backends only means the HTTP call worked); `Get-EraVoidRoundReport` plus the `era.ps1` gate that exits **2** — distinct from the preflight exit 1 — when nothing readable was produced. |
 
 ## What's NOT covered
 

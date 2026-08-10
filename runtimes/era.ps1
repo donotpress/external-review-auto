@@ -1678,6 +1678,34 @@ Be terse. If a section is empty, write "(none)".
         -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
         -TopicRoundCount $topicRoundCount
 
+    # --- Void-round gate (2026-08-10) ----------------------------------------
+    # A round could burn the whole budget, write artifacts, and still exit 0
+    # having produced NOTHING a caller can read. Measured 2026-08-09 on the
+    # shipped three-model panel, all three void in one run: opus exceeded its
+    # slice of the budget, deepseek-flash failed after reading the bundle, and
+    # gemini-pro-high truncated at its output cap with its answer (the prompt,
+    # echoed back) demoted to *.rejected.md. era exited 0. On a single-reviewer
+    # dispatch that reads as "reviewed, no findings" when nothing was reviewed.
+    #
+    # Deliberately AFTER Write-ReviewMetadata: the round's telemetry and every
+    # artifact must survive the non-zero exit so the failure can be diagnosed.
+    #
+    # Exit 2, NOT 1. Every exit 1 in this script is a preflight refusal that
+    # spent nothing and can be re-run for free (Stop-EraWithError). A void round
+    # already cost real money, so a caller must be able to tell the two apart
+    # before deciding to retry. SKILL.md documents both.
+    #
+    # $runSucceeded is deliberately left unset so the finally block keeps the
+    # repomix config as a receipt for the failed run.
+    $voidReport = Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
+        -Results $results -RequestedCount @($reviewerList).Count
+    if ($voidReport.IsVoid) {
+        Write-Host "[era] ERROR: round $round produced no usable review."
+        foreach ($line in $voidReport.Lines) { Write-Host $line }
+        Write-Host "Artifacts kept in $reviewDir for diagnosis."
+        exit 2
+    }
+
     $firstResult = @($results.Values) | Select-Object -First 1
     if ($firstResult -and $firstResult.WallClockSec) {
         Write-Host "Done. Wall clock: $($firstResult.WallClockSec)s | Tokens: $tokenCount"

@@ -1484,6 +1484,118 @@ function Copy-GeminiResponseAlias {
         -ReviewerList $ReviewerList -Results @{ gemini = $GeminiResult }
 }
 
+function Test-EraReviewerArtifact {
+    <#
+    .SYNOPSIS
+        Did this reviewer leave a readable answer on disk for this round?
+
+    .DESCRIPTION
+        The single source of truth for "this reviewer produced a review".
+        Everything else lies:
+
+          * ContentOk is set only by agy and opencode, and agy's clean-capture
+            return sets it $true even when the agy process was killed at the
+            hard deadline (backends/agy.ps1:598-602 decides from the response
+            TEXT and never consults $result.ExitCode).
+          * ExitCode -eq 0 does not imply an answer reached disk -- it only says
+            the call returned.
+
+        A readable answer is one under a name Invoke-PromptTokenSubstitution's
+        'round-N-*-response.md' glob will actually pick up. Copy-PrimaryResponseAlias
+        deliberately renames every rejected answer to *.rejected.md precisely so
+        it CANNOT match that glob, so a plain Test-Path is the right question.
+
+        The unsuffixed round-N-response.md counts only for a genuine solo
+        dispatch (Get-ResponseFilenameSuffix omits the suffix there). Once a
+        second reviewer exists the unsuffixed name belongs to whoever was
+        promoted, and it is never legitimately the original reviewer's -- a
+        fallback is dispatched only because that reviewer already failed.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ReviewDir,
+        [Parameter(Mandatory)][int]$Round,
+        [Parameter(Mandatory)][string]$Preset,
+        [Parameter(Mandatory)][int]$ReviewerCount
+    )
+    if (Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-$Preset-response.md")) { return $true }
+    if ($ReviewerCount -le 1) {
+        return [bool](Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-response.md"))
+    }
+    return $false
+}
+
+function Get-EraVoidRoundReport {
+    <#
+    .SYNOPSIS
+        Did this round produce ANY usable review? Returns
+        @{ IsVoid; UsableCount; Lines } — Lines is the per-reviewer breakdown.
+
+    .DESCRIPTION
+        A round could burn the full budget, write artifacts, and exit 0 having
+        produced nothing a caller could read. Measured 2026-08-09 on the shipped
+        three-model panel, all three void in the same run:
+
+          opus (claude CLI)      exceeded its slice of the budget; no response file.
+          deepseek-flash (opencode) failed after reading the bundle; no response file.
+          gemini-pro-high (agy)  truncated at its output cap, answer demoted to
+                                 round-1-gemini-pro-high-response.rejected.md,
+                                 and the adapter still reported ContentOk=$true
+                                 with error=null.
+
+        era exited 0. On a single-reviewer dispatch that state reads as
+        "reviewed, no findings" when nothing was reviewed.
+
+        Judged on the artifact, for the reasons in Test-EraReviewerArtifact.
+        Call AFTER Copy-PrimaryResponseAlias (so rejects are already demoted)
+        and AFTER Write-ReviewMetadata (so the telemetry survives the exit).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ReviewDir,
+        [Parameter(Mandatory)][int]$Round,
+        [Parameter(Mandatory)][hashtable]$Results,
+        [int]$RequestedCount = 0
+    )
+    $lines = [System.Collections.Generic.List[string]]::new()
+
+    if ($Results.Count -eq 0) {
+        # Nothing was dispatched. The usual cause is the user dropping every
+        # reviewer at the cost prompt (Invoke-CostPrompt returns an empty list),
+        # which is their call -- but it still produced no review, so say so
+        # plainly and make clear no money changed hands.
+        $lines.Add($(if ($RequestedCount -gt 0) {
+            "  0 of $RequestedCount reviewer(s) were approved at the cost prompt. Nothing was dispatched and nothing was spent."
+        } else {
+            "  No reviewers were dispatched."
+        }))
+        return @{ IsVoid = $true; UsableCount = 0; Lines = @($lines) }
+    }
+
+    $pad = ((@($Results.Keys) | Measure-Object -Property Length -Maximum).Maximum)
+    if (-not $pad) { $pad = 12 }
+
+    $usable = 0
+    foreach ($preset in (@($Results.Keys) | Sort-Object)) {
+        $r = $Results[$preset]
+        $hasArtifact = Test-EraReviewerArtifact -ReviewDir $ReviewDir -Round $Round `
+            -Preset $preset -ReviewerCount $Results.Count
+        if ($r -and $r.ExitCode -eq 0 -and $hasArtifact) { $usable++; continue }
+
+        $why = if ($r.Error) { $r.Error }
+               elseif ($r.RetryReason) { $r.RetryReason }
+               else { 'no error reported' }
+        $rejected = "round-$Round-$preset-response.rejected.md"
+        $detail = if (Test-Path -LiteralPath (Join-Path $ReviewDir $rejected)) { "answer demoted to $rejected" }
+                  elseif (-not $hasArtifact) { 'no response file' }
+                  else { 'response present but not accepted' }
+        if ($r.TruncationWarning) { $detail += '; truncated' }
+        $exitStr = if ($null -ne $r.ExitCode) { $r.ExitCode } else { 'n/a' }
+        $lines.Add(("  {0}  exit={1}  {2}; {3}" -f $preset.PadRight($pad), $exitStr, $why, $detail))
+    }
+    return @{ IsVoid = ($usable -eq 0); UsableCount = $usable; Lines = @($lines) }
+}
+
 function Write-ReviewMetadata {
     [CmdletBinding()]
     param(
@@ -1542,12 +1654,8 @@ function Write-ReviewMetadata {
         # has already renamed every rejected answer to *.rejected.md, so a plain
         # Test-Path asks exactly the right question -- and it covers backends
         # that exit 0 without ever writing a file, which no ExitCode check can.
-        $suffixed = Join-Path $ReviewDir "round-$Round-$preset-response.md"
-        $artifactOk = Test-Path -LiteralPath $suffixed
-        if (-not $artifactOk -and $Results.Count -eq 1) {
-            # Solo dispatch: Get-ResponseFilenameSuffix gives no preset suffix.
-            $artifactOk = Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-response.md")
-        }
+        $artifactOk = Test-EraReviewerArtifact -ReviewDir $ReviewDir -Round $Round `
+            -Preset $preset -ReviewerCount $Results.Count
         $contentOk = $adapterOk -and ($r.ExitCode -eq 0) -and $artifactOk
 
         # Never downgrade silently -- the whole point is that the disagreement

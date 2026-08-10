@@ -43,6 +43,8 @@
 BeforeAll {
     $script:SkillRoot = Split-Path $PSScriptRoot -Parent
     . (Join-Path $script:SkillRoot 'workflow.ps1')
+    $script:EraPath   = Join-Path $script:SkillRoot 'runtimes/era.ps1'
+    $script:SkillMd   = Join-Path $script:SkillRoot 'SKILL.md'
     $script:Reg = @{
         gemini            = @{ backend = 'agy';      model_id = 'gemini-3.6-flash-high'; pricing = @{ input_per_m = 0.3; output_per_m = 1.2 } }
         'gemini-pro-high' = @{ backend = 'agy';      model_id = 'gemini-3.1-pro-high';   pricing = @{ input_per_m = 1.5; output_per_m = 5.0 } }
@@ -181,5 +183,155 @@ Describe 'content_ok is grounded in the artifact, not in the adapter''s say-so' 
                 Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
+    }
+}
+
+Describe 'Test-EraReviewerArtifact — what counts as a readable answer' -Tag Unit {
+    BeforeEach {
+        $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-art-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $script:Dir -Force | Out-Null
+    }
+    AfterEach { Remove-Item $script:Dir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'counts the suffixed per-preset file on a panel' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-2-opus-response.md') -Value 'x'
+        Test-EraReviewerArtifact -ReviewDir $script:Dir -Round 2 -Preset 'opus' -ReviewerCount 3 | Should -BeTrue
+    }
+
+    It 'counts the unsuffixed file for a genuine solo dispatch' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-2-response.md') -Value 'x'
+        Test-EraReviewerArtifact -ReviewDir $script:Dir -Round 2 -Preset 'opus' -ReviewerCount 1 | Should -BeTrue
+    }
+
+    It 'does NOT count the unsuffixed file once a second reviewer exists' {
+        # It belongs to whoever was promoted, not to this preset.
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-2-response.md') -Value 'x'
+        Test-EraReviewerArtifact -ReviewDir $script:Dir -Round 2 -Preset 'opus' -ReviewerCount 2 | Should -BeFalse
+    }
+
+    It 'does NOT count a demoted *.rejected.md — the glob deliberately cannot read it' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-2-opus-response.rejected.md') -Value 'x'
+        Test-EraReviewerArtifact -ReviewDir $script:Dir -Round 2 -Preset 'opus' -ReviewerCount 3 | Should -BeFalse
+    }
+
+    It 'is false when nothing was written at all' {
+        Test-EraReviewerArtifact -ReviewDir $script:Dir -Round 2 -Preset 'opus' -ReviewerCount 3 | Should -BeFalse
+    }
+}
+
+Describe 'Get-EraVoidRoundReport — did this round produce ANY usable review?' -Tag Unit {
+    BeforeEach {
+        $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-vr-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $script:Dir -Force | Out-Null
+    }
+    AfterEach { Remove-Item $script:Dir -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'is NOT void when one reviewer of three produced a readable answer' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-gemini-response.md') -Value "## Issues`n- real"
+        $results = @{
+            gemini = @{ ExitCode = 0;  Response = 'ok'; ContentOk = $true }
+            opus   = @{ ExitCode = -1; Response = $null; Error = 'budget-exceeded' }
+            'gemini-pro-high' = @{ ExitCode = -1; Response = 'echo'; ContentOk = $true }
+        }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 3
+        $rep.IsVoid      | Should -BeFalse
+        $rep.UsableCount | Should -Be 1
+    }
+
+    It 'is VOID for the measured 2026-08-09 panel, and names all three reviewers' {
+        # (a) opus: budget exceeded, no response file.
+        # (b) deepseek-flash: opencode run failed, no response file.
+        # (c) gemini-pro-high: truncated, answer demoted to *.rejected.md,
+        #     adapter still reported ContentOk=$true with no Error.
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-gemini-pro-high-response.rejected.md') -Value 'the prompt, echoed back'
+        $results = @{
+            opus              = @{ ExitCode = -1; Response = $null; Error = 'budget-exceeded'; Warnings = @() }
+            'deepseek-flash'  = @{ ExitCode = -1; Response = $null; ContentOk = $false; Error = 'opencode-run-failed'; Warnings = @() }
+            'gemini-pro-high' = @{ ExitCode = -1; Response = 'the prompt, echoed back'; ContentOk = $true
+                                   TruncationWarning = 'hit maxOutputTokens=8192'; Warnings = @('hit maxOutputTokens=8192') }
+        }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 3
+        $rep.IsVoid      | Should -BeTrue
+        $rep.UsableCount | Should -Be 0
+        $joined = ($rep.Lines -join "`n")
+        $joined | Should -Match 'opus'
+        $joined | Should -Match 'deepseek-flash'
+        $joined | Should -Match 'gemini-pro-high'
+    }
+
+    It 'is VOID for case (c) ALONE — the single-reviewer silent success' {
+        # This is the whole point: one reviewer, adapter says ContentOk=true,
+        # error=null, and there is no readable review anywhere.
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-gemini-pro-high-response.rejected.md') -Value 'the prompt, echoed back'
+        $results = @{ 'gemini-pro-high' = @{ ExitCode = -1; Response = 'the prompt, echoed back'; ContentOk = $true; Warnings = @() } }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 1
+        $rep.IsVoid | Should -BeTrue
+    }
+
+    It 'names the demoted file so the evidence is findable' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-gemini-pro-high-response.rejected.md') -Value 'echo'
+        $results = @{ 'gemini-pro-high' = @{ ExitCode = -1; Response = 'echo'; ContentOk = $true; Warnings = @() } }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 1
+        ($rep.Lines -join "`n") | Should -Match 'round-1-gemini-pro-high-response\.rejected\.md'
+    }
+
+    It 'reports the exit code and the failure reason per reviewer' {
+        $results = @{ opus = @{ ExitCode = -1; Response = $null; Error = 'budget-exceeded'; Warnings = @() } }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 1
+        $joined = ($rep.Lines -join "`n")
+        $joined | Should -Match 'exit=-1'
+        $joined | Should -Match 'budget-exceeded'
+    }
+
+    It 'treats "every reviewer dropped at the cost prompt" as void, and says nothing was spent' {
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results @{} -RequestedCount 2
+        $rep.IsVoid | Should -BeTrue
+        $joined = ($rep.Lines -join "`n")
+        $joined | Should -Match '0 of 2'
+        $joined | Should -Match 'nothing was spent'
+    }
+
+    It 'a clean solo round is not void' {
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-response.md') -Value "## Issues`n- real"
+        $results = @{ gemini = @{ ExitCode = 0; Response = 'ok'; ContentOk = $true } }
+        $rep = Get-EraVoidRoundReport -ReviewDir $script:Dir -Round 1 -Results $results -RequestedCount 1
+        $rep.IsVoid | Should -BeFalse
+    }
+}
+
+Describe 'era.ps1 exits 2 on a void round' -Tag Unit {
+    BeforeAll { $script:EraSrc = Get-Content -Raw $script:EraPath }
+
+    It 'consults Get-EraVoidRoundReport and exits 2' {
+        $script:EraSrc | Should -Match 'Get-EraVoidRoundReport'
+        $script:EraSrc | Should -Match '(?m)^\s*exit 2\s*$'
+    }
+
+    It 'runs the gate AFTER Write-ReviewMetadata, so the artifacts and telemetry survive' {
+        $metaIdx = $script:EraSrc.IndexOf('Write-ReviewMetadata -ReviewDir')
+        $voidIdx = $script:EraSrc.IndexOf('Get-EraVoidRoundReport')
+        $metaIdx | Should -BeGreaterThan 0
+        $voidIdx | Should -BeGreaterThan $metaIdx
+    }
+
+    It 'does not set $runSucceeded before exiting, so the failed run leaves its repomix receipt' {
+        $voidIdx  = $script:EraSrc.IndexOf('Get-EraVoidRoundReport')
+        $exitIdx  = $script:EraSrc.IndexOf('exit 2', $voidIdx)
+        $exitIdx  | Should -BeGreaterThan $voidIdx
+        $script:EraSrc.Substring($voidIdx, $exitIdx - $voidIdx) | Should -Not -Match '\$runSucceeded\s*=\s*\$true'
+    }
+
+    It 'keeps exit 1 exclusively for preflight refusals that spent nothing' {
+        # The distinctness that makes code 2 worth having: 1 = nothing happened
+        # and re-running is free; 2 = you paid for a round and got no review.
+        $script:EraSrc | Should -Match '(?s)function Stop-EraWithError.*?exit 1'
+        # Exactly one exit 2 in the file, and it is the void-round gate.
+        ([regex]::Matches($script:EraSrc, '(?m)^\s*exit 2\s*$')).Count | Should -Be 1
+    }
+
+    It 'SKILL.md documents the exit codes so the driving LLM can tell them apart' {
+        $md = Get-Content -Raw $script:SkillMd
+        $md | Should -Match '(?m)exit\s*(code\s*)?2'
+        $md | Should -Match 'no usable review'
     }
 }
