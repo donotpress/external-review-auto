@@ -4,6 +4,63 @@
     invocations and by runtimes/era.ps1 standalone shell entry.
 #>
 
+function Expand-EraIncludePath {
+    <#
+    .SYNOPSIS
+        Expand one include-list entry to concrete file paths, wildcard-safely.
+
+    .DESCRIPTION
+        `[` and `]` are wildcard metacharacters to every PowerShell provider
+        cmdlet that binds -Path. An include entry that is a LITERAL path must
+        therefore be probed with -LiteralPath, or a file that plainly exists —
+        `src/app/[id]/page.tsx`, i.e. any Next.js dynamic route — reports "not
+        found", is silently dropped from the manifest's hash baseline, and can
+        then never register as changed in any later round's delta.
+
+        Entries that contain '*' or '?' are genuine patterns and keep the
+        wildcard-expanding -Path. That '[*?]' test is the same one both former
+        call sites already used to decide glob-ness; this function exists so the
+        rule lives in exactly one place.
+
+        KNOWN RESIDUAL LIMITATION: a pattern whose DIRECTORY part contains
+        brackets (e.g. 'src/app/[id]/*.tsx') still expands the brackets as a
+        character class. Fixing that means escaping the brackets while leaving
+        the intended '*' alone, and PowerShell offers no primitive for it —
+        [WildcardPattern]::Escape() escapes every metacharacter including the
+        '*' you meant. Literal entries, the overwhelmingly common case, are
+        correct. Do not "simplify" this to a single -Path branch.
+
+    .PARAMETER Entry
+        The include entry as written (relative, possibly a glob).
+
+    .PARAMETER RepoRoot
+        Absolute repo root the entry is resolved against.
+
+    .OUTPUTS
+        [string[]] — absolute paths that exist. Empty if nothing matched.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Entry,
+        [Parameter(Mandatory)][string]$RepoRoot
+    )
+    $resolved = Join-Path $RepoRoot $Entry
+    if ($Entry -match '[*?]') {
+        if (-not (Test-Path -Path $resolved)) { return @() }
+        return @(Get-ChildItem -Path $resolved -File -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) { return @() }
+    # A literal entry may still name a directory (include lists accept both);
+    # enumerate it so directory entries contribute their files, not a hash of
+    # the directory node, which Get-FileHash cannot produce.
+    if (Test-Path -LiteralPath $resolved -PathType Container) {
+        return @(Get-ChildItem -LiteralPath $resolved -File -Recurse -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
+    }
+    return @($resolved)
+}
+
 function Get-ReviewDiff {
     [CmdletBinding()]
     param(
@@ -13,9 +70,9 @@ function Get-ReviewDiff {
         [Parameter(Mandatory)][string]$RepoRoot
     )
     $priorManifestPath = Join-Path $ReviewDir "round-$PriorRound-manifest.json"
-    if (-not (Test-Path $priorManifestPath)) { return $null }
+    if (-not (Test-Path -LiteralPath $priorManifestPath)) { return $null }
 
-    $priorManifest = Get-Content -Raw $priorManifestPath | ConvertFrom-Json
+    $priorManifest = Get-Content -Raw -LiteralPath $priorManifestPath | ConvertFrom-Json
     $priorHashes = @{}
     if ($priorManifest.sources -and $priorManifest.source_hashes) {
         foreach ($s in $priorManifest.sources) {
@@ -30,22 +87,17 @@ function Get-ReviewDiff {
 
     $currentHashes = @{}
     foreach ($f in $CurrentFiles) {
-        $resolved = Join-Path $RepoRoot $f
-        if (Test-Path -Path $resolved) {
-            # Resolve globs to concrete paths for hashing
-            $concretePaths = if ($f -match '[*?]') {
-                @(Get-ChildItem -Path $resolved -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-            } else { @($resolved) }
-            foreach ($cp in $concretePaths) {
-                # SECURITY: block path traversal — skip files outside repo root
-                if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
-                # Never hash era's own review artifacts into the baseline: on the
-                # broad path the include list is globs, so this recursion used to
-                # sweep up .external-reviews and every later round saw it changed.
-                if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
-                $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
-                $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
-            }
+        # Resolve globs to concrete paths for hashing. Wildcard-safety for
+        # literal bracketed paths lives in Expand-EraIncludePath — see there.
+        foreach ($cp in (Expand-EraIncludePath -Entry $f -RepoRoot $RepoRoot)) {
+            # SECURITY: block path traversal — skip files outside repo root
+            if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
+            # Never hash era's own review artifacts into the baseline: on the
+            # broad path the include list is globs, so this recursion used to
+            # sweep up .external-reviews and every later round saw it changed.
+            if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
+            $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+            $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
         }
     }
 
@@ -121,8 +173,8 @@ function Invoke-PromptTokenSubstitution {
         [Parameter(Mandatory)][int]$RoundN
     )
 
-    if (-not (Test-Path $PromptFile)) { return }
-    $promptText = Get-Content $PromptFile -Raw
+    if (-not (Test-Path -LiteralPath $PromptFile)) { return }
+    $promptText = Get-Content -LiteralPath $PromptFile -Raw
     if ($promptText -notmatch '\{\{PREVIOUS_ROUND\}\}') { return }
 
     $previousN    = $RoundN - 1
@@ -160,10 +212,10 @@ function Invoke-PromptTokenSubstitution {
     # written as 'round-N-<preset>-response.rejected.md' by
     # Copy-PrimaryResponseAlias so they cannot match here — that is the whole
     # point of the naming, do not "tidy" it.
-    $inFlight  = Test-Path $claimFile
+    $inFlight  = Test-Path -LiteralPath $claimFile
     $perPreset = @()
     if (-not $inFlight) {
-        $perPreset = @(Get-ChildItem -Path $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
+        $perPreset = @(Get-ChildItem -LiteralPath $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
             Sort-Object Name)
     }
     if ($inFlight) {
@@ -171,14 +223,14 @@ function Invoke-PromptTokenSubstitution {
     } elseif ($perPreset.Count -gt 0) {
         $sections = foreach ($f in $perPreset) {
             if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
-            "### Reviewer: $preset`n`n" + (Get-Content $f.FullName -Raw)
+            "### Reviewer: $preset`n`n" + (Get-Content -LiteralPath $f.FullName -Raw)
         }
         $substitution = "## Previous round's review (round $previousN, $($perPreset.Count) reviewer(s))`n`n" +
                         ($sections -join "`n`n---`n`n")
-    } elseif (Test-Path $responseFile) {
+    } elseif (Test-Path -LiteralPath $responseFile) {
         # Single-reviewer rounds have no suffixed files; the canonical is their
         # only artifact. Reachable only when $inFlight is false — see above.
-        $previousText  = Get-Content $responseFile -Raw
+        $previousText  = Get-Content -LiteralPath $responseFile -Raw
         $substitution  = "## Previous round's review (round $previousN)`n`n$previousText"
     } else {
         $substitution  = "[Round $previousN response not found]"
@@ -192,7 +244,7 @@ function Invoke-PromptTokenSubstitution {
         param($m)
         return $substitution
     })
-    Set-Content -Path $PromptFile -Value $newText -Encoding UTF8
+    Set-Content -LiteralPath $PromptFile -Value $newText -Encoding UTF8
 }
 
 function Get-NextReviewRound {
@@ -200,8 +252,8 @@ function Get-NextReviewRound {
     param(
         [Parameter(Mandatory)][string]$ReviewDir
     )
-    if (-not (Test-Path $ReviewDir)) { return 1 }
-    $prior = Get-ChildItem -Path $ReviewDir -Filter 'round-*-manifest.json' -ErrorAction SilentlyContinue |
+    if (-not (Test-Path -LiteralPath $ReviewDir)) { return 1 }
+    $prior = Get-ChildItem -LiteralPath $ReviewDir -Filter 'round-*-manifest.json' -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^round-(\d+)-manifest\.json$' } |
         ForEach-Object { [int]$matches[1] } |
         Sort-Object -Descending |
@@ -246,27 +298,26 @@ function Write-ReviewManifest {
         $manifest.sources = [array]$SourceFiles
         $manifest.source_hashes = @{}
         foreach ($s in $SourceFiles) {
-            $resolved = Join-Path $RepoRoot $s
-            if (Test-Path -Path $resolved) {
-                $concretePaths = if ($s -match '[*?]') {
-                    @(Get-ChildItem -Path $resolved -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-                } else { @($resolved) }
-                foreach ($cp in $concretePaths) {
-                    # SECURITY: block path traversal — skip files outside repo root
-                    if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
-                    # Never hash era's own review artifacts into the baseline: on
-                    # the broad path the include list is globs, so this recursion
-                    # used to sweep up .external-reviews and every later round saw
-                    # those artifacts as changed.
-                    if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
-                    $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
-                    $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
-                }
+            # Wildcard-safety for literal bracketed paths lives in
+            # Expand-EraIncludePath — see there. A source silently missing from
+            # source_hashes can never register as changed, so the round-over-round
+            # delta stays permanently blind to it; that is what the old
+            # Test-Path -Path did to every Next.js dynamic route.
+            foreach ($cp in (Expand-EraIncludePath -Entry $s -RepoRoot $RepoRoot)) {
+                # SECURITY: block path traversal — skip files outside repo root
+                if (-not (Test-EraPathInsideRoot -Path $cp -Root $RepoRoot)) { continue }
+                # Never hash era's own review artifacts into the baseline: on
+                # the broad path the include list is globs, so this recursion
+                # used to sweep up .external-reviews and every later round saw
+                # those artifacts as changed.
+                if (($cp -replace '\\', '/') -match '(^|/)\.external-reviews(/|$)') { continue }
+                $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+                $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
             }
         }
     }
     $outPath = Join-Path $ReviewDir "round-$Round-manifest.json"
-    $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $outPath -Encoding utf8
+    $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $outPath -Encoding utf8
     return $outPath
 }
 
@@ -322,7 +373,7 @@ function Reserve-ReviewRound {
     # throws DirectoryNotFoundException (which inherits from IOException, so
     # the catch tries 50 times in a tight loop before throwing a misleading
     # "failed to claim a round number" error). Both reviewers found this.
-    if (-not (Test-Path $ReviewDir)) {
+    if (-not (Test-Path -LiteralPath $ReviewDir)) {
         try {
             $null = New-Item -ItemType Directory -Path $ReviewDir -Force -ErrorAction Stop
         } catch {
@@ -342,12 +393,12 @@ function Reserve-ReviewRound {
     # is assumed orphaned (no healthy dispatch runs that long) and is reclaimed.
     $claimTTL = [TimeSpan]::FromHours(24)
     $now = [DateTime]::UtcNow
-    Get-ChildItem -Path $ReviewDir -Filter 'round-*-claim.json' -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $ReviewDir -Filter 'round-*-claim.json' -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^round-(\d+)-claim\.json$' } |
         ForEach-Object {
             if (($now - $_.LastWriteTimeUtc) -gt $claimTTL) {
                 Write-Host "[era] Reclaiming orphaned claim file: $($_.Name) (last modified $($_.LastWriteTimeUtc))."
-                Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue
+                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue
             }
         }
 
@@ -361,11 +412,11 @@ function Reserve-ReviewRound {
 
     while ($attempt -lt $maxRetries) {
         # Find the highest round number already committed (manifest) or claimed
-        $highestManifest = Get-ChildItem -Path $ReviewDir -Filter 'round-*-manifest.json' -ErrorAction SilentlyContinue |
+        $highestManifest = Get-ChildItem -LiteralPath $ReviewDir -Filter 'round-*-manifest.json' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^round-(\d+)-manifest\.json$' } |
             ForEach-Object { [int]($_.Name -replace '^round-(\d+)-manifest\.json$','$1') } |
             Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
-        $highestClaim = Get-ChildItem -Path $ReviewDir -Filter 'round-*-claim.json' -ErrorAction SilentlyContinue |
+        $highestClaim = Get-ChildItem -LiteralPath $ReviewDir -Filter 'round-*-claim.json' -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^round-(\d+)-claim\.json$' } |
             ForEach-Object { [int]($_.Name -replace '^round-(\d+)-claim\.json$','$1') } |
             Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
@@ -431,8 +482,8 @@ function Resolve-EraAuthJsonKeys {
         [string]$AuthPath = (Join-Path $HOME '.local/share/opencode/auth.json')
     )
     $map = @{ 'OPENCODE_API_KEY' = 'opencode-go'; 'MINIMAX_API_KEY' = 'minimax'; 'NVIDIA_API_KEY' = 'nvidia' }
-    if (-not (Test-Path $AuthPath)) { return }
-    $auth = Get-Content $AuthPath -Raw | ConvertFrom-Json
+    if (-not (Test-Path -LiteralPath $AuthPath)) { return }
+    $auth = Get-Content -LiteralPath $AuthPath -Raw | ConvertFrom-Json
     foreach ($envName in ($ApiKeyEnvs | Where-Object { $_ } | Select-Object -Unique)) {
         if ([Environment]::GetEnvironmentVariable($envName)) { continue }
         $prov = $map[$envName]
@@ -1060,9 +1111,9 @@ function Copy-PrimaryResponseAlias {
         $solo = @($ReviewerList)[0]
         if (-not $solo -or (& $isOk $solo)) { return }
         $canonical = Join-Path $ReviewDir "round-$Round-response.md"
-        if (-not (Test-Path $canonical)) { return }
+        if (-not (Test-Path -LiteralPath $canonical)) { return }
         $evidence = Join-Path $ReviewDir (& $rejectedName $solo)
-        Move-Item -Path $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -1085,12 +1136,12 @@ function Copy-PrimaryResponseAlias {
     foreach ($r in $ReviewerList) {
         if (& $isOk $r) { continue }
         $failedFile = Join-Path $ReviewDir "round-$Round-$r-response.md"
-        if (Test-Path $failedFile) {
+        if (Test-Path -LiteralPath $failedFile) {
             $target = Join-Path $ReviewDir (& $rejectedName $r)
-            Move-Item -Path $failedFile -Destination $target -Force -ErrorAction SilentlyContinue
+            Move-Item -LiteralPath $failedFile -Destination $target -Force -ErrorAction SilentlyContinue
             # This Move IS the boundary that keeps rejected content out of round
             # N+1 — a silently swallowed failure reopens the exact hole. Say so.
-            if (Test-Path $failedFile) {
+            if (Test-Path -LiteralPath $failedFile) {
                 Write-Host "[era] WARNING: could not demote $failedFile; round N+1 may read a rejected response."
             }
         }
@@ -1106,10 +1157,10 @@ function Copy-PrimaryResponseAlias {
         # written it is the only copy. Rename it to the rejected shape, which the
         # {{PREVIOUS_ROUND}} glob deliberately does not match.
         $stale = Join-Path $ReviewDir "round-$Round-response.md"
-        if (Test-Path $stale) {
+        if (Test-Path -LiteralPath $stale) {
             $first = @($ReviewerList)[0]
             if (-not $first) { $first = 'unknown' }
-            Move-Item -Path $stale -Destination (Join-Path $ReviewDir (& $rejectedName $first)) `
+            Move-Item -LiteralPath $stale -Destination (Join-Path $ReviewDir (& $rejectedName $first)) `
                 -Force -ErrorAction SilentlyContinue
         }
         return
@@ -1117,8 +1168,8 @@ function Copy-PrimaryResponseAlias {
 
     $src = Join-Path $ReviewDir "round-$Round-$primary-response.md"
     $dst = Join-Path $ReviewDir "round-$Round-response.md"
-    if (Test-Path $src) {
-        Copy-Item -Path $src -Destination $dst -Force
+    if (Test-Path -LiteralPath $src) {
+        Copy-Item -LiteralPath $src -Destination $dst -Force
     }
 }
 
@@ -1261,7 +1312,7 @@ function Write-ReviewMetadata {
         convergence_warnings = @($ConvergenceWarnings)
         reviewers = @($reviewerEntries)
     }
-    $meta | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
+    $meta | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
 }
 
 function ConvertTo-EraContractNormalized {
@@ -1374,7 +1425,7 @@ function Resolve-EraRepomixCommand {
     if ($ext -eq '.ps1') {
         # Prefer a sibling .cmd: one less process, and no pwsh startup cost.
         $sibling = Join-Path (Split-Path -Parent $Source) 'repomix.cmd'
-        if ($env:ComSpec -and (Test-Path $sibling)) {
+        if ($env:ComSpec -and (Test-Path -LiteralPath $sibling)) {
             return @{ FilePath = $env:ComSpec; Arguments = @('/c', $sibling) }
         }
         $pwshPath = (Get-Process -Id $PID).Path
@@ -1465,8 +1516,8 @@ function Invoke-EraTrackedProcess {
         param($o, $e)
         $t = ''
         foreach ($p in @($o, $e)) {
-            if (Test-Path $p) {
-                $c = Get-Content -Raw $p -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $p) {
+                $c = Get-Content -Raw -LiteralPath $p -ErrorAction SilentlyContinue
                 if ($c) { $t += $c }
             }
         }
@@ -1476,7 +1527,7 @@ function Invoke-EraTrackedProcess {
 
     $exitCode = if ($timedOut) { -1 } else { try { $proc.ExitCode } catch { -1 } }
 
-    Remove-Item $outPath, $errPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $outPath, $errPath -Force -ErrorAction SilentlyContinue
 
     return @{
         Output     = $output
@@ -1925,7 +1976,7 @@ function Get-EraReviewArtifactIgnorePatterns {
     if (-not $AllowStaging) { return $blanket }
 
     $absBase = Join-Path $RepoRoot $base
-    if (-not (Test-Path $absBase)) { return $blanket }
+    if (-not (Test-Path -LiteralPath $absBase)) { return $blanket }
 
     $patterns = [System.Collections.Generic.List[string]]::new()
 
@@ -1944,7 +1995,7 @@ function Get-EraReviewArtifactIgnorePatterns {
     # too; only the current round's survives.
     $keepDir  = "round-$Round-external"
     $absTopic = Join-Path $absBase $TopicSlug
-    if (Test-Path $absTopic) {
+    if (Test-Path -LiteralPath $absTopic) {
         foreach ($child in @(Get-ChildItem -LiteralPath $absTopic -Force -Directory -ErrorAction SilentlyContinue)) {
             if ($child.Name -eq $keepDir) { continue }
             $patterns.Add("$base/$TopicSlug/$($child.Name)")
@@ -1960,9 +2011,9 @@ function Test-SlugPerRoundPattern {
         [Parameter(Mandatory)][string]$ExternalReviewsDir,
         [Parameter(Mandatory)][string]$TopicSlug
     )
-    if (-not (Test-Path $ExternalReviewsDir)) { return $null }
+    if (-not (Test-Path -LiteralPath $ExternalReviewsDir)) { return $null }
     $escaped = [regex]::Escape($TopicSlug)
-    $siblings = Get-ChildItem -Directory -Path $ExternalReviewsDir |
+    $siblings = Get-ChildItem -Directory -LiteralPath $ExternalReviewsDir |
         Where-Object { $_.Name -match "^${escaped}-(r|round)\d+$" } |
         ForEach-Object { $_.Name }
     if ($siblings.Count -gt 0) {
@@ -1989,8 +2040,8 @@ function Test-ConvergenceDivergence {
 
     # Helper: read prior round metadata safely
     function _ReadMeta([string]$path) {
-        if (-not (Test-Path $path)) { return $null }
-        try { return Get-Content -Raw $path | ConvertFrom-Json } catch { return $null }
+        if (-not (Test-Path -LiteralPath $path)) { return $null }
+        try { return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return $null }
     }
 
     # Signal B: response size vs round 1
