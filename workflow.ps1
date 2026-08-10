@@ -1514,7 +1514,51 @@ function Write-ReviewMetadata {
         $pricingNote = if ($ModelOverrides.ContainsKey($preset) -and $ModelOverrides[$preset]) { 'estimated_from_preset_default' } else { 'preset_default' }
         # Fix 4 honest-metadata fields. Default safely for non-agy backends
         # (which never set them): content_ok mirrors a clean exit, no retries.
-        $contentOk = if ($null -ne $r.ContentOk) { [bool]$r.ContentOk } else { ($r.ExitCode -eq 0) }
+        $adapterOk = if ($null -ne $r.ContentOk) { [bool]$r.ContentOk } else { ($r.ExitCode -eq 0) }
+
+        # --- content_ok must be grounded in the ARTIFACT (2026-08-10) --------
+        # $adapterOk alone lied in two measured ways:
+        #
+        #  * Only agy and opencode ever set ContentOk, so for every REST backend
+        #    content_ok meant "the HTTP call worked", not "we got a review".
+        #  * agy's clean-capture return (backends/agy.ps1:706-721) sets
+        #    ContentOk=$true UNCONDITIONALLY while passing the agy PROCESS exit
+        #    code straight through. _SpawnAndCaptureOnce reads the answer from
+        #    the transcript independently of process exit and reports
+        #    ExitCode=-1 whenever the process had to be killed at the hard
+        #    deadline (agy.ps1:462) -- so a readable-but-doomed capture returns
+        #    ExitCode=-1 WITH ContentOk=$true and no Error key at all.
+        #
+        # Measured live 2026-08-09: gemini-pro-high truncated at its output cap,
+        # its answer (the prompt, echoed back) was demoted by
+        # Copy-PrimaryResponseAlias to round-1-gemini-pro-high-response.rejected.md,
+        # no round-1-response.md was promoted -- and this writer still recorded
+        # content_ok=true, error=null. On a single-reviewer dispatch that reads
+        # as "reviewed, no findings" when nothing was reviewed.
+        #
+        # The reliable signal is the artifact: a reviewer produced a review iff
+        # its response file is on disk under a name {{PREVIOUS_ROUND}} will
+        # actually read. Copy-PrimaryResponseAlias runs BEFORE this writer and
+        # has already renamed every rejected answer to *.rejected.md, so a plain
+        # Test-Path asks exactly the right question -- and it covers backends
+        # that exit 0 without ever writing a file, which no ExitCode check can.
+        $suffixed = Join-Path $ReviewDir "round-$Round-$preset-response.md"
+        $artifactOk = Test-Path -LiteralPath $suffixed
+        if (-not $artifactOk -and $Results.Count -eq 1) {
+            # Solo dispatch: Get-ResponseFilenameSuffix gives no preset suffix.
+            $artifactOk = Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-response.md")
+        }
+        $contentOk = $adapterOk -and ($r.ExitCode -eq 0) -and $artifactOk
+
+        # Never downgrade silently -- the whole point is that the disagreement
+        # was invisible. Name it in warnings, where the round's own telemetry
+        # already lives.
+        $entryWarnings = @($r.Warnings | Where-Object { $_ })
+        if ($adapterOk -and -not $contentOk) {
+            $why = if (-not $artifactOk) { "no readable response artifact on disk" }
+                   else { "adapter exit code $($r.ExitCode)" }
+            $entryWarnings += "content_ok downgraded to false: the adapter reported a usable capture but $why."
+        }
         $captureStrategy = $r.CaptureStrategy   # may be $null for non-agy
         $retryCount  = if ($null -ne $r.RetryCount) { [int]$r.RetryCount } else { 0 }
         $retryReason = $r.RetryReason            # may be $null
@@ -1544,7 +1588,7 @@ function Write-ReviewMetadata {
                 est_cost_output_usd = $estOut
                 est_cost_total_usd = [Math]::Round($estIn + $estOut + $firstAttemptCost, 4)
                 truncation_warning = $r.TruncationWarning
-                warnings = $r.Warnings
+                warnings = @($entryWarnings)
                 error = $null
             }
             if ($firstAttempt) { $entry.first_attempt = $firstAttempt }
@@ -1590,7 +1634,7 @@ function Write-ReviewMetadata {
                 est_cost_output_usd = 0
                 est_cost_total_usd = [Math]::Round($firstAttemptCost + $finalInputCost, 4)
                 truncation_warning = $r.TruncationWarning
-                warnings = $r.Warnings
+                warnings = @($entryWarnings)
                 error = $r.Error
             }
             if ($firstAttempt) { $entry.first_attempt = $firstAttempt }

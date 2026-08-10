@@ -174,6 +174,13 @@ Describe 'Write-ReviewMetadata — Fix 4 honest fields' {
     }
 
     It 'writes content_ok / capture_strategy / retry_count / retry_reason per reviewer' {
+        # 2026-08-10: content_ok is now grounded in the response artifact, not in
+        # the adapter's ContentOk flag alone (see tests/VoidRound.Tests.ps1 for
+        # why). Every adapter writes its answer to disk before returning a
+        # success -- agy.ps1:704, geminiapi.ps1:124, anthropic.ps1, claude.ps1 --
+        # so a success fixture that writes no file was never a state the code
+        # could actually be in. Write it, and the assertion below stands unchanged.
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-response.md') -Value "## Issues`n- a`n- b"
         $results = @{
             gemini = @{
                 Preset = 'gemini'; ExitCode = 0; Response = "## Issues`n- a`n- b"
@@ -276,6 +283,10 @@ Describe 'Write-ReviewMetadata — Fix 4 honest fields' {
     }
 
     It 'defaults the new fields safely for non-agy backends' {
+        # As above: a non-agy backend that exited clean also wrote its answer.
+        # A clean exit with NO artifact now reports content_ok=false on purpose
+        # -- that case is asserted in tests/VoidRound.Tests.ps1.
+        Set-Content -LiteralPath (Join-Path $script:Dir 'round-1-response.md') -Value "## Issues`n- a"
         $results = @{
             minimax = @{
                 Preset = 'minimax'; ExitCode = 0; Response = "## Issues`n- a"
