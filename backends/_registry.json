@@ -64,27 +64,27 @@
   },
   "opus-api": {
     "backend": "anthropic",
-    "model_id": "claude-opus-4-7",
-    "max_tokens": 8192,
+    "model_id": "claude-opus-5",
+    "max_tokens": 16384,
     "pricing": {
-      "input_per_m": 15.0,
-      "output_per_m": 75.0
+      "input_per_m": 5.0,
+      "output_per_m": 25.0
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "Direct Anthropic Messages API (no claude CLI / no TTY / no console pollution). Requires $env:ANTHROPIC_API_KEY."
+    "notes": "Direct Anthropic Messages API, Claude Opus 5 (no claude CLI / no TTY / no console pollution). Requires $env:ANTHROPIC_API_KEY."
   },
   "sonnet-api": {
     "backend": "anthropic",
-    "model_id": "claude-sonnet-4-6",
-    "max_tokens": 8192,
+    "model_id": "claude-sonnet-5",
+    "max_tokens": 16384,
     "pricing": {
       "input_per_m": 3.0,
       "output_per_m": 15.0
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "Direct Anthropic Messages API, Sonnet 4.6. Requires $env:ANTHROPIC_API_KEY."
+    "notes": "Direct Anthropic Messages API, Claude Sonnet 5. Requires $env:ANTHROPIC_API_KEY."
   },
   "haiku-api": {
     "backend": "anthropic",
@@ -142,8 +142,8 @@
     "model_id": "claude-opus-5",
     "claude_model_family": "opus",
     "pricing": {
-      "input_per_m": 15.0,
-      "output_per_m": 75.0
+      "input_per_m": 5.0,
+      "output_per_m": 25.0
     },
     "supports_file_read": true,
     "supports_streaming": false,
@@ -151,7 +151,7 @@
   },
   "sonnet": {
     "backend": "claude",
-    "model_id": "claude-sonnet-4-6",
+    "model_id": "claude-sonnet-5",
     "claude_model_family": "sonnet",
     "pricing": {
       "input_per_m": 3.0,
@@ -159,7 +159,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "claude CLI --print --model claude-sonnet-4-6. Bundle piped via stdin."
+    "notes": "claude CLI --print --model claude-sonnet-5. Bundle piped via stdin."
   },
   "haiku": {
     "backend": "claude",
@@ -312,14 +312,14 @@
   "_claude_model_map": {
     "opus": {
       "default": {
-        "display": "Claude Opus 4.7",
-        "model_id": "claude-opus-4-7"
+        "display": "Claude Opus 5",
+        "model_id": "claude-opus-5"
       }
     },
     "sonnet": {
       "default": {
-        "display": "Claude Sonnet 4.6",
-        "model_id": "claude-sonnet-4-6"
+        "display": "Claude Sonnet 5",
+        "model_id": "claude-sonnet-5"
       }
     },
     "haiku": {
@@ -645,8 +645,8 @@
     "model_id": "claude-opus-4-8",
     "claude_model_family": "opus",
     "pricing": {
-      "input_per_m": 15.0,
-      "output_per_m": 75.0
+      "input_per_m": 5.0,
+      "output_per_m": 25.0
     },
     "supports_file_read": true,
     "supports_streaming": false,

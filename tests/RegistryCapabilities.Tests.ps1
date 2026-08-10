@@ -29,7 +29,12 @@ Describe 'Registry declares max_tokens for REST presets' -Tag Unit {
         $missing | Should -BeNullOrEmpty
     }
 
-    It 'declares 8192 — the value the adapters already hardcoded, so this is behaviour-preserving' {
+    # Was 'declares 8192 — the value the adapters already hardcoded'. The
+    # anthropic presets moved to 16384 when they moved to Opus 5 / Sonnet 5,
+    # which think by default and spend that budget on thinking as well as
+    # response text. The assertion was always a >0 floor; only the title
+    # claimed a specific number, so only the title needed correcting.
+    It 'declares a positive max_tokens for every REST preset' {
         foreach ($p in $script:Registry.PSObject.Properties) {
             if ($p.Name -like '_*') { continue }
             if ($p.Value.backend -notin @('geminiapi', 'anthropic')) { continue }
@@ -44,6 +49,54 @@ Describe 'The default panel pins current model IDs' -Tag Unit {
     # nothing in the output says so. Pin it.
     It 'the opus preset in the default panel resolves to Claude Opus 5' {
         $script:Registry.opus.model_id | Should -Be 'claude-opus-5'
+    }
+
+    # --- the two-doors invariant -------------------------------------------
+    # A Claude model reaches the dispatcher through TWO independent doors:
+    #   -Reviewer <preset>  -> the preset table's model_id
+    #   -Model <hint>       -> _claude_model_map.<hint>.default.model_id
+    # 562209f pinned the `opus` PRESET to Opus 5 and left the HINT MAP on
+    # Opus 4.7, so the same word meant two different models depending on which
+    # flag you used, and nothing in the output said so. Neither table is
+    # authoritative over the other — they simply must not disagree.
+    It '_claude_model_map agrees with the preset table on every shared name' {
+        $disagreements = foreach ($p in $script:Registry._claude_model_map.PSObject.Properties) {
+            $name = $p.Name
+            $preset = $script:Registry.$name
+            if (-not $preset) { continue }   # hint with no same-named preset
+            $hintId   = $p.Value.default.model_id
+            $presetId = $preset.model_id
+            if ($hintId -ne $presetId) { "${name}: hint=$hintId preset=$presetId" }
+        }
+        @($disagreements) -join '; ' | Should -BeNullOrEmpty
+    }
+
+    It 'no Claude preset or hint pins a superseded Opus or Sonnet generation' {
+        # opus-48 is the deliberate A/B holdback and is exempt by name.
+        $superseded = @('claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5',
+                        'claude-sonnet-4-6', 'claude-sonnet-4-5')
+
+        $stale = foreach ($p in $script:Registry.PSObject.Properties) {
+            if ($p.Name -like '_*' -or $p.Name -eq 'opus-48') { continue }
+            if ($p.Value.model_id -in $superseded) { "$($p.Name)=$($p.Value.model_id)" }
+        }
+        foreach ($p in $script:Registry._claude_model_map.PSObject.Properties) {
+            if ($p.Value.default.model_id -in $superseded) {
+                $stale += "_claude_model_map.$($p.Name)=$($p.Value.default.model_id)"
+            }
+        }
+        @($stale) -join '; ' | Should -BeNullOrEmpty
+    }
+
+    It 'Opus presets carry current Opus-tier pricing, not the Claude-3-era rate' {
+        # Measured against the published catalogue 2026-08-09: the whole current
+        # Opus tier (4.7, 4.8, 5) is $5/$25 per Mtok. The registry carried
+        # $15/$75 — Claude 3 Opus pricing — which made every Opus estimate 3x
+        # too high and tripped Invoke-CostPrompt's $15 aggregate cap early.
+        foreach ($name in @('opus', 'opus-api', 'opus-48')) {
+            $script:Registry.$name.pricing.input_per_m  | Should -Be 5.0  -Because "$name input"
+            $script:Registry.$name.pricing.output_per_m | Should -Be 25.0 -Because "$name output"
+        }
     }
 
     It 'the default panel names presets that exist in the registry' {

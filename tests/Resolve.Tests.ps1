@@ -59,8 +59,25 @@ Describe 'Resolve-ModelFromHint (Layer-2 extraction, D.0)' {
     }
 
     It 'resolves opus to the claude opus model' {
+        # SUPERSEDED 2026-08-09. This asserted 'claude-opus-4-7' — the value in
+        # _claude_model_map — while the `opus` PRESET had already moved to
+        # Opus 5. The literal was correct about the map and wrong about era:
+        # -Reviewer opus and -Model opus dispatched different models, and this
+        # test pinned the split open rather than catching it.
+        #
+        # The replacement asserts the invariant instead of the literal: the
+        # hint door and the preset door must name the SAME model. The literal
+        # is kept alongside it so both tables going stale together still fails.
         $r = Resolve-ModelFromHint -Hint 'opus' -Registry $script:Registry
-        $r.ModelId  | Should -BeExactly 'claude-opus-4-7'
+        $r.ModelId  | Should -BeExactly 'claude-opus-5'
+        $r.ModelId  | Should -BeExactly $script:Registry.opus.model_id
+        $r.Provider | Should -BeExactly 'claude'
+    }
+
+    It 'resolves sonnet to the claude sonnet model, agreeing with its preset' {
+        $r = Resolve-ModelFromHint -Hint 'sonnet' -Registry $script:Registry
+        $r.ModelId  | Should -BeExactly 'claude-sonnet-5'
+        $r.ModelId  | Should -BeExactly $script:Registry.sonnet.model_id
         $r.Provider | Should -BeExactly 'claude'
     }
 
