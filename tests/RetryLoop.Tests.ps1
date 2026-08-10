@@ -120,3 +120,77 @@ Describe 'Invoke-AgyReview — R3: retry cost-cap uses the real per-reviewer cap
         Should -Invoke _SpawnAndCaptureOnce -Times 2 -Exactly
     }
 }
+
+Describe 'Invoke-AgyReview — a readable capture from a process that died is not a success' {
+    # THE ROOT CAUSE of the 2026-08-09 void round (case c).
+    #
+    # The clean-capture decision (agy.ps1:598-602) is made purely from the
+    # response TEXT -- threw / empty / narration-detector -- and never consults
+    # $result.ExitCode. The clean-capture return (agy.ps1:706-721) then set
+    # ContentOk=$true UNCONDITIONALLY while passing the agy PROCESS exit code
+    # straight through, and set no Error key.
+    #
+    # _SpawnAndCaptureOnce reads the answer from the transcript independently of
+    # process exit and reports ExitCode=-1 whenever the process had to be killed
+    # at the hard deadline (agy.ps1:462). So a readable-but-doomed capture
+    # returned ExitCode=-1 WITH ContentOk=$true and error=null -- which is
+    # exactly what the live run recorded for gemini-pro-high after it truncated
+    # at maxOutputTokens and its answer was demoted to *.rejected.md.
+
+    It 'does not claim ContentOk when its own exit code says the process failed' {
+        Mock _SpawnAndCaptureOnce {
+            return @{ Response = $script:GoodReview; ExitCode = -1; Strategy = 'run-id-match'; Stderr = 'killed at hard deadline'; WallClockSec = 300 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        $r = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+            -ModelInfo $script:MiCheap -TimeoutSec 60 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+        $r.ExitCode  | Should -Be -1
+        $r.ContentOk | Should -BeFalse
+    }
+
+    It 'names a cause instead of returning error=null' {
+        Mock _SpawnAndCaptureOnce {
+            return @{ Response = $script:GoodReview; ExitCode = -1; Strategy = 'run-id-match'; Stderr = 'killed at hard deadline'; WallClockSec = 300 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        $r = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+            -ModelInfo $script:MiCheap -TimeoutSec 60 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+        $r.Error              | Should -Not -BeNullOrEmpty
+        ($r.Warnings -join ' ') | Should -Match 'exit'
+    }
+
+    It 'still writes the text to disk — it is evidence, and the alias demotes it' {
+        Mock _SpawnAndCaptureOnce {
+            return @{ Response = $script:GoodReview; ExitCode = -1; Strategy = 'run-id-match'; Stderr = ''; WallClockSec = 300 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        $null = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+            -ModelInfo $script:MiCheap -TimeoutSec 60 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+        (Get-Content -Raw $resp) | Should -Match 'real finding'
+    }
+
+    It 'does NOT spend a second dispatch on it — the retry decision is unchanged' {
+        # Deliberately narrow: this fix makes the RETURN self-consistent. It must
+        # not quietly turn a one-attempt failure into a two-bundle bill.
+        Mock _SpawnAndCaptureOnce {
+            return @{ Response = $script:GoodReview; ExitCode = -1; Strategy = 'run-id-match'; Stderr = ''; WallClockSec = 300 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        $r = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+            -ModelInfo $script:MiCheap -TimeoutSec 60 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+        Should -Invoke _SpawnAndCaptureOnce -Times 1 -Exactly
+        $r.RetryCount | Should -Be 0
+    }
+
+    It 'still reports ContentOk=true when the process exited clean (non-vacuity)' {
+        Mock _SpawnAndCaptureOnce {
+            return @{ Response = $script:GoodReview; ExitCode = 0; Strategy = 'run-id-match'; Stderr = ''; WallClockSec = 5 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        $r = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+            -ModelInfo $script:MiCheap -TimeoutSec 60 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+        $r.ContentOk | Should -BeTrue
+        $r.ExitCode  | Should -Be 0
+        $r.Error     | Should -BeNullOrEmpty
+    }
+}

@@ -700,15 +700,43 @@ function Invoke-AgyReview {
         $response = $banner + $response
     }
 
-    # Only the FINAL (clean) attempt's text reaches disk.
+    # Only the FINAL (clean) attempt's text reaches disk. Still written even when
+    # the process died below -- it is evidence, and Copy-PrimaryResponseAlias
+    # demotes it to *.rejected.md rather than letting it reach round N+1.
     $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+
+    # A readable capture from a process that DIED is not a success.
+    #
+    # The clean-capture decision above (line ~598) is made purely from the
+    # response TEXT and never consults $result.ExitCode, and this return used to
+    # hardcode ContentOk=$true while passing the agy PROCESS exit code straight
+    # through -- with no Error key at all. _SpawnAndCaptureOnce reads the answer
+    # from the transcript independently of process exit and reports ExitCode=-1
+    # whenever the process had to be killed at the hard deadline (line ~462), so
+    # a readable-but-doomed capture returned ExitCode=-1 WITH ContentOk=$true and
+    # error=null.
+    #
+    # Measured 2026-08-09: gemini-pro-high truncated at its output cap, its
+    # answer (the prompt, echoed back) was demoted to *.rejected.md, and the
+    # round's metadata still read content_ok=true, error=null. That is the whole
+    # of the silent-success case.
+    #
+    # Deliberately narrow: this makes the RETURN self-consistent. The retry
+    # decision is untouched, so a dead process does not become a second
+    # full-bundle bill.
+    $processOk = ($exitCode -eq 0)
+    $exitWarnings = @()
+    if (-not $processOk) {
+        $exitWarnings += "agy exited $exitCode after producing a readable capture; the answer may be truncated or incomplete, so it is not treated as a usable review."
+    }
 
     return @{
         Response          = $response
         ExitCode          = $exitCode
+        Error             = if ($processOk) { $null } else { 'agy-process-exit' }
         CaptureMethod     = 'polling'
         CaptureStrategy   = $finalResult.Strategy
-        ContentOk         = $true
+        ContentOk         = $processOk
         RetryCount        = $retryCount
         RetryReason       = $retryReason
         FirstAttempt      = $firstAttempt
@@ -717,6 +745,6 @@ function Invoke-AgyReview {
         WallClockSec      = $finalResult.WallClockSec
         TruncationWarning = $truncationWarning
         Stderr            = $stderr
-        Warnings          = @()
+        Warnings          = $exitWarnings
     }
 }
