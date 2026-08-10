@@ -37,7 +37,7 @@ param(
     # `-Reviewer 'gemini,deepseek'` still works because of the comma-split below.
     #
     # Default = a THREE-reviewer panel across three independent backends
-    # (2026-08-02): Gemini 3.6 Flash via agy, Claude Opus 4.8 via the claude CLI,
+    # (2026-08-02): Gemini 3.6 Flash via agy, Claude Opus 5 via the claude CLI,
     # DeepSeek V4 Flash via opencode. Cross-vendor by design — round 11 had
     # Gemini 3.1 Pro (High) review the wrong subject entirely (it followed the
     # topic slug instead of the round context) while Flash found a real shipped
@@ -1468,7 +1468,30 @@ Be terse. If a section is empty, write "(none)".
         if ($failedRecoverable.Count -gt 0) {
             # Hydrate subscription keys so opencode/nvidia fallbacks register as available.
             Resolve-EraAuthJsonKeys -ApiKeyEnvs @($registryHash.Keys | ForEach-Object { $registryHash[$_].api_key_env })
-            $fallbackPreset = Resolve-EraAgyFallback -Registry $registryHash -Override $env:ERA_AGY_FALLBACK -Exclude $approvedList
+            # Exclude the FULL requested list, not just the approved one. A
+            # reviewer the user dropped at the cost prompt is absent from
+            # $approvedList, so excluding only that list let the fallback
+            # resurrect the very reviewer they had just declined to pay for.
+            $fallbackExclude = @(@($reviewerList) + @($approvedList) | Sort-Object -Unique)
+            $fallbackPreset = Resolve-EraAgyFallback -Registry $registryHash -Override $env:ERA_AGY_FALLBACK -Exclude $fallbackExclude
+            if ($fallbackPreset) {
+                # Price it. The fallback used to be dispatched with no costing at
+                # all: it never went through Invoke-CostPrompt, so it was an
+                # unbudgeted full-bundle upload that no cap could stop. Named by
+                # all three reviewers across rounds 2-4.
+                $fbPricing = $registryHash[$fallbackPreset].pricing
+                $fbEstOut  = [int][Math]::Min([Math]::Ceiling($tokenCount * 0.3), 50000)
+                $fbCost    = [Math]::Round(($tokenCount / 1000000.0) * $fbPricing.input_per_m +
+                                           ($fbEstOut / 1000000.0) * $fbPricing.output_per_m, 4)
+                $fbCap     = Get-PerReviewerCap -Pricing $fbPricing
+                if ($fbCost -gt $fbCap) {
+                    Write-Host ("[era] Fallback '{0}' would cost ~`${1}, over its `${2} cap — skipping. " -f $fallbackPreset, $fbCost, $fbCap) +
+                               "The round keeps its honest failure telemetry."
+                    $fallbackPreset = $null
+                } else {
+                    Write-Host ("[era] Fallback '{0}' estimated ~`${1} (cap `${2})." -f $fallbackPreset, $fbCost, $fbCap)
+                }
+            }
             if ($fallbackPreset) {
                 $why = if ($failedContract.Count -gt 0) { 'reviewer(s) failed' } else { 'agy capture failed' }
                 Write-Host "[era] $why ($($failedRecoverable -join ', ')) -> falling back to '$fallbackPreset'."

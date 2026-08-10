@@ -73,7 +73,7 @@ Change it with `/era set default <names>` (accepts a panel), or edit the file.
 
 > **Default reviewers (a 3-model panel, run simultaneously):** a bare `/era` with no
 > `-Reviewer` dispatches **`gemini,opus,deepseek-flash`** — Gemini 3.6 Flash (agy),
-> Claude Opus 4.8 (claude CLI), DeepSeek V4 Flash (New) (opencode-go). Cross-vendor
+> Claude Opus 5 (claude CLI), DeepSeek V4 Flash (New) (opencode-go). Cross-vendor
 > on purpose: in round 11 one reviewer reviewed the wrong subject entirely while
 > another found a real shipped regression, so a single reviewer is a single point of
 > failure whichever one you pick. Cost is dominated by Opus (~$15/$75 per M vs ~$0.3
@@ -305,7 +305,7 @@ When round N's response contains critical issues:
 | `<topic-slug>` (positional) | `-TopicSlug <slug>` | Explicit topic (auto-detected from newest spec if omitted) |
 | `--doctor` | `-Doctor` | Preflight only: report prereq + backend status (with fix commands) and exit. No dispatch, no install. |
 | `--mode assessment` | `-Mode assessment` | No spec file required; reviews arbitrary code |
-| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini,opus,deepseek-flash` — Gemini 3.6 Flash + Opus 4.8 + DeepSeek V4 Flash (New), dispatched simultaneously |
+| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini,opus,deepseek-flash` — Gemini 3.6 Flash + Opus 5 + DeepSeek V4 Flash (New), dispatched simultaneously |
 | `--model <hint>` | `-Model <hint>` | Override model: `"gemini 3.1 pro"`, `"deepseek v4 pro"` |
 | `--provider <name>` | `-Provider <name>` | Force a specific opencode provider |
 | `--include <path1,path2>` | `-IncludeFiles path1,path2` | Specific files to bundle (curated by LLM) |

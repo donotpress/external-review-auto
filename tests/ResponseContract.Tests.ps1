@@ -165,6 +165,32 @@ Describe 'Contract failures recover on any backend, not just agy' -Tag Unit {
     }
 }
 
+Describe 'The fallback is priced and cannot resurrect a declined reviewer' -Tag Unit {
+    It 'prices the fallback against its per-reviewer cap before dispatching' {
+        # Named by all three reviewers across rounds 2-4: the fallback never went
+        # through Invoke-CostPrompt, so it was an unbudgeted full-bundle upload
+        # that no cap could stop.
+        $src = Get-Content -Raw $script:EraPath
+        # Anchor on the fallback-preset resolution rather than the env-var
+        # mention, and give the window room — the pricing block sits well after
+        # the ERA_AGY_FALLBACK reference.
+        $anchor = $src.IndexOf('$fallbackPreset = Resolve-EraAgyFallback')
+        $anchor | Should -BeGreaterThan 0
+        $window = $src.Substring($anchor, [Math]::Min(2000, $src.Length - $anchor))
+        $window | Should -Match 'Get-PerReviewerCap'
+        $window | Should -Match 'skipping'
+    }
+
+    It 'excludes the full requested list, so a cost-declined reviewer cannot return' {
+        # A reviewer dropped at the cost prompt is absent from $approvedList, so
+        # excluding only that list let the fallback pick the very reviewer the
+        # user had just declined to pay for.
+        $src = Get-Content -Raw $script:EraPath
+        $src | Should -Match '\$fallbackExclude\s*='
+        $src | Should -Match 'Resolve-EraAgyFallback[^\r\n]*-Exclude \$fallbackExclude'
+    }
+}
+
 Describe 'The agy fallback response is contract-checked too' -Tag Unit {
     It 'enforces the contract both BEFORE and AFTER the agy fallback block' {
         # Measured 2026-08-09 on a live dispatch: with the check placed only

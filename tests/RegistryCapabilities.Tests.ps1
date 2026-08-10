@@ -38,6 +38,30 @@ Describe 'Registry declares max_tokens for REST presets' -Tag Unit {
     }
 }
 
+Describe 'The default panel pins current model IDs' -Tag Unit {
+    # The shipped panel is the most expensive and most-used configuration, and a
+    # stale model ID there is invisible: the CLI happily runs an older model and
+    # nothing in the output says so. Pin it.
+    It 'the opus preset in the default panel resolves to Claude Opus 5' {
+        $script:Registry.opus.model_id | Should -Be 'claude-opus-5'
+    }
+
+    It 'the default panel names presets that exist in the registry' {
+        $defaults = Get-Content -Raw (Join-Path $script:SkillRoot 'config/defaults.json') | ConvertFrom-Json
+        foreach ($preset in $defaults.reviewer) {
+            $script:Registry.PSObject.Properties.Name | Should -Contain $preset
+        }
+    }
+
+    It 'no shipped doc still advertises the panel as Opus 4.8' {
+        # The registry was already on Opus 5 while three doc lines said 4.8 —
+        # the drift was in the prose, not the config.
+        foreach ($f in @('SKILL.md', 'runtimes/era.ps1')) {
+            (Get-Content -Raw (Join-Path $script:SkillRoot $f)) | Should -Not -Match 'Opus 4\.8'
+        }
+    }
+}
+
 Describe 'Adapters honour the registry value' -Tag Unit {
     # Same shape as tests/ProcessTreeKill.Tests.ps1: assert the invariant across
     # every adapter that has the capability, not just one.
