@@ -1115,6 +1115,12 @@ Be terse. If a section is empty, write "(none)".
     if ($AgyModel) {
         $hint = $AgyModel.Trim()
         $hintNorm = $hint.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
+        # A hint that normalises to EMPTY must not match. '-match ""' is true for
+        # every string, so '-Model ".*"' (or any punctuation-only hint) silently
+        # matched the FIRST candidate instead of failing. Measured:
+        #   hint '.*' -> norm '' -> 'gemini 36 flash high' -match '' = True
+        # Silently dispatching an arbitrary model is worse than not resolving.
+        if (-not $hintNorm.Trim()) { $hintNorm = $null }
         $agyMap = @{}
         if ($registry._agy_model_map) {
             $registry._agy_model_map.PSObject.Properties | ForEach-Object {

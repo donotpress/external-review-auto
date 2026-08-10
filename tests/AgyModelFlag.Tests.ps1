@@ -186,3 +186,39 @@ Describe 'per-reviewer agy default --model resolution (heterogeneous batch)' {
         $tokens[1] | Should -BeExactly 'Gemini 3.1 Pro (Low)'
     }
 }
+
+Describe 'A hint that normalises to empty must not match everything' -Tag Unit {
+    # '-match ""' is true for EVERY string. Both agy display-name matchers strip
+    # the hint to \w and spaces first, so a punctuation-only hint such as '.*'
+    # became the empty pattern and matched the first candidate model -- era would
+    # then silently dispatch an arbitrary model instead of failing to resolve.
+    # Measured: hint '.*' -> norm '' -> 'gemini 36 flash high' -match '' = True.
+    BeforeAll {
+        $script:SkillRootEH = Split-Path $PSScriptRoot -Parent
+    }
+
+    It 'era.ps1 nulls an empty-normalised agy hint instead of matching' {
+        $src = Get-Content -Raw (Join-Path $script:SkillRootEH 'runtimes/era.ps1')
+        $src | Should -Match 'if \(-not \$hintNorm\.Trim\(\)\) \{ \$hintNorm = \$null \}'
+    }
+
+    It 'the agy adapter returns null for an empty-normalised hint' {
+        $src = Get-Content -Raw (Join-Path $script:SkillRootEH 'backends/agy.ps1')
+        $src | Should -Match 'if \(-not \$hintNorm\.Trim\(\)\) \{ return \$null \}'
+    }
+
+    It 'the guard fires for punctuation-only hints but not for real ones' {
+        # Replicates the normalisation both sites use, and asserts the guard
+        # predicate classifies each hint the way the fix intends.
+        foreach ($case in @(
+            @{ Hint = '.*';      ShouldGuard = $true  },
+            @{ Hint = '---';     ShouldGuard = $true  },
+            @{ Hint = '   ';     ShouldGuard = $true  },
+            @{ Hint = 'gemini';  ShouldGuard = $false },
+            @{ Hint = 'pro low'; ShouldGuard = $false }
+        )) {
+            $norm = $case.Hint.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
+            (-not $norm.Trim()) | Should -Be $case.ShouldGuard -Because "hint '$($case.Hint)'"
+        }
+    }
+}

@@ -51,6 +51,10 @@ function Find-AgyModelFromHint {
     param([string]$Hint)
     $map = Get-AgyModelMap
     $hintNorm = $Hint.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
+    # A hint that normalises to EMPTY must not match. '-match ""' is true for
+    # every string, so a punctuation-only hint silently matched the FIRST
+    # candidate instead of failing. Measured: '.*' -> '' -> matches everything.
+    if (-not $hintNorm.Trim()) { return $null }
 
     $matches = @()
     foreach ($familyKey in $map.Keys) {
