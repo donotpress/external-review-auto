@@ -206,6 +206,12 @@ if ($script:UserSuppliedIncludeFiles -and @($IncludeFiles).Count -eq 0) {
 # "term 'git' is not recognized" when git isn't on PATH (no .git in cwd). Only invoke
 # git when it exists; otherwise fall back to cwd (line below). repomix still bundles
 # explicit -IncludeFiles from a non-git directory.
+# Initialized explicitly for the same reason $usedDefaultGlobs is (see below):
+# only the success path assigns it, and the finally block reads it. Correct
+# today because there is no Set-StrictMode in this repo, but both exit-2 paths
+# now DEPEND on it being falsy, so leaving it unset is no longer merely untidy.
+$runSucceeded = $false
+
 $repoRoot = if (Test-Path -LiteralPath ".git") { (Get-Location).Path }
             elseif (Get-Command git -ErrorAction SilentlyContinue) { $(& git rev-parse --show-toplevel 2>$null) }
             else { $null }
@@ -1557,6 +1563,33 @@ Be terse. If a section is empty, write "(none)".
         $registry._agy_model_map.PSObject.Properties | ForEach-Object {
             $agyModelMap[$_.Name] = $_.Value
         }
+    }
+
+    # --- Nobody left to dispatch (2026-08-10) --------------------------------
+    # Invoke-ReviewerDispatch declares [Parameter(Mandatory)][string[]]$ReviewerList,
+    # and PowerShell refuses to bind an EMPTY array to a Mandatory parameter.
+    # Measured: "Cannot bind argument to parameter 'ReviewerList' because it is
+    # an empty array." So dropping every reviewer at the cost prompt threw a raw
+    # binding error HERE -- upstream of the void gate below, where the honest
+    # message and exit 2 live. That made Get-EraVoidRoundReport's
+    # empty-Results branch dead code and handed the user a PowerShell stack and
+    # exit 1 instead. Flagged as still-open across several rounds of the graded
+    # panel; it only became load-bearing once the void gate started promising a
+    # specific message for exactly this case.
+    #
+    # Same report and same exit code as any other void round -- a caller must not
+    # be able to tell them apart by accident -- but with its own line making
+    # clear this one was the user's own choice and cost nothing.
+    #
+    # $runSucceeded is deliberately left unset here too, so the finally block
+    # keeps the repomix config as a receipt.
+    if (@($approvedList).Count -eq 0) {
+        $voidReport = Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
+            -Results @{} -RequestedCount @($reviewerList).Count
+        Write-Host "[era] ERROR: round $round produced no usable review."
+        foreach ($line in $voidReport.Lines) { Write-Host $line }
+        Write-Host "Artifacts kept in $reviewDir for diagnosis."
+        exit 2
     }
 
     $results = Invoke-ReviewerDispatch -ReviewerList $approvedList `

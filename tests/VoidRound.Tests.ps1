@@ -307,31 +307,107 @@ Describe 'era.ps1 exits 2 on a void round' -Tag Unit {
         $script:EraSrc | Should -Match '(?m)^\s*exit 2\s*$'
     }
 
-    It 'runs the gate AFTER Write-ReviewMetadata, so the artifacts and telemetry survive' {
-        $metaIdx = $script:EraSrc.IndexOf('Write-ReviewMetadata -ReviewDir')
-        $voidIdx = $script:EraSrc.IndexOf('Get-EraVoidRoundReport')
-        $metaIdx | Should -BeGreaterThan 0
-        $voidIdx | Should -BeGreaterThan $metaIdx
+    It 'runs the post-dispatch gate AFTER Write-ReviewMetadata, so artifacts and telemetry survive' {
+        # SUPERSEDED 2026-08-10: this used IndexOf (FIRST occurrence) when there
+        # was only one call site. There are now two on purpose -- a guard before
+        # the dispatcher (an empty approved list cannot bind to its Mandatory
+        # parameter) and the gate after the metadata writer. Anchor on both
+        # rather than on "the first one".
+        $metaIdx  = $script:EraSrc.IndexOf('Write-ReviewMetadata -ReviewDir')
+        $dispatch = $script:EraSrc.IndexOf('$results = Invoke-ReviewerDispatch')
+        $calls    = [regex]::Matches($script:EraSrc, 'Get-EraVoidRoundReport -ReviewDir')
+        $metaIdx  | Should -BeGreaterThan 0
+        $calls.Count | Should -Be 2 -Because 'one guard before dispatch, one gate after metadata'
+        $calls[0].Index | Should -BeLessThan $dispatch -Because 'the guard must pre-empt the binding error'
+        $calls[1].Index | Should -BeGreaterThan $metaIdx -Because 'the telemetry must survive the non-zero exit'
     }
 
-    It 'does not set $runSucceeded before exiting, so the failed run leaves its repomix receipt' {
-        $voidIdx  = $script:EraSrc.IndexOf('Get-EraVoidRoundReport')
-        $exitIdx  = $script:EraSrc.IndexOf('exit 2', $voidIdx)
-        $exitIdx  | Should -BeGreaterThan $voidIdx
-        $script:EraSrc.Substring($voidIdx, $exitIdx - $voidIdx) | Should -Not -Match '\$runSucceeded\s*=\s*\$true'
+    It 'no exit-2 path sets $runSucceeded first, so every failed run leaves its repomix receipt' {
+        foreach ($m in [regex]::Matches($script:EraSrc, 'Get-EraVoidRoundReport -ReviewDir')) {
+            $exitIdx = $script:EraSrc.IndexOf('exit 2', $m.Index)
+            $exitIdx | Should -BeGreaterThan $m.Index
+            $script:EraSrc.Substring($m.Index, $exitIdx - $m.Index) |
+                Should -Not -Match '\$runSucceeded\s*=\s*\$true'
+        }
+        # And it starts falsy, so the receipt survives a throw too.
+        $script:EraSrc | Should -Match '(?m)^\$runSucceeded = \$false'
     }
 
-    It 'keeps exit 1 exclusively for preflight refusals that spent nothing' {
+    It 'every exit 2 is a void-round exit, and exit 1 stays preflight-only' {
         # The distinctness that makes code 2 worth having: 1 = nothing happened
-        # and re-running is free; 2 = you paid for a round and got no review.
+        # and re-running is free; 2 = you got no review.
+        #
+        # SUPERSEDED 2026-08-10: this used to assert "exactly one exit 2", which
+        # pinned the COUNT rather than the MEANING and broke the moment a second
+        # legitimate void path was added. Assert the meaning instead -- every
+        # exit 2 must be reached through the void-round report.
         $script:EraSrc | Should -Match '(?s)function Stop-EraWithError.*?exit 1'
-        # Exactly one exit 2 in the file, and it is the void-round gate.
-        ([regex]::Matches($script:EraSrc, '(?m)^\s*exit 2\s*$')).Count | Should -Be 1
+        $exits = [regex]::Matches($script:EraSrc, '(?m)^\s*exit 2\s*$')
+        $exits.Count | Should -BeGreaterThan 0
+        foreach ($m in $exits) {
+            $start = [Math]::Max(0, $m.Index - 900)
+            $script:EraSrc.Substring($start, $m.Index - $start) |
+                Should -Match 'produced no usable review'
+        }
     }
 
     It 'SKILL.md documents the exit codes so the driving LLM can tell them apart' {
         $md = Get-Content -Raw $script:SkillMd
         $md | Should -Match '(?m)exit\s*(code\s*)?2'
         $md | Should -Match 'no usable review'
+    }
+}
+
+Describe 'the "everyone dropped at the cost prompt" void path is actually reachable' -Tag Unit {
+    # Get-EraVoidRoundReport has an empty-Results branch that reports
+    # "0 of N reviewer(s) were approved at the cost prompt." It was DEAD CODE:
+    # Invoke-ReviewerDispatch declares [Parameter(Mandatory)][string[]]$ReviewerList,
+    # and PowerShell refuses to bind an empty array to a Mandatory parameter. So
+    # dropping every reviewer threw a raw binding error at era.ps1:1562 --
+    # upstream of the gate at :1728 -- and the user got a PowerShell stack and
+    # exit 1 instead of the honest message and exit 2.
+    #
+    # Flagged as still-open across several rounds of the graded panel
+    # ("[LOW - still open, unchanged] empty $approvedList after cost prompts").
+    # It only became load-bearing when the void-round gate started promising a
+    # specific message for exactly this case.
+
+    BeforeAll {
+        $script:VrEra = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+    }
+
+    It 'Invoke-ReviewerDispatch genuinely cannot take an empty list — this is WHY the guard must be upstream' {
+        {
+            Invoke-ReviewerDispatch -ReviewerList @() -Registry @{} -BundlePath 'b' `
+                -PromptPath 'p' -ReviewDir 'd' -Round 1
+        } | Should -Throw '*empty array*'
+    }
+
+    It 'era.ps1 guards the empty approved list BEFORE it reaches the dispatcher' {
+        $guard    = $script:VrEra.IndexOf('@($approvedList).Count -eq 0')
+        $dispatch = $script:VrEra.IndexOf('$results = Invoke-ReviewerDispatch')
+        $guard    | Should -BeGreaterThan 0 -Because 'without a guard the dispatcher throws a raw binding error'
+        $dispatch | Should -BeGreaterThan 0
+        $guard    | Should -BeLessThan $dispatch
+    }
+
+    It 'and exits 2 from that guard, not 1' {
+        # Two exit-2 sites now: the empty-approved guard and the post-metadata
+        # void gate. Both must be exit 2 so a caller cannot tell a spent round
+        # from an unspent one by accident.
+        ([regex]::Matches($script:VrEra, '(?m)^\s*exit 2\s*$')).Count | Should -Be 2
+        $guard = $script:VrEra.IndexOf('@($approvedList).Count -eq 0')
+        $exit  = $script:VrEra.IndexOf('exit 2', $guard)
+        $next  = $script:VrEra.IndexOf('$results = Invoke-ReviewerDispatch')
+        $exit  | Should -BeGreaterThan $guard
+        $exit  | Should -BeLessThan $next
+    }
+
+    It 'reuses Get-EraVoidRoundReport so the message and the exit code cannot drift apart' {
+        $guard  = $script:VrEra.IndexOf('@($approvedList).Count -eq 0')
+        $report = $script:VrEra.IndexOf('Get-EraVoidRoundReport', $guard)
+        $next   = $script:VrEra.IndexOf('$results = Invoke-ReviewerDispatch')
+        $report | Should -BeGreaterThan $guard
+        $report | Should -BeLessThan $next
     }
 }
