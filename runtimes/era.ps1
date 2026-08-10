@@ -1313,13 +1313,26 @@ Be terse. If a section is empty, write "(none)".
                 Stop-EraWithError "-IncludeFiles paths not found relative to repo root ($repoRoot): $($missing -join ', ')"
             }
             # Path traversal guard: every resolved path must stay inside repoRoot.
-            # Skip paths containing wildcards (*, ?, [, ]) — glob patterns match
-            # inside the repo tree by definition and can't traverse outside it.
-            # Resolve-Path on a wildcard path returns a collection, not a single
-            # PathInfo, so .StartsWith would throw.
+            # Skip GENUINE globs (* and ?) only — those match inside the repo
+            # tree by definition, and Resolve-Path on a wildcard returns a
+            # collection rather than a single PathInfo.
+            #
+            # '[' and ']' are NOT globs here and are no longer exempt. They are
+            # ordinary characters in real filenames (every Next.js dynamic route
+            # has them), and exempting them let a bracketed RELATIVE traversal
+            # skip this check completely. Measured before the fix:
+            #     ../secret.md      -> traversal blocked? True
+            #     ../secret[1].md   -> traversal blocked? False
+            # Absolute out-of-repo paths are a different, deliberate flow (P6
+            # staging rewrites them above); relative traversal is what this
+            # guard still exists to stop, and that was the hole.
+            #
+            # -LiteralPath so a bracketed name resolves to itself instead of
+            # being read as a character class and silently resolving to nothing
+            # (which would return $false here — fail-open, the wrong direction).
             $traversal = @($IncludeFiles | Where-Object {
-                if ($_ -match '[*?\[\]]') { return $false }
-                $resolved = (Resolve-Path $_ -ErrorAction SilentlyContinue).Path
+                if ($_ -match '[*?]') { return $false }
+                $resolved = (Resolve-Path -LiteralPath $_ -ErrorAction SilentlyContinue).Path
                 if (-not $resolved) { return $false }
                 -not (Test-EraPathInsideRoot -Path $resolved -Root $repoRoot)
             })
