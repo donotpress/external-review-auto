@@ -122,6 +122,77 @@ Describe 'Invoke-PromptTokenSubstitution' -Tag Unit {
         $result | Should -Not -Match '\{\{PREVIOUS_ROUND\}\}'
     }
 
+    # --- a backticked token is a MENTION, not a substitution site ------------
+    # Measured on the real round-2 artifact (.external-reviews/era-grade):
+    #   round-2-prompt.md            85,457 bytes
+    #   round-1 per-preset responses 40,400 bytes
+    #   source METAREVIEW-PROMPT-R2    4,657 bytes as finalised
+    #   => 2 x 40,400 + 4,657 = 85,457 exactly
+    # The source prompt named the token twice, both times inside inline code
+    # spans (`{{PREVIOUS_ROUND}}`) because it was *discussing the feature*.
+    # Both were expanded, so the whole panel was inlined twice and both
+    # sentences were destroyed mid-clause. One of them read
+    # "**Attack `{{PREVIOUS_ROUND}}` aggregation.**" — the request to review
+    # this very code path was the thing the code path ate.
+    It 'leaves a backtick-wrapped token literal' {
+        Set-Content (Join-Path $script:TmpDir 'round-1-response.md') `
+            -Value 'PRIOR-BODY' -Encoding UTF8
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile -Value 'Attack `{{PREVIOUS_ROUND}}` aggregation.' -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        $result | Should -Match '`\{\{PREVIOUS_ROUND\}\}`'
+        $result | Should -Not -Match 'PRIOR-BODY'
+    }
+
+    It 'substitutes a bare token while leaving a backticked one alone' {
+        Set-Content (Join-Path $script:TmpDir 'round-1-response.md') `
+            -Value 'PRIOR-BODY' -Encoding UTF8
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile `
+            -Value "Prior work:`n`n{{PREVIOUS_ROUND}}`n`nNow attack ``{{PREVIOUS_ROUND}}`` aggregation." `
+            -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        # The bare one expanded exactly once...
+        @([regex]::Matches($result, 'PRIOR-BODY')).Count | Should -Be 1
+        # ...and the mention survived intact.
+        $result | Should -Match '`\{\{PREVIOUS_ROUND\}\}`'
+    }
+
+    It 'caps an oversized previous round and says so' {
+        $big = 'X' * 200000
+        Set-Content (Join-Path $script:TmpDir 'round-1-opus-response.md') -Value $big -Encoding UTF8
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile -Value 'Prior: {{PREVIOUS_ROUND}}' -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        $result.Length | Should -BeLessThan 200000
+        $result | Should -Match 'truncated'
+    }
+
+    It 'does not truncate a normally-sized panel round' {
+        # Real measured sizes: gemini 10,658 / opus 19,869 / deepseek 9,873.
+        foreach ($r in @(@{n='gemini';b=10658}, @{n='opus';b=19869}, @{n='deepseek-flash';b=9873})) {
+            Set-Content (Join-Path $script:TmpDir "round-1-$($r.n)-response.md") `
+                -Value ('Y' * $r.b) -Encoding UTF8
+        }
+        $promptFile = Join-Path $script:TmpDir 'round-2-prompt.md'
+        Set-Content $promptFile -Value 'Prior: {{PREVIOUS_ROUND}}' -Encoding UTF8
+
+        Invoke-PromptTokenSubstitution -PromptFile $promptFile -ReviewDir $script:TmpDir -RoundN 2
+
+        $result = Get-Content $promptFile -Raw
+        $result | Should -Not -Match 'truncated'
+        $result | Should -Match ('Y' * 100)
+    }
+
     It 'substitution with content containing backslashes does not corrupt output' {
         $responsePath = Join-Path $script:TmpDir 'round-1-response.md'
         Set-Content $responsePath -Value 'Path: C:\Users\test\file.ps1' -Encoding UTF8

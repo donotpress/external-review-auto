@@ -236,11 +236,51 @@ function Invoke-PromptTokenSubstitution {
         $substitution  = "[Round $previousN response not found]"
     }
 
+    # --- Cap the carried-forward round -------------------------------------
+    # Uncapped, this grows with the panel: the shipped three-reviewer default
+    # measured 40,400 bytes carried into round 2 (gemini 10,658 + opus 19,869 +
+    # deepseek 9,873), and nothing bounded it. The cap is deliberately set well
+    # above that so a normal round is never touched — truncating real review
+    # content to save tokens would trade away the thing the panel is for. It
+    # exists to bound the tail, not to trim the common case.
+    #
+    # Truncation keeps the HEAD of the substitution: reviewers put the grade,
+    # the verdict and the blocker list at the top, so the head is the part the
+    # next round actually needs.
+    $maxChars = 80000
+    if ($env:ERA_PREVIOUS_ROUND_MAX_CHARS) {
+        $parsed = 0
+        if ([int]::TryParse($env:ERA_PREVIOUS_ROUND_MAX_CHARS, [ref]$parsed) -and $parsed -gt 0) {
+            $maxChars = $parsed
+        }
+    }
+    if ($substitution.Length -gt $maxChars) {
+        $dropped = $substitution.Length - $maxChars
+        Write-Host "[era] Previous round is $($substitution.Length) chars; truncating to $maxChars (raise with ERA_PREVIOUS_ROUND_MAX_CHARS)."
+        $substitution = $substitution.Substring(0, $maxChars) +
+            "`n`n[... previous round truncated: $dropped of $($substitution.Length + 0) chars omitted." +
+            " Raise ERA_PREVIOUS_ROUND_MAX_CHARS to carry more.]"
+    }
+
     # Use [regex]::Replace with a MatchEvaluator delegate so the replacement text
     # is treated as a literal string (no $ or \ interpretation). This is the only
     # safe approach when replacement content may contain arbitrary text from a
     # reviewer response (file paths with backslashes, $ in PowerShell snippets, etc.)
-    $newText = [regex]::Replace($promptText, [regex]::Escape('{{PREVIOUS_ROUND}}'), [System.Text.RegularExpressions.MatchEvaluator]{
+    #
+    # A BACKTICKED occurrence is a MENTION, not a substitution site. A prompt that
+    # discusses this feature writes `{{PREVIOUS_ROUND}}` in an inline code span,
+    # and expanding those is not a cosmetic problem — measured on the real
+    # round-2 artifact, the source prompt named the token twice that way and the
+    # result was 85,457 bytes: the entire panel inlined TWICE (2 x 40,400) plus
+    # 4,657 bytes of actual prompt, with both sentences destroyed mid-clause.
+    # One of them was "**Attack `{{PREVIOUS_ROUND}}` aggregation.**" — the
+    # instruction asking reviewers to examine this code path was itself eaten by
+    # this code path, and three reviewers were billed to read the wreckage.
+    #
+    # Known limitation: this recognises inline code spans only. A token inside a
+    # fenced ``` block is still expanded; fixing that needs a real Markdown
+    # parse, and the inline-span form is the one that occurs in practice.
+    $newText = [regex]::Replace($promptText, '(?<!`)\{\{PREVIOUS_ROUND\}\}(?!`)', [System.Text.RegularExpressions.MatchEvaluator]{
         param($m)
         return $substitution
     })
