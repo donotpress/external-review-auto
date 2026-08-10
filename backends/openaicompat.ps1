@@ -85,6 +85,7 @@ function Invoke-OpenaicompatReview {
     $truncationWarning = $null
     $stderr = ''
     $detectorFired = $false
+    $captureError = $null
 
     try {
         $resp = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers `
@@ -126,8 +127,18 @@ function Invoke-OpenaicompatReview {
         # over the detector's 300-char length floor and defeat branch B2.
         if (Test-AgenticNarrationCapture -Response $response) {
             $detectorFired = $true
+            $captureError = 'agentic-narration-capture'
             $exitCode = -1
             $warnings += 'Provider returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
+        } elseif (Test-EraPromptEcho -PromptPath $PromptPath -Response $response) {
+            # A well-formed-looking answer that is just the prompt handed back.
+            # The narration detector cannot catch it: all of its branches are
+            # gated on the response having no markdown heading, and an era
+            # prompt is full of them.
+            $detectorFired = $true
+            $captureError = 'prompt-echo'
+            $exitCode = -1
+            $warnings += 'Provider returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.'
         }
 
         if ($truncationWarning) {
@@ -157,7 +168,7 @@ function Invoke-OpenaicompatReview {
     return @{
         Response          = $response
         ExitCode          = $exitCode
-        Error             = if ($detectorFired) { 'agentic-narration-capture' } else { $null }
+        Error             = $captureError
         ContentOk         = ($exitCode -eq 0)
         CaptureMethod     = 'rest-api'
         InputTokens       = $inputTokens

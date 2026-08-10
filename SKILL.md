@@ -346,6 +346,24 @@ era.ps1 copies your prompt to the correct `round-N-prompt.md` after resolving N 
 
 For round N > 1, include `{{PREVIOUS_ROUND}}` anywhere in your prompt to auto-substitute round-(N-1)'s response.
 
+#### Response contract (opt-in)
+
+A prompt can declare what its answer must contain, and era will reject any response that omits a required token — marking it `ExitCode=-1` / `content_ok=false` so it is never promoted to canonical or carried into round N+1:
+
+```markdown
+<!-- era-require: ORDER:, DROP-ENTIRELY:, MISSING: -->
+```
+
+**This is opt-in and no built-in prompt carries one.** That is deliberate, not an oversight: a contract failure is a recoverable trigger, so a contract the model merely phrases differently costs a real fallback dispatch on an otherwise fine round — and the generic prompt has no fixed output shape it could legitimately require. Add a marker when *you* write a prompt with a defined output format; leave it off for free-form review.
+
+Notes:
+- The contract travels **with** the prompt, so `-PromptOverrideFile` carries its own and needs no extra flag.
+- It is read from your prompt *before* `{{PREVIOUS_ROUND}}` is substituted, so a previous reviewer quoting a marker cannot install a contract you did not write.
+- The marker may wrap across lines. The first marker in the file wins.
+- Matching is decoration-tolerant (`**P1: DO**` satisfies `P1: DO`) and presence-based — it checks that a required label is present, not that what follows it is any good.
+
+Rounds without a contract are not unguarded: every backend runs the shared non-review detector (tool-intent narration, bundle-access refusal, sub-floor non-answer) and a prompt-echo check, `content_ok` requires a response artifact on disk, and a round with no usable review exits 2.
+
 ### Quick examples
 
 ```pwsh

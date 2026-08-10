@@ -683,6 +683,15 @@ function Invoke-AgyReview {
         }
     }
 
+    # Prompt-echo detection. Runs BEFORE the truncation banner for the same
+    # reason the narration detector does: the banner is this adapter's text, not
+    # the model's. Measured 2026-08-09 on gemini-pro-high (an agy preset) --
+    # it hit its output cap and what came back was the prompt, echoed. The
+    # in-loop clean-capture check above cannot see it: every branch of
+    # Test-AgenticNarrationCapture is gated on the response having no markdown
+    # heading, and an era prompt is full of them.
+    $promptEcho = Test-EraPromptEcho -PromptPath $PromptPath -Response $response
+
     # Truncation detection
     $truncationWarning = $null
     $tailWindow = if ($response.Length -gt 500) {
@@ -700,10 +709,15 @@ function Invoke-AgyReview {
         $response = $banner + $response
     }
 
-    # Only the FINAL (clean) attempt's text reaches disk. Still written even when
-    # the process died below -- it is evidence, and Copy-PrimaryResponseAlias
-    # demotes it to *.rejected.md rather than letting it reach round N+1.
-    $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+    # Only the FINAL (clean) attempt's text reaches disk. Still written when the
+    # process merely died -- it is evidence, and Copy-PrimaryResponseAlias
+    # demotes it to *.rejected.md rather than letting it reach round N+1. An
+    # ECHO is not written at all: it is the prompt we already have, so there is
+    # no evidence in it, and keeping it out of the directory keeps it away from
+    # the round-N-*-response.md glob entirely.
+    if (-not $promptEcho) {
+        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+    }
 
     # A readable capture from a process that DIED is not a success.
     #
@@ -724,16 +738,20 @@ function Invoke-AgyReview {
     # Deliberately narrow: this makes the RETURN self-consistent. The retry
     # decision is untouched, so a dead process does not become a second
     # full-bundle bill.
-    $processOk = ($exitCode -eq 0)
+    $processOk = ($exitCode -eq 0) -and (-not $promptEcho)
     $exitWarnings = @()
-    if (-not $processOk) {
+    if ($promptEcho) {
+        $exitCode = -1
+        $exitWarnings += 'agy returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.'
+    }
+    if ($exitCode -ne 0 -and -not $promptEcho) {
         $exitWarnings += "agy exited $exitCode after producing a readable capture; the answer may be truncated or incomplete, so it is not treated as a usable review."
     }
 
     return @{
         Response          = $response
         ExitCode          = $exitCode
-        Error             = if ($processOk) { $null } else { 'agy-process-exit' }
+        Error             = if ($processOk) { $null } elseif ($promptEcho) { 'prompt-echo' } else { 'agy-process-exit' }
         CaptureMethod     = 'polling'
         CaptureStrategy   = $finalResult.Strategy
         ContentOk         = $processOk

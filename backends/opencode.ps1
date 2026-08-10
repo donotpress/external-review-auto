@@ -405,6 +405,27 @@ function Invoke-OpencodeReview {
         }
     }
 
+    # Prompt-echo detection: a well-formed-looking answer that is just the
+    # prompt handed back. The narration detector above cannot catch it -- every
+    # one of its branches is gated on the response having no markdown heading,
+    # and an era prompt is full of them.
+    if (Test-EraPromptEcho -PromptPath $PromptPath -Response $clean) {
+        return @{
+            Response      = $clean
+            ExitCode      = -1
+            Error         = 'prompt-echo'
+            CaptureMethod = 'direct'
+            ContentOk     = $false
+            RetryCount    = 0
+            RetryReason   = 'prompt-echo'
+            InputTokens   = $null
+            OutputTokens  = [Math]::Ceiling($clean.Length / 4)
+            WallClockSec  = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+            Stderr        = $stderr
+            Warnings      = @('opencode returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.')
+        }
+    }
+
     $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     return @{
         Response = $clean

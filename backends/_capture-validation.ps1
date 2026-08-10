@@ -97,3 +97,84 @@ function Test-AgenticNarrationCapture {
 
     return $false
 }
+
+function Test-EraPromptEcho {
+    <#
+    .SYNOPSIS
+        Is this "response" just the prompt handed back? Returns $true for an
+        echo, which is a non-review no matter how well-formed it looks.
+
+    .DESCRIPTION
+        Measured 2026-08-09: gemini-pro-high hit maxOutputTokens and what landed
+        on disk was THE PROMPT, ECHOED BACK. Nothing caught it as content:
+
+          * Test-AgenticNarrationCapture cannot -- every one of its branches is
+            gated on the response having NO markdown heading, and an era prompt
+            is full of them.
+          * A response contract cannot either -- the prompt necessarily CONTAINS
+            the tokens it requires, so an echo satisfies it. Measured:
+            Test-ResponseContract on an echoed prompt returns Ok=$true,
+            Missing=[].
+
+        Method: normalise whitespace and case, sample $Samples evenly-spaced
+        windows of $WindowChars from the PROMPT, and count how many appear
+        verbatim in the response. An echo reproduces runs from all over the
+        prompt; a real review does not.
+
+        THRESHOLD, measured against 69 real prompt->response pairs across 28
+        topics in the local .external-reviews/ corpus. Full table in
+        docs/assessments/2026-08-10-prompt-echo-threshold.md.
+
+          window   legit max   pairs>0 of 69   TP full   TP half   TP quarter
+             20        0.150              50     1.000     0.500        0.250
+             40        0.050              21     1.000     0.500        0.250
+             60        0.025              10     1.000     0.500        0.250
+             80        0.000               0     1.000     0.475        0.225
+            120        0.000               0     1.000     0.475        0.225
+            240        0.000               0     1.000     0.450        0.200
+
+        The decay from 50 nonzero pairs at W=20 to zero at W=80 is what shows the
+        metric measures real overlap rather than always returning 0. W=120 sits
+        well inside the clean plateau, and 0.15 is above every legitimate value
+        observed at ANY window size while staying below the worst true positive
+        (a quarter-echo at 0.225).
+
+        The hardest false-positive case is in that corpus: round 2+ prompts embed
+        the previous round's full responses via {{PREVIOUS_ROUND}} -- the
+        era-grade round-2 prompt is 85 KB of mostly prior review text -- and
+        reviewers discuss them at length. Still 0.000: reviewers paraphrase and
+        re-cite line numbers, they do not reproduce 120-char verbatim runs.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$PromptText,
+        [AllowNull()][AllowEmptyString()][string]$Response,
+        [AllowNull()][AllowEmptyString()][string]$PromptPath,
+        [int]$WindowChars = 120,
+        [int]$Samples = 40,
+        [double]$Threshold = 0.15
+    )
+    if ($PromptPath -and [string]::IsNullOrEmpty($PromptText)) {
+        $PromptText = Get-Content -Raw -LiteralPath $PromptPath -ErrorAction SilentlyContinue
+    }
+    if ([string]::IsNullOrWhiteSpace($PromptText) -or [string]::IsNullOrWhiteSpace($Response)) { return $false }
+
+    $p = (($PromptText -replace '\s+', ' ').Trim()).ToLowerInvariant()
+    $r = (($Response   -replace '\s+', ' ').Trim()).ToLowerInvariant()
+
+    # Too short to sample meaningfully: a small prompt cannot be told apart from
+    # a legitimate short answer that restates the question. Fail open -- this
+    # detector exists to catch a specific, measured failure, not to guess.
+    if ($p.Length -lt ($WindowChars * 2)) { return $false }
+
+    $starts = [System.Collections.Generic.HashSet[int]]::new()
+    $span = $p.Length - $WindowChars
+    for ($i = 0; $i -lt $Samples; $i++) {
+        $null = $starts.Add([int]($i * $span / [Math]::Max(1, $Samples - 1)))
+    }
+    $hit = 0
+    foreach ($s in $starts) {
+        if ($r.Contains($p.Substring($s, $WindowChars))) { $hit++ }
+    }
+    return (([double]$hit / $starts.Count) -ge $Threshold)
+}

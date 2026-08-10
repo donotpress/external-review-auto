@@ -125,6 +125,7 @@ function Invoke-ClaudeReview {
     $exitCode = -1
     $clean = $null
     $detectorNote = $null
+    $captureError = $null
     $stderr = ''
     $stdoutSink = $null
     $stderrSink = $null
@@ -256,8 +257,18 @@ function Invoke-ClaudeReview {
     $detectorFired = $false
     if (Test-AgenticNarrationCapture -Response $preBannerClean) {
         $detectorFired = $true
+        $captureError = 'agentic-narration-capture'
         $exitCode = -1
         $detectorNote = 'claude returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
+    } elseif (Test-EraPromptEcho -PromptPath $PromptPath -Response $preBannerClean) {
+        # A well-formed-looking answer that is just the prompt handed back. The
+        # narration detector cannot catch it: all of its branches are gated on
+        # the response having no markdown heading, and an era prompt is full of
+        # them.
+        $detectorFired = $true
+        $captureError = 'prompt-echo'
+        $exitCode = -1
+        $detectorNote = 'claude returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.'
     }
 
     # A non-review is not written to disk, matching agy and opencode, so it
@@ -269,7 +280,7 @@ function Invoke-ClaudeReview {
     return @{
         Response = $clean
         ExitCode = $exitCode
-        Error = if ($detectorFired) { 'agentic-narration-capture' } else { $null }
+        Error = $captureError
         ContentOk = ($exitCode -eq 0)
         CaptureMethod = 'direct'
         InputTokens = $null
