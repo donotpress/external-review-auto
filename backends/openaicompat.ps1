@@ -16,6 +16,12 @@
     Adapter signature mirrors backends/opencode.ps1.
 #>
 
+# The non-review detector is shared with every other adapter. A REST backend
+# pastes the bundle into the request body, so "the bundle was not included,
+# please paste it" is a routine failure here -- and it exits 200/OK, so nothing
+# else catches it.
+. (Join-Path $PSScriptRoot '_capture-validation.ps1')
+
 function Invoke-OpenaicompatReview {
     [CmdletBinding()]
     param(
@@ -78,6 +84,7 @@ function Invoke-OpenaicompatReview {
     $outputTokens = $null
     $truncationWarning = $null
     $stderr = ''
+    $detectorFired = $false
 
     try {
         $resp = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers `
@@ -114,6 +121,15 @@ function Invoke-OpenaicompatReview {
             throw "OpenAI-compat API returned a choice with no content. finish_reason=$($choice.finish_reason)"
         }
 
+        # Honest content validation. Deliberately BEFORE the truncation banner:
+        # the banner adds ~180 characters, which would push a short non-answer
+        # over the detector's 300-char length floor and defeat branch B2.
+        if (Test-AgenticNarrationCapture -Response $response) {
+            $detectorFired = $true
+            $exitCode = -1
+            $warnings += 'Provider returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
+        }
+
         if ($truncationWarning) {
             $banner = @"
 > [!WARNING]
@@ -124,7 +140,12 @@ function Invoke-OpenaicompatReview {
             $response = $banner + $response
         }
 
-        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+        # A non-review is not written to disk, matching agy and opencode, so it
+        # cannot be picked up by the round-N-*-response.md glob that builds the
+        # next round's {{PREVIOUS_ROUND}} context.
+        if (-not $detectorFired) {
+            $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+        }
     } catch {
         $exitCode = -1
         $stderr = "$_"
@@ -136,6 +157,8 @@ function Invoke-OpenaicompatReview {
     return @{
         Response          = $response
         ExitCode          = $exitCode
+        Error             = if ($detectorFired) { 'agentic-narration-capture' } else { $null }
+        ContentOk         = ($exitCode -eq 0)
         CaptureMethod     = 'rest-api'
         InputTokens       = $inputTokens
         OutputTokens      = $outputTokens

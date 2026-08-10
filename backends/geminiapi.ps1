@@ -14,6 +14,12 @@
     dispatcher (workflow.ps1::Invoke-ReviewerDispatch) needs no changes.
 #>
 
+# The non-review detector is shared with every other adapter. A REST backend
+# pastes the bundle into the request body, so "the bundle was not included,
+# please paste it" is a routine failure here -- and it exits 200/OK, so nothing
+# else catches it.
+. (Join-Path $PSScriptRoot '_capture-validation.ps1')
+
 function Invoke-GeminiapiReview {
     [CmdletBinding()]
     param(
@@ -78,6 +84,7 @@ function Invoke-GeminiapiReview {
     $outputTokens = $null
     $truncationWarning = $null
     $stderr = ''
+    $detectorFired = $false
 
     try {
         $resp = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers `
@@ -110,6 +117,15 @@ function Invoke-GeminiapiReview {
             throw "Gemini API returned a candidate with no text parts. finishReason=$($candidate.finishReason)"
         }
 
+        # Honest content validation. Deliberately BEFORE the truncation banner:
+        # the banner adds ~200 characters, which would push a short non-answer
+        # over the detector's 300-char length floor and defeat branch B2.
+        if (Test-AgenticNarrationCapture -Response $response) {
+            $detectorFired = $true
+            $exitCode = -1
+            $warnings += 'Gemini returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
+        }
+
         # Prepend truncation banner if needed (same format as agy adapter)
         if ($truncationWarning) {
             $banner = @"
@@ -121,7 +137,12 @@ function Invoke-GeminiapiReview {
             $response = $banner + $response
         }
 
-        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+        # A non-review is not written to disk, matching agy and opencode, so it
+        # cannot be picked up by the round-N-*-response.md glob that builds the
+        # next round's {{PREVIOUS_ROUND}} context.
+        if (-not $detectorFired) {
+            $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+        }
     } catch {
         $exitCode = -1
         $stderr = "$_"
@@ -133,6 +154,8 @@ function Invoke-GeminiapiReview {
     return @{
         Response          = $response
         ExitCode          = $exitCode
+        Error             = if ($detectorFired) { 'agentic-narration-capture' } else { $null }
+        ContentOk         = ($exitCode -eq 0)
         CaptureMethod     = 'rest-api'
         InputTokens       = $inputTokens
         OutputTokens      = $outputTokens

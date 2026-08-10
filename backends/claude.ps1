@@ -11,6 +11,12 @@
     - Used by presets: opus, sonnet, haiku.
 #>
 
+# The non-review detector is shared with agy and opencode. `claude --print`
+# exits 0 for any non-empty stdout, so a two-character answer, a tool-intent
+# narration, or a "I don't see an attached bundle" refusal was scored as a full
+# review -- on `opus`, a shipped default panel member.
+. (Join-Path $PSScriptRoot '_capture-validation.ps1')
+
 function Test-ClaudeTruncation {
     <#
     Detect whether claude CLI's stderr indicates response truncation or
@@ -118,6 +124,7 @@ function Invoke-ClaudeReview {
 
     $exitCode = -1
     $clean = $null
+    $detectorNote = $null
     $stderr = ''
     $stdoutSink = $null
     $stderrSink = $null
@@ -191,6 +198,10 @@ function Invoke-ClaudeReview {
     # Truncation detection: scan stderr for precisely-anchored phrases that
     # claude CLI emits on context-window-exceeded / output-truncated.
     # See Test-ClaudeTruncation for the pattern list and rationale.
+    # Snapshot before the banner is prepended: the detector must judge what the
+    # MODEL said, not what this adapter added to it.
+    $preBannerClean = $clean
+
     $truncationWarning = $null
     if (Test-ClaudeTruncation $stderr) {
         $truncationWarning = "Claude CLI reported output truncation in stderr."
@@ -239,10 +250,27 @@ function Invoke-ClaudeReview {
     }
     throw "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
     }
-    $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+    # Honest content validation. Judged on the PRE-BANNER text: the truncation
+    # banner adds ~190 characters, which would push a short non-answer over the
+    # detector's 300-char length floor and defeat branch B2.
+    $detectorFired = $false
+    if (Test-AgenticNarrationCapture -Response $preBannerClean) {
+        $detectorFired = $true
+        $exitCode = -1
+        $detectorNote = 'claude returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
+    }
+
+    # A non-review is not written to disk, matching agy and opencode, so it
+    # cannot be picked up by the round-N-*-response.md glob that builds the next
+    # round's {{PREVIOUS_ROUND}} context.
+    if (-not $detectorFired) {
+        $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+    }
     return @{
         Response = $clean
         ExitCode = $exitCode
+        Error = if ($detectorFired) { 'agentic-narration-capture' } else { $null }
+        ContentOk = ($exitCode -eq 0)
         CaptureMethod = 'direct'
         InputTokens = $null
         OutputTokens = [Math]::Ceiling($clean.Length / 4)
@@ -252,6 +280,6 @@ function Invoke-ClaudeReview {
         # A silent launcher switch would be the same defect class as the blank error string above:
         # the run reads normal while having been rescued, and the Windows credential fault stays
         # invisible forever. Record it.
-        Warnings = @(if ($fallbackNote) { $fallbackNote })
+        Warnings = @(@(if ($fallbackNote) { $fallbackNote }) + @(if ($detectorNote) { $detectorNote }))
     }
 }
