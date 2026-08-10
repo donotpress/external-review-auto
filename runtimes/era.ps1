@@ -1154,7 +1154,7 @@ Be terse. If a section is empty, write "(none)".
         Write-Host "[era] Round $round (diff against round $priorRound)..."
         $diffResult = Get-ReviewDiff -ReviewDir $reviewDir -PriorRound $priorRound -CurrentFiles $effectiveInclude -RepoRoot $repoRoot
         if ($diffResult -and $diffResult.BundleFiles.Count -eq 0 -and $diffResult.Deleted.Count -eq 0) {
-            Write-Host "[era] No files changed since round $priorRound. Use -Full to force full re-bundle."
+            Write-Host "[era] No files changed since round $priorRound. Omit -Diff to force a full re-bundle."
             return
         }
         if ($diffResult) {
@@ -1632,20 +1632,26 @@ Be terse. If a section is empty, write "(none)".
     # reviewer doesn't yield an empty round. Triggers ONLY on an actual agy failure
     # (healthy runs are byte-identical). Disable with ERA_AGY_FALLBACK=off.
     if ($env:ERA_AGY_FALLBACK -ne 'off' -and $env:ERA_AGY_FALLBACK -ne '0') {
-        # Recoverable = a flaky agy capture (the original case) OR a response
-        # that failed the contract on ANY backend (2026-08-09). The trigger used
-        # to require backend -eq 'agy', so a REST or opencode reviewer that
-        # returned off-contract output spent the whole round with zero usable
-        # result and no recovery — flagged by two of three round-2 reviewers.
-        # Still bounded to ONE fallback dispatch, and the fallback's own answer
-        # is contract-checked below.
-        $failedAgy = @($approvedList | Where-Object {
-            $registryHash[$_].backend -eq 'agy' -and $results[$_] -and $results[$_].ExitCode -ne 0
-        })
-        $failedContract = @($approvedList | Where-Object {
-            $results[$_] -and $results[$_].Error -eq 'response-contract'
-        })
-        $failedRecoverable = @(@($failedAgy) + @($failedContract) | Sort-Object -Unique)
+        # Recoverable = a flaky agy capture (the original case) OR an HONEST
+        # CAPTURE FAILURE on any backend: the call completed and what came back
+        # was not a review. See Get-EraRecoverableFailures for the full list and
+        # for why a free-text adapter exception (network, bad model id, auth) is
+        # deliberately excluded.
+        #
+        # WIDENED 2026-08-10. The previous trigger was agy-or-'response-contract'.
+        # Its stated intent was that "a REST or opencode reviewer that returned
+        # off-contract output" should recover — but no shipped prompt carries an
+        # era-require marker (the contract is deliberately opt-in), so
+        # 'response-contract' never fires on a default run and the only live
+        # trigger was backend -eq 'agy'. Every other honest failure spent the
+        # round unrecovered, including case (b) of the 2026-08-09 void round:
+        # deepseek-flash failed after reading the bundle and nothing re-dispatched.
+        #
+        # Still bounded to ONE fallback dispatch, still priced against the
+        # per-reviewer cap below, and the fallback's own answer is still
+        # contract-checked afterwards.
+        $failedRecoverable = @(Get-EraRecoverableFailures -ReviewerList $approvedList `
+            -Results $results -Registry $registryHash)
         if ($failedRecoverable.Count -gt 0) {
             # Hydrate subscription keys so opencode/nvidia fallbacks register as available.
             Resolve-EraAuthJsonKeys -ApiKeyEnvs @($registryHash.Keys | ForEach-Object { $registryHash[$_].api_key_env })
@@ -1674,8 +1680,13 @@ Be terse. If a section is empty, write "(none)".
                 }
             }
             if ($fallbackPreset) {
-                $why = if ($failedContract.Count -gt 0) { 'reviewer(s) failed' } else { 'agy capture failed' }
-                Write-Host "[era] $why ($($failedRecoverable -join ', ')) -> falling back to '$fallbackPreset'."
+                # Name the actual cause per reviewer rather than guessing at a
+                # single label -- the trigger set now spans several failure kinds.
+                $why = @($failedRecoverable | ForEach-Object {
+                    $e = if ($results[$_].Error) { $results[$_].Error } else { "exit $($results[$_].ExitCode)" }
+                    "$_ ($e)"
+                }) -join ', '
+                Write-Host "[era] no usable review from $why -> falling back to '$fallbackPreset'."
                 $fbResults = Invoke-ReviewerDispatch -ReviewerList @($fallbackPreset) `
                     -SuffixReviewerList @($approvedList + $fallbackPreset) `
                     -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
@@ -1687,7 +1698,7 @@ Be terse. If a section is empty, write "(none)".
                 foreach ($k in $fbResults.Keys) { $results[$k] = $fbResults[$k] }
                 $approvedList = @($approvedList + $fallbackPreset)
             } else {
-                Write-Host "[era] agy capture failed and no non-agy fallback is available; leaving the result as-is."
+                Write-Host "[era] recoverable failure(s) ($($failedRecoverable -join ', ')) but no fallback reviewer is available; leaving the result as-is."
             }
         }
     }

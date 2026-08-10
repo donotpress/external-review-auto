@@ -780,7 +780,13 @@ function Invoke-CostPrompt {
         }
     }
     $survivorAgg = ($kept | ForEach-Object { $PerReviewerCosts[$_] } | Measure-Object -Sum).Sum
-    if ($survivorAgg -gt $AggregateCap) {
+    # Measure-Object -Sum over an empty set yields $null, which cannot bind to
+    # Test-AggregateCostCap's [double]. Coerce here; the comparison was already
+    # false for $null, so behaviour is unchanged.
+    if ($null -eq $survivorAgg) { $survivorAgg = 0.0 }
+    # Use the shared predicate rather than repeating it. It was defined and
+    # called from nowhere -- two copies of one rule is how they drift apart.
+    if (Test-AggregateCostCap -TotalEstCost $survivorAgg -AggregateCap $AggregateCap) {
         $resp = Read-Host "Total estimated cost across $($kept.Count) reviewer(s) is `$$survivorAgg (> `$$AggregateCap). Continue? [y/N]"
         if ($resp.ToLower() -ne 'y') {
             throw "User aborted at aggregate cap."
@@ -1523,6 +1529,66 @@ function Test-EraReviewerArtifact {
         return [bool](Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-response.md"))
     }
     return $false
+}
+
+function Get-EraRecoverableFailures {
+    <#
+    .SYNOPSIS
+        Which reviewers failed in a way the ONE bounded fallback re-dispatch can
+        plausibly recover? Returns their preset names, de-duplicated.
+
+    .DESCRIPTION
+        The trigger used to be inline in era.ps1 and read:
+
+            $failedAgy      = backend -eq 'agy'  AND ExitCode -ne 0
+            $failedContract = Error   -eq 'response-contract'
+
+        Its comment said the widening existed so that "a REST or opencode
+        reviewer that returned off-contract output" no longer "spent the whole
+        round with zero usable result and no recovery". Measured 2026-08-10, the
+        intent was not met in the DEFAULT configuration: no shipped prompt
+        carries an `era-require` marker (the contract is deliberately opt-in), so
+        `response-contract` never fires on a default run and the only live
+        trigger was `backend -eq 'agy'`. Everything else spent the round
+        unrecovered -- including case (b) of the 2026-08-09 void round, where
+        deepseek-flash failed after reading the bundle and nothing re-dispatched.
+
+        Recoverable now means an HONEST CAPTURE FAILURE on any backend: the call
+        completed and what came back was not a review. A second attempt can
+        plausibly fix that.
+
+        NOT recoverable: a free-text adapter exception (network fault, bad model
+        id, auth, rate limit). Re-dispatching those doubles the latency and the
+        bill for something a retry cannot fix -- the same reasoning the claude
+        adapter already applies to its WSL credential retry.
+
+        Widening WHAT is recoverable does not widen HOW MANY re-dispatches run:
+        the caller is still bounded to one, still prices it against the
+        per-reviewer cap, and still contract-checks the fallback's own answer.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ReviewerList,
+        [Parameter(Mandatory)][hashtable]$Results,
+        [Parameter(Mandatory)][hashtable]$Registry
+    )
+    # Every error code an adapter sets deliberately to mean "this ran, and what
+    # came back was not a review". Free-text exception messages are excluded by
+    # construction: they never equal one of these.
+    $recoverable = @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+
+    $out = [System.Collections.Generic.List[string]]::new()
+    foreach ($r in $ReviewerList) {
+        $res = $Results[$r]
+        if (-not $res -or $res.ExitCode -eq 0) { continue }
+        # agy stays recoverable on ANY failure: its capture is transcript-scraped
+        # and historically flaky in ways that are not error-coded.
+        $isAgy = $Registry[$r] -and $Registry[$r].backend -eq 'agy'
+        if ($isAgy -or ($res.Error -and $recoverable -contains $res.Error)) {
+            if (-not $out.Contains($r)) { $out.Add($r) }
+        }
+    }
+    return @($out)
 }
 
 function Get-EraVoidRoundReport {

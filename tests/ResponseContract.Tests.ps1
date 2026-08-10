@@ -201,10 +201,13 @@ Describe 'Contract failures recover on any backend, not just agy' -Tag Unit {
         $src = Get-Content -Raw $script:EraPath
         $trigger = $src.IndexOf('ERA_AGY_FALLBACK')
         $trigger | Should -BeGreaterThan 0
-        $window = $src.Substring($trigger, [Math]::Min(1400, $src.Length - $trigger))
-        # The trigger set must include contract failures regardless of backend.
-        $window | Should -Match "response-contract"
-        $window | Should -Match 'failedRecoverable|failedContract'
+        $window = $src.Substring($trigger, [Math]::Min(1800, $src.Length - $trigger))
+        # STRENGTHENED 2026-08-10: this matched the bare string 'response-contract',
+        # which a COMMENT satisfies. Anchor on the decision function instead --
+        # Get-EraRecoverableFailures owns the trigger set now, and its own tests
+        # (tests/RecoveryFallback.Tests.ps1) pin contract failures on any backend.
+        $window | Should -Match 'Get-EraRecoverableFailures -ReviewerList \$approvedList'
+        $window | Should -Match '\$failedRecoverable'
     }
 }
 
