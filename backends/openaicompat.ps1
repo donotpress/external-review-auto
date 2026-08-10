@@ -46,8 +46,8 @@ function Invoke-OpenaicompatReview {
     }
 
     # --- Build request body ---
-    $promptText = Get-Content -Raw $PromptPath -ErrorAction Stop
-    $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
+    $promptText = Get-Content -Raw -LiteralPath $PromptPath -ErrorAction Stop
+    $bundleText = Get-Content -Raw -LiteralPath $BundlePath -ErrorAction Stop
     $fullContent = "$promptText`n`n--- BUNDLE ($BundlePath) ---`n`n$bundleText"
 
     # Reasoning models can burn the budget thinking before emitting the answer;
@@ -124,7 +124,7 @@ function Invoke-OpenaicompatReview {
             $response = $banner + $response
         }
 
-        $response | Set-Content -Path $ResponsePath -Encoding utf8
+        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     } catch {
         $exitCode = -1
         $stderr = "$_"

@@ -71,7 +71,7 @@ function Invoke-ClaudeReview {
     $claudeCli = Get-Command claude -ErrorAction Stop
     $claudeExe = if ($claudeCli.Source -match '\.ps1$') {
         $cmdPath = $claudeCli.Source -replace '\.ps1$', '.cmd'
-        if (-not (Test-Path $cmdPath)) { throw "claude.cmd not found at $cmdPath" }
+        if (-not (Test-Path -LiteralPath $cmdPath)) { throw "claude.cmd not found at $cmdPath" }
         $cmdPath
     } else { $claudeCli.Source }
 
@@ -168,14 +168,14 @@ function Invoke-ClaudeReview {
         try { $stdoutSink.Dispose() } catch {}
         try { $stderrSink.Dispose() } catch {}
 
-        $resultText = (Get-Content -Raw $stdFile -ErrorAction SilentlyContinue)
+        $resultText = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
         if (-not $resultText) { $resultText = '' }
-        $stderr = (Get-Content -Raw $errFile -ErrorAction SilentlyContinue)
+        $stderr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
         if (-not $stderr) { $stderr = '' }
         $clean = $resultText -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", ''
 
-        Remove-Item $stdFile -ErrorAction SilentlyContinue
-        Remove-Item $errFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         $sw.Stop()
     }
 
@@ -230,7 +230,7 @@ function Invoke-ClaudeReview {
     }
     throw "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
     }
-    $clean | Set-Content -Path $ResponsePath -Encoding utf8
+    $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     return @{
         Response = $clean
         ExitCode = $exitCode

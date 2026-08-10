@@ -39,8 +39,8 @@ function Invoke-AnthropicReview {
     # --- Build request body ---
     # Anthropic expects: { model, max_tokens, messages: [{role:"user", content:"..."}] }
     # We concatenate prompt + bundle as a single user message.
-    $promptText = Get-Content -Raw $PromptPath -ErrorAction Stop
-    $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
+    $promptText = Get-Content -Raw -LiteralPath $PromptPath -ErrorAction Stop
+    $bundleText = Get-Content -Raw -LiteralPath $BundlePath -ErrorAction Stop
     $fullContent = "$promptText`n`n--- BUNDLE ($BundlePath) ---`n`n$bundleText"
 
     # Capability from the registry, falling back to the value this adapter used
@@ -106,7 +106,7 @@ function Invoke-AnthropicReview {
             $response = $banner + $response
         }
 
-        $response | Set-Content -Path $ResponsePath -Encoding utf8
+        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     } catch {
         $exitCode = -1
         $stderr = "$_"

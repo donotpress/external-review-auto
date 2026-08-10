@@ -44,8 +44,8 @@ function Invoke-GeminiapiReview {
     $modelId = $modelId -replace '-(high|medium|low)$', ''
 
     # --- Build request body ---
-    $promptText = Get-Content -Raw $PromptPath -ErrorAction Stop
-    $bundleText = Get-Content -Raw $BundlePath -ErrorAction Stop
+    $promptText = Get-Content -Raw -LiteralPath $PromptPath -ErrorAction Stop
+    $bundleText = Get-Content -Raw -LiteralPath $BundlePath -ErrorAction Stop
 
     # Capability from the registry, falling back to the value this adapter used
     # to hardcode. Raising a cap is now a config edit, not a code edit.
@@ -121,7 +121,7 @@ function Invoke-GeminiapiReview {
             $response = $banner + $response
         }
 
-        $response | Set-Content -Path $ResponsePath -Encoding utf8
+        $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     } catch {
         $exitCode = -1
         $stderr = "$_"

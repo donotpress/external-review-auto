@@ -66,9 +66,9 @@ function Get-EraDefaultReviewer {
     # (3) persistent config file — read even when the env var won, so a silent
     # disagreement between the two can be reported instead of guessed at.
     $path = Get-EraDefaultsPath -SkillRoot $SkillRoot
-    if (Test-Path $path) {
+    if (Test-Path -LiteralPath $path) {
         try {
-            $cfg = Get-Content -Raw $path | ConvertFrom-Json
+            $cfg = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
             if ($cfg.reviewer) {
                 $fromFile = @($cfg.reviewer | ForEach-Object { "$_".Trim().ToLower() } |
                     Where-Object { $_ })
@@ -133,12 +133,12 @@ function Set-EraDefaultReviewer {
 
     $path = Get-EraDefaultsPath -SkillRoot $SkillRoot
     $dir = Split-Path -Parent $path
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 
     $payload = [ordered]@{
         reviewer = $presets
         note     = 'Default reviewer(s) for a bare /era. A list is dispatched simultaneously as a panel. Edit via `/era set default <names>` or by hand.'
     }
-    $payload | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding UTF8
+    $payload | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
     return $path
 }

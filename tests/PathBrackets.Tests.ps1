@@ -167,6 +167,46 @@ Describe 'workflow.ps1 on wildcard-metacharacter paths' -Tag Unit {
     }
 }
 
+Describe 'backends write their response literally' -Tag Unit {
+    # The payoff path. $ResponsePath lives under the review dir, hence under the
+    # repo root, so a bracketed root reaches every backend's response write.
+    # 'Set-Content -Path <unmatched wildcard> -Encoding utf8' does not fail
+    # softly: -Encoding is a provider DYNAMIC parameter, only added once -Path
+    # resolves to a provider, so an unresolvable path throws
+    #   "A parameter cannot be found that matches parameter name 'Encoding'."
+    # That happens AFTER the reviewer has run and been billed, and discards the
+    # answer. Measured standalone; -LiteralPath makes the same call succeed.
+    #
+    # Asserted at source level because exercising it for real means dispatching
+    # a live, billable reviewer. The invariant is narrow enough to pin this way.
+    It 'every backend uses -LiteralPath for the response write' {
+        $skillRoot = Split-Path $PSScriptRoot -Parent
+        $backends  = Get-ChildItem -LiteralPath (Join-Path $skillRoot 'backends') -Filter '*.ps1' -File
+
+        $offenders = foreach ($b in $backends) {
+            $src = Get-Content -LiteralPath $b.FullName -Raw
+            if ($src -match '(Set-Content|Out-File|Add-Content)\s+-Path\s+\$ResponsePath') { $b.Name }
+        }
+
+        @($offenders) -join ', ' | Should -BeNullOrEmpty
+    }
+
+    It 'the backends that write a response do so at all (guards the test above)' {
+        # Without this, deleting every response write would make the test above
+        # pass vacuously.
+        $skillRoot = Split-Path $PSScriptRoot -Parent
+        $backends  = Get-ChildItem -LiteralPath (Join-Path $skillRoot 'backends') -Filter '*.ps1' -File
+
+        $writers = foreach ($b in $backends) {
+            $src = Get-Content -LiteralPath $b.FullName -Raw
+            if ($src -match '(Set-Content|Out-File|Add-Content)\s+-LiteralPath\s+\$ResponsePath') { $b.Name }
+        }
+
+        # agy, anthropic, claude, geminiapi, openaicompat, opencode
+        @($writers).Count | Should -BeGreaterOrEqual 6
+    }
+}
+
 Describe 'era.ps1 on wildcard-metacharacter paths' -Tag Unit {
     BeforeAll {
         $script:SkillRoot = Split-Path $PSScriptRoot -Parent

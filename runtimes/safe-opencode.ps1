@@ -49,7 +49,7 @@ $errFile = [System.IO.Path]::GetTempFileName()
 $opencodeCli = Get-Command opencode -ErrorAction Stop
 $opencodeExe = if ($opencodeCli.Source -match '\.ps1$') {
     $cmdPath = $opencodeCli.Source -replace '\.ps1$', '.cmd'
-    if (-not (Test-Path $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
+    if (-not (Test-Path -LiteralPath $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
     $cmdPath
 } else { $opencodeCli.Source }
 
@@ -140,9 +140,9 @@ try {
     try { $stdoutSink.Dispose() } catch {}
     try { $stderrSink.Dispose() } catch {}
 
-    $stdoutRaw = (Get-Content -Raw $stdFile -ErrorAction SilentlyContinue)
+    $stdoutRaw = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
     if (-not $stdoutRaw) { $stdoutRaw = '' }
-    $stderrRaw = (Get-Content -Raw $errFile -ErrorAction SilentlyContinue)
+    $stderrRaw = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
     if (-not $stderrRaw) { $stderrRaw = '' }
 
     $stdoutBytes = [System.Text.Encoding]::UTF8.GetByteCount($stdoutRaw)
@@ -151,8 +151,8 @@ try {
     # Strip ANSI escape sequences from stdout for clean output
     $stdoutClean = $stdoutRaw -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", ''
 
-    Remove-Item $stdFile -ErrorAction SilentlyContinue
-    Remove-Item $errFile -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stdFile -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
     $sw.Stop()
 }
 

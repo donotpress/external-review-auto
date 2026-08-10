@@ -55,7 +55,7 @@ function Invoke-UpdateModels {
     if ($providerNames.Count -eq 0) { throw "No usable providers found after blacklist filtering." }
 
     $registryPath = Join-Path $SkillRoot 'backends/_registry.json'
-    $registry = Get-Content -Raw $registryPath | ConvertFrom-Json
+    $registry = Get-Content -Raw -LiteralPath $registryPath | ConvertFrom-Json
 
     $newOpencodeMap = @{}
     $modelCount = 0
@@ -230,7 +230,7 @@ function Invoke-UpdateModels {
 
     $registry._opencode_model_map = $existingMap
     $updatedJson = $registry | ConvertTo-Json -Depth 20
-    $updatedJson | Set-Content -Path $registryPath -Encoding utf8
+    $updatedJson | Set-Content -LiteralPath $registryPath -Encoding utf8
 
     Write-Host "`nUpdated opencode model registry:"
     foreach ($p in $existingMap.Keys) {

@@ -73,7 +73,7 @@ $raw = if ($null -eq $InputText) { '' } else { $InputText.Trim() }
 # --- Locate the registry (single source of truth for model tokens) -----------
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $registryPath = Join-Path $skillRoot 'backends/_registry.json'
-$registry = Get-Content -Raw $registryPath | ConvertFrom-Json
+$registry = Get-Content -Raw -LiteralPath $registryPath | ConvertFrom-Json
 
 # Resolved here, not at the top, because the shared helper needs $skillRoot to
 # find config/defaults.json. Comma-joined because that is the shape era.ps1's

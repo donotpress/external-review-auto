@@ -39,7 +39,7 @@
 
 function Get-AgyModelMap {
     $registryPath = Join-Path $PSScriptRoot '_registry.json'
-    $registry = Get-Content -Raw $registryPath | ConvertFrom-Json
+    $registry = Get-Content -Raw -LiteralPath $registryPath | ConvertFrom-Json
     $map = $registry._agy_model_map.PSObject.Properties | ForEach-Object { @{ Name = $_.Name; Value = $_.Value } }
     $result = @{}
     foreach ($item in $map) { $result[$item.Name] = $item.Value }
@@ -127,7 +127,7 @@ function Get-AgyTranscriptResponse {
         if ($attempt -gt 1) { Start-Sleep -Seconds $DelaySeconds }
 
         # New session transcripts (created since dispatch start).
-        $newSessionTranscripts = Get-ChildItem -Path $BrainRoot -Directory -ErrorAction SilentlyContinue |
+        $newSessionTranscripts = Get-ChildItem -LiteralPath $BrainRoot -Directory -ErrorAction SilentlyContinue |
             Where-Object { -not $PreExistingSessionDirs.ContainsKey($_.FullName) } |
             ForEach-Object {
                 # Capture ONLY from transcript_full.jsonl. agy also writes a
@@ -188,7 +188,7 @@ function Get-AgyTranscriptResponse {
             # sibling dispatch sharing the same bundle path can't win on path alone.
             if ($DispatchId) {
                 foreach ($c in $combined) {
-                    $lines = @(Get-Content $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $lines = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
                     if (-not $lines) { continue }
                     for ($i = 0; $i -lt $lines.Count; $i++) {
                         if ($lines[$i].Contains($DispatchId)) {
@@ -209,7 +209,7 @@ function Get-AgyTranscriptResponse {
             # the bundle, then return the first PLANNER_RESPONSE after it.
             if ($pathForms.Count -gt 0) {
                 foreach ($c in $combined) {
-                    $lines = @(Get-Content $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $lines = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
                     if (-not $lines) { continue }
                     for ($i = 0; $i -lt $lines.Count; $i++) {
                         $hit = $false
@@ -239,7 +239,7 @@ function Get-AgyTranscriptResponse {
         $isStrategy2 = -not $newSessionTranscripts -and $existingForLegacy
 
         foreach ($c in $candidates) {
-            $lines = @(Get-Content $c.FullName -Tail 200 -ErrorAction SilentlyContinue)
+            $lines = @(Get-Content -LiteralPath $c.FullName -Tail 200 -ErrorAction SilentlyContinue)
             if (-not $lines) { continue }
             for ($i = $lines.Count - 1; $i -ge 0; $i--) {
                 try {
@@ -316,8 +316,8 @@ function _SpawnAndCaptureOnce {
 
     # Snapshot brain session directories that exist BEFORE we spawn.
     $preExistingSessionDirs = @{}
-    if (Test-Path $brainRoot) {
-        Get-ChildItem $brainRoot -Directory -ErrorAction SilentlyContinue |
+    if (Test-Path -LiteralPath $brainRoot) {
+        Get-ChildItem -LiteralPath $brainRoot -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { $preExistingSessionDirs[$_.FullName] = $true }
     }
     $dispatchStartUtc = [datetime]::UtcNow
@@ -333,7 +333,7 @@ function _SpawnAndCaptureOnce {
     $agyCli = Get-Command agy -ErrorAction Stop
     $agyExe = if ($agyCli.Source -match '\.ps1$') {
         $cmdPath = $agyCli.Source -replace '\.ps1$', '.cmd'
-        if (-not (Test-Path $cmdPath)) { throw "agy.cmd not found at $cmdPath" }
+        if (-not (Test-Path -LiteralPath $cmdPath)) { throw "agy.cmd not found at $cmdPath" }
         $cmdPath
     } else { $agyCli.Source }
     $psi.FileName = $agyExe
@@ -429,7 +429,7 @@ function _SpawnAndCaptureOnce {
                 # Kill the pipe hits EOF so CopyToAsync completes promptly.
                 try { $null = $stderrTask.Wait(1000) } catch {}
                 try { $stderrSink.Flush() } catch {}
-                $stderr = Get-Content -Raw $errFile -ErrorAction SilentlyContinue
+                $stderr = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
                 throw "agy showed no transcript activity within ${firstActivitySec}s -- likely failed to start (bad auth, wrong model, or crash). stderr: $stderr"
             }
 
@@ -458,13 +458,13 @@ function _SpawnAndCaptureOnce {
         try { $stderrSink.Dispose() } catch {}
         $stderrSnapshot = ''
         try {
-            $rawErr = Get-Content -Raw $errFile -ErrorAction SilentlyContinue
+            $rawErr = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
             if ($rawErr) {
                 $stderrSnapshot = $rawErr.Substring([math]::Max(0, $rawErr.Length - 600))
             }
         } catch {}
-        Remove-Item $stdFile   -ErrorAction SilentlyContinue
-        Remove-Item $errFile   -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdFile   -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errFile   -ErrorAction SilentlyContinue
     }
 
     # Transcript scan correlated by this dispatch's Run ID.
@@ -536,7 +536,7 @@ function Invoke-AgyReview {
     # tokens per attempt to ever fire -- i.e. dead code. (The adapter can't call
     # Get-PerReviewerCap: it dot-sources only itself, so the threshold is inlined.)
     $perReviewerCap = if ($inPerM -ge 10.0) { 10.0 } else { 2.0 }
-    $bundleChars = if (Test-Path $BundlePath) { (Get-Item $BundlePath).Length } else { 0 }
+    $bundleChars = if (Test-Path -LiteralPath $BundlePath) { (Get-Item -LiteralPath $BundlePath).Length } else { 0 }
     $estInputTokens = [int][Math]::Ceiling($bundleChars / 4)
     $costFor = {
         param($inTok, $outTok)
@@ -688,7 +688,7 @@ function Invoke-AgyReview {
     }
 
     # Only the FINAL (clean) attempt's text reaches disk.
-    $response | Set-Content -Path $ResponsePath -Encoding utf8
+    $response | Set-Content -LiteralPath $ResponsePath -Encoding utf8
 
     return @{
         Response          = $response

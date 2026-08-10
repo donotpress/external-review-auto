@@ -39,7 +39,7 @@ function Set-OpencodeVariantEntry {
     [CmdletBinding()]
     param([string]$ModelId, [string]$Variant)
     $statePath = Join-Path $HOME '.local/state/opencode/model.json'
-    if (-not (Test-Path $statePath)) { return $null }
+    if (-not (Test-Path -LiteralPath $statePath)) { return $null }
     $providerID, $modelIDPart = $ModelId -split '/', 2
     if (-not $providerID -or -not $modelIDPart) { return $null }
     $key = "$providerID/$modelIDPart"
@@ -159,9 +159,9 @@ function Invoke-OpencodeReview {
     $chosenVariant = 'default'
     $registryPath = Join-Path (Split-Path -Parent $PSScriptRoot) 'backends/_registry.json'
     $modelVariants = @()
-    if ($providerID -and (Test-Path $registryPath)) {
+    if ($providerID -and (Test-Path -LiteralPath $registryPath)) {
         try {
-            $registry = Get-Content -Raw $registryPath | ConvertFrom-Json
+            $registry = Get-Content -Raw -LiteralPath $registryPath | ConvertFrom-Json
             if ($registry._opencode_model_map) {
                 $providerEntry = $registry._opencode_model_map.$providerID
                 if ($providerEntry) {
@@ -200,7 +200,7 @@ function Invoke-OpencodeReview {
     $opencodeCli = Get-Command opencode -ErrorAction Stop
     $opencodeExe = if ($opencodeCli.Source -match '\.ps1$') {
         $cmdPath = $opencodeCli.Source -replace '\.ps1$', '.cmd'
-        if (-not (Test-Path $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
+        if (-not (Test-Path -LiteralPath $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
         $cmdPath
     } else { $opencodeCli.Source }
 
@@ -301,18 +301,18 @@ function Invoke-OpencodeReview {
         # killed stuck process still leaves a forensic clue.
         $snapshotPartialAndDebug = {
             param([string]$prefix)
-            $partialOut = (Get-Content -Raw $stdFile -ErrorAction SilentlyContinue)
-            $partialErr = (Get-Content -Raw $errFile -ErrorAction SilentlyContinue)
+            $partialOut = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
+            $partialErr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
             $cleanOut   = if ($partialOut) { $partialOut -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", '' } else { '' }
             $tailOut    = if ($cleanOut) { $cleanOut.Substring([math]::Max(0, $cleanOut.Length - 400)) } else { '<no stdout>' }
             $tailErr    = if ($partialErr) { $partialErr.Substring([math]::Max(0, $partialErr.Length - 400)) } else { '<no stderr>' }
             $debugDir   = Join-Path $env:TEMP 'opencode-stall-debug'
             $stamp      = (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + "-pid$PID"
             try {
-                if (-not (Test-Path $debugDir)) { $null = New-Item -ItemType Directory -Path $debugDir -Force }
-                Copy-Item $stdFile (Join-Path $debugDir "$prefix-$stamp-stdout.txt") -ErrorAction SilentlyContinue
-                Copy-Item $errFile (Join-Path $debugDir "$prefix-$stamp-stderr.txt") -ErrorAction SilentlyContinue
-                $existing = @(Get-ChildItem -Path $debugDir -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+                if (-not (Test-Path -LiteralPath $debugDir)) { $null = New-Item -ItemType Directory -Path $debugDir -Force }
+                Copy-Item -LiteralPath $stdFile -Destination (Join-Path $debugDir "$prefix-$stamp-stdout.txt") -ErrorAction SilentlyContinue
+                Copy-Item -LiteralPath $errFile -Destination (Join-Path $debugDir "$prefix-$stamp-stderr.txt") -ErrorAction SilentlyContinue
+                $existing = @(Get-ChildItem -LiteralPath $debugDir -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
                 if ($existing.Count -gt 40) {
                     $existing | Select-Object -Skip 40 | Remove-Item -Force -ErrorAction SilentlyContinue
                 }
@@ -361,14 +361,14 @@ function Invoke-OpencodeReview {
         try { $stdoutSink.Dispose() } catch {}
         try { $stderrSink.Dispose() } catch {}
 
-        $resultText = (Get-Content -Raw $stdFile -ErrorAction SilentlyContinue)
+        $resultText = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
         if (-not $resultText) { $resultText = '' }
-        $stderr = (Get-Content -Raw $errFile -ErrorAction SilentlyContinue)
+        $stderr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
         if (-not $stderr) { $stderr = '' }
         $clean = $resultText -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", ''
 
-        Remove-Item $stdFile -ErrorAction SilentlyContinue
-        Remove-Item $errFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stdFile -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         $sw.Stop()
     }
 
@@ -396,7 +396,7 @@ function Invoke-OpencodeReview {
         }
     }
 
-    $clean | Set-Content -Path $ResponsePath -Encoding utf8
+    $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
     return @{
         Response = $clean
         ExitCode = $exitCode
