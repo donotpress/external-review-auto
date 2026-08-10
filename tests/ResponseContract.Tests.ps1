@@ -55,6 +55,41 @@ Describe 'Get-EraResponseContract' -Tag Unit {
         $r = Get-EraResponseContract -PromptText '<!-- era-require: A:, , B: -->'
         @($r).Count | Should -Be 2
     }
+
+    It 'reads a marker that wraps across lines instead of silently dropping tokens' {
+        # (.+?) does not cross newlines without (?s), so a wrapped marker used to
+        # keep only the tokens on the first line -- and a dropped token is a
+        # contract silently weakened, which is the failure this feature exists to
+        # prevent. Prompts wrap; an editor's hard wrap must not disarm the gate.
+        $p = @"
+# Prompt
+<!-- era-require: ORDER:,
+     DROP-ENTIRELY:,
+     MISSING: -->
+## Output
+"@
+        $r = @(Get-EraResponseContract -PromptText $p)
+        $r | Should -Contain 'ORDER:'
+        $r | Should -Contain 'DROP-ENTIRELY:'
+        $r | Should -Contain 'MISSING:'
+        @($r).Count | Should -Be 3
+    }
+
+    It 'stops at the first --> and does not swallow the rest of the document' {
+        # The lazy quantifier must still terminate at the marker's own close,
+        # otherwise crossing newlines would let one marker eat the whole prompt.
+        $p = "<!-- era-require: A: -->`nBody text.`n<!-- some other comment -->`nMore."
+        $r = @(Get-EraResponseContract -PromptText $p)
+        @($r).Count | Should -Be 1
+        $r[0] | Should -Be 'A:'
+    }
+
+    It 'first marker wins when a prompt declares more than one (documented, not accidental)' {
+        $p = "<!-- era-require: A: -->`n<!-- era-require: B: -->"
+        $r = @(Get-EraResponseContract -PromptText $p)
+        @($r).Count | Should -Be 1
+        $r[0] | Should -Be 'A:'
+    }
 }
 
 Describe 'Test-ResponseContract' -Tag Unit {

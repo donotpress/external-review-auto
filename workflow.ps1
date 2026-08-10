@@ -1800,7 +1800,16 @@ function Get-EraResponseContract {
     [CmdletBinding()]
     param([AllowNull()][AllowEmptyString()][string]$PromptText)
     if ([string]::IsNullOrEmpty($PromptText)) { return @() }
-    if ($PromptText -notmatch '(?im)<!--\s*era-require:\s*(.+?)\s*-->') { return @() }
+    # (?s) so the marker may WRAP across lines. Without it, `.` stopped at the
+    # newline, `\s*-->` could not match, and the marker did not match AT ALL --
+    # a wrapped contract vanished silently and the round ran ungated. An editor
+    # hard-wrapping a long token list must not disarm the gate.
+    #
+    # The quantifier stays lazy and the `-->` terminator stays required, so
+    # crossing newlines cannot let one marker swallow the rest of the document.
+    # First marker wins (-match returns one hit); both are pinned by tests.
+    if ($PromptText -notmatch '(?ims)<!--\s*era-require:\s*(.+?)\s*-->') { return @() }
+    # Trim() covers the newlines and indentation a wrapped list introduces.
     return @($matches[1] -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 
