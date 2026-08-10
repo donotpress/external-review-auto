@@ -386,6 +386,14 @@ Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 | `ERA_AGY_FALLBACK` | (auto) | v1.10: when an **agy** reviewer fails to capture even after its retry, era auto-falls-back to a non-agy reviewer so the round still yields a review. Set to a preset (e.g. `gemini-api`) to pin the fallback, or `off`/`0` to disable. Triggers only on an actual agy failure — healthy runs are unaffected. |
 | `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |
 | `ERA_SPEC_GLOB` | `docs/superpowers/specs/*-design.md` | Glob for auto-detecting design spec files (topic slug, auto-detection, suggest command). Change for non-superpowers repos. Example: `'docs/**/*-design.md'` |
+| `ERA_BROAD_MAX_FILES` | `1000` | Scale-gate ceiling on a broad (no `-IncludeFiles`) bundle. Above it era refuses. See the broad-bundle gate above. |
+| `ERA_BROAD_MAX_BYTES` | `10MB` | Scale-gate byte ceiling, same gate. Non-numeric values warn and keep the default. |
+| `ERA_BROAD_FORCE` | (unset) | Set to `1` to consent to a broad bundle above the ceiling — the env-var equivalent of `-ForceBroadScope`. **`-Force` deliberately does NOT do this**; it only skips the cost prompt. |
+| `ERA_STRAGGLER_GRACE_SEC` | `300` | How long the dispatcher waits for the **last** outstanding reviewer once every other panel member has finished, before abandoning it. Sized from measured healthy spread (slowest trailed second-slowest by ≤136s across four real rounds), so it does not cut off a slow-but-working reviewer. Set `0` to wait out the full timeout instead. Only ever applies when exactly one reviewer is left. |
+| `ERA_PREVIOUS_ROUND_MAX_CHARS` | `80000` | Cap on the text `{{PREVIOUS_ROUND}}` expands to. Truncation keeps the head (grade/verdict/blockers) and says how much it dropped. The default is ~2x a measured three-reviewer round (40,400 chars), so a normal round is never truncated. |
+| `ERA_CONVERGENCE_WARNINGS` | (unset) | Set to `0` to suppress the convergence/anti-pattern warnings (e.g. slug-per-round detection). |
+| `ERA_OPENCODE_FIRST_TOKEN_SEC` | `120` | opencode first-token deadline. Must be an integer ≥ 10 (the poll interval); anything else warns and falls back to 120. |
+| `ERA_OPENCODE_VARIANT_STATE` | (unset) | Set to a truthy value (not `0`/`false`) to use per-variant opencode state when a non-`default` variant is selected. |
 
 ## Prompt templates
 
