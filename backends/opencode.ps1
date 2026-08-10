@@ -91,7 +91,12 @@ function Invoke-OpencodeReview {
         [string]$ModelOverride,
         # Accepted-and-ignored: the dispatcher passes -OpencodeProvider to every
         # adapter uniformly. The provider is derived from the model_id here.
-        [string]$OpencodeProvider
+        [string]$OpencodeProvider,
+        # Absolute path this adapter writes its native child PID to, so the
+        # dispatcher can tree-kill the process if this reviewer has to be
+        # abandoned early. Optional: omitted by callers that never abandon.
+        # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
+        [string]$PidFile
     )
     # Bundle access: ATTACH via `-f` for small bundles, READ TOOL for large ones.
     #
@@ -249,6 +254,10 @@ function Invoke-OpencodeReview {
 
     try {
         $opencodeProc = [System.Diagnostics.Process]::Start($psi)
+        # Publish the child PID before any blocking wait: once this thread is
+        # inside WaitForExit it cannot be interrupted, so this file is the
+        # dispatcher's only handle on the process.
+        if ($PidFile) { try { Set-Content -LiteralPath $PidFile -Value $opencodeProc.Id -ErrorAction SilentlyContinue } catch {} }
         # Close stdin immediately -- opencode run reads no context from stdin.
         $opencodeProc.StandardInput.Close()
 

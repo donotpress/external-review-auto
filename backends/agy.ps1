@@ -367,6 +367,10 @@ function _SpawnAndCaptureOnce {
     }
 
     $agyProc = [System.Diagnostics.Process]::Start($psi)
+    # Publish the child PID before any blocking wait: once this thread is
+    # inside WaitForExit it cannot be interrupted, so this file is the
+    # dispatcher's only handle on the process.
+    if ($PidFile) { try { Set-Content -LiteralPath $PidFile -Value $agyProc.Id -ErrorAction SilentlyContinue } catch {} }
     # Close stdin immediately so agy reads EOF, can't block on input
     $agyProc.StandardInput.Close()
     # Async-drain stdout/stderr to temp files so the OS buffers never fill.
@@ -502,7 +506,12 @@ function Invoke-AgyReview {
         [string]$ResolvedAgyModel,
         # Accepted-and-ignored: the dispatcher ScriptBlock passes -OpencodeProvider
         # to EVERY adapter uniformly. agy has no use for it.
-        [string]$OpencodeProvider
+        [string]$OpencodeProvider,
+        # Absolute path this adapter writes its native child PID to, so the
+        # dispatcher can tree-kill the process if this reviewer has to be
+        # abandoned early. Optional: omitted by callers that never abandon.
+        # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
+        [string]$PidFile
     )
 
     # --- Per-session model selection (no settings.json swap, no mutex). ---

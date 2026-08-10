@@ -350,6 +350,54 @@ function Invoke-PromptTokenSubstitution {
     Set-Content -LiteralPath $PromptFile -Value $newText -Encoding UTF8
 }
 
+function Stop-EraAdapterChild {
+    <#
+    .SYNOPSIS
+        Tree-kill the native process an adapter recorded in its PID file.
+
+    .DESCRIPTION
+        THIS EXISTS BECAUSE Stop-Job CANNOT DO IT. Measured directly: a
+        ThreadJob sitting inside Process.WaitForExit() cannot be interrupted, so
+        Stop-Job BLOCKS INDEFINITELY (observed still blocked after minutes) and
+        the native child stays alive the whole time.
+
+        That is why the dispatcher's old budget was TimeoutSec+30 and never
+        less: by the time it fired, the adapter's OWN timeout had already
+        thrown, tree-killed its child and returned, so the job was no longer
+        blocked and Stop-Job completed instantly. Any attempt to abandon a
+        reviewer EARLIER has to kill the child itself -- killing the job first
+        deadlocks the dispatcher.
+
+        So the order is: kill the CHILD, the adapter's WaitForExit returns, its
+        own finally block runs (agy.ps1:443, claude.ps1:160, opencode.ps1:352
+        all tree-kill defensively there), the job completes on its own, and only
+        then is Stop-Job cheap.
+
+    .OUTPUTS
+        [bool] — $true if a live process was found and killed.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PidFile
+    )
+    if (-not $PidFile -or -not (Test-Path -LiteralPath $PidFile)) { return $false }
+    $raw = (Get-Content -LiteralPath $PidFile -Raw -ErrorAction SilentlyContinue)
+    if (-not $raw) { return $false }
+    $childPid = 0
+    if (-not [int]::TryParse($raw.Trim(), [ref]$childPid) -or $childPid -le 0) { return $false }
+    $proc = Get-Process -Id $childPid -ErrorAction SilentlyContinue
+    if (-not $proc) { return $false }
+    try {
+        # $true = tree-kill. The launchers are shims (agy.cmd -> node,
+        # claude -> node, opencode -> node); a bare Kill() orphans the child.
+        $proc.Kill($true)
+        $null = $proc.WaitForExit(10000)
+        return $true
+    } catch {
+        return $false
+    }
+}
+
 function Test-EraStragglerExpired {
     <#
     .SYNOPSIS
@@ -1096,6 +1144,11 @@ function Invoke-ReviewerDispatch {
         $suffixList = if ($SuffixReviewerList) { $SuffixReviewerList } else { $ReviewerList }
         $suffix = Get-ResponseFilenameSuffix -ReviewerList $suffixList -Preset $r
         $respPath = Join-Path $ReviewDir "round-$Round$suffix-response.md"
+        # Where this reviewer's adapter records its native child PID, so the
+        # dispatcher can tree-kill it if the reviewer has to be abandoned early.
+        # See Stop-EraAdapterChild for why Stop-Job cannot do this.
+        $pidPath  = "$respPath.pid"
+        Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
         $adapterPath = Join-Path $skillRoot "backends/$($modelInfo.backend).ps1"
         $fnName = "Invoke-$((Get-Culture).TextInfo.ToTitleCase($modelInfo.backend))Review"
         $opencodeProvider = if ($ProviderOverrides.ContainsKey($r)) { $ProviderOverrides[$r] } else { $null }
@@ -1114,7 +1167,7 @@ function Invoke-ReviewerDispatch {
             }
         } else { $null }
         $job = Start-ThreadJob -Name "review-$r" -ThrottleLimit 4 -ScriptBlock {
-            param($adapterPath, $bp, $pp, $rp, $mi, $to, $fnName, $agyHint, $modelOverride, $opencodeProvider, $resolvedAgyModel)
+            param($adapterPath, $bp, $pp, $rp, $mi, $to, $fnName, $agyHint, $modelOverride, $opencodeProvider, $resolvedAgyModel, $pidFile)
             try {
                 . $adapterPath
                 $commonArgs = @{
@@ -1131,6 +1184,12 @@ function Invoke-ReviewerDispatch {
                 # supports it (its param block declares it).
                 if ((Get-Command $fnName).Parameters.ContainsKey('ResolvedAgyModel')) {
                     $commonArgs['ResolvedAgyModel'] = $resolvedAgyModel
+                }
+                # -PidFile is declared only by the adapters that spawn a native
+                # child (agy/claude/opencode). The REST adapters have no child to
+                # kill, so they never declare it and never get it.
+                if ((Get-Command $fnName).Parameters.ContainsKey('PidFile')) {
+                    $commonArgs['PidFile'] = $pidFile
                 }
                 $h = & $fnName @commonArgs
                 $h.Preset = $mi.preset
@@ -1153,8 +1212,8 @@ function Invoke-ReviewerDispatch {
                     TruncationWarning = $null
                 }
             }
-        } -ArgumentList @($adapterPath, $BundlePath, $PromptPath, $respPath, $modelInfo, $TimeoutSec, $fnName, $AgyModelHint, $ModelOverrides[$r], $opencodeProvider, $resolvedAgyModelForReviewer)
-        [pscustomobject]@{ Job = $job; Preset = $r; ResponsePath = $respPath }
+        } -ArgumentList @($adapterPath, $BundlePath, $PromptPath, $respPath, $modelInfo, $TimeoutSec, $fnName, $AgyModelHint, $ModelOverrides[$r], $opencodeProvider, $resolvedAgyModelForReviewer, $pidPath)
+        [pscustomobject]@{ Job = $job; Preset = $r; ResponsePath = $respPath; PidPath = $pidPath }
     }
 
     $allJobs = $dispatched | ForEach-Object { $_.Job }
@@ -1192,7 +1251,34 @@ function Invoke-ReviewerDispatch {
         }
         $stopReason = Test-EraStragglerExpired -ElapsedSec $elapsed -Outstanding $outstanding `
             -Total @($allJobs).Count -BudgetSec $budgetSec -GraceSec $graceSec -LoneSinceSec $loneSince
-        if ($stopReason) { break }
+        if ($stopReason -eq 'grace') {
+            # DO NOT Stop-Job here. Measured: a ThreadJob blocked inside
+            # Process.WaitForExit() cannot be interrupted, so Stop-Job blocks
+            # indefinitely and hangs the dispatcher while the child keeps
+            # running. Kill the CHILD; the adapter's WaitForExit then returns,
+            # its finally tree-kills defensively, and the job ends by itself.
+            $straggler = @($dispatched | Where-Object { $_.Job.State -notin $doneStates })[0]
+            $killed = $false
+            if ($straggler) { $killed = Stop-EraAdapterChild -PidFile $straggler.PidPath }
+            if ($killed) {
+                Write-Host "[dispatch] Abandoned straggler '$($straggler.Preset)' after ${graceSec}s grace: tree-killed its child process."
+                $unwindBy = (Get-Date).AddSeconds(20)
+                while ($straggler.Job.State -notin $doneStates -and (Get-Date) -lt $unwindBy) {
+                    Start-Sleep -Milliseconds 200
+                }
+                break
+            }
+            # No killable child (a REST adapter, or the PID was never recorded).
+            # Abandoning would mean Stop-Job on a possibly-blocked job, which is
+            # exactly the hang above, so fall back to the ONLY safe behaviour:
+            # wait for the adapter's own timeout, as the +30s budget margin
+            # was always designed to do. Disable the grace so this cannot spin.
+            $who = if ($straggler) { $straggler.Preset } else { 'unknown' }
+            Write-Host "[dispatch] Straggler '$who' has no killable child; waiting out its own timeout instead (grace disabled for this round)."
+            $graceSec   = 0
+            $stopReason = ''
+        }
+        elseif ($stopReason) { break }
         Start-Sleep -Milliseconds 500
     }
 

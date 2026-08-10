@@ -52,7 +52,12 @@ function Invoke-ClaudeReview {
         [int]$TimeoutSec = 600,
         [string]$AgyModelHint,
         [string]$ModelOverride,
-        [string]$OpencodeProvider
+        [string]$OpencodeProvider,
+        # Absolute path this adapter writes its native child PID to, so the
+        # dispatcher can tree-kill the process if this reviewer has to be
+        # abandoned early. Optional: omitted by callers that never abandon.
+        # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
+        [string]$PidFile
     )
     $prompt = "Review the codebase XML provided. Instructions are at the bottom of the content."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -131,6 +136,10 @@ function Invoke-ClaudeReview {
     $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
+        # Publish the child PID before any blocking wait: once this thread is
+        # inside WaitForExit it cannot be interrupted, so this file is the
+        # dispatcher's only handle on the process.
+        if ($PidFile) { try { Set-Content -LiteralPath $PidFile -Value $claudeProc.Id -ErrorAction SilentlyContinue } catch {} }
 
         # Async-drain stdout/stderr so OS buffers never fill.
         # FileShare.ReadWrite (not File.Create's default None) so the files can be
