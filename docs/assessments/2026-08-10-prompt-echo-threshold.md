@@ -5,7 +5,13 @@
 `maxOutputTokens=8192` and what landed on disk was THE PROMPT, ECHOED BACK
 **Verdict:** real, undetectable by every existing gate, and cleanly separable
 from legitimate reviews. **Implemented** as `Test-EraPromptEcho` in
-`backends/_capture-validation.ps1`, W=120 / K=40 / threshold 0.15.
+`backends/_capture-validation.ps1`, W=120 / K=40 / threshold 0.15,
+**bidirectional**.
+
+> **REVISED 2026-08-11 after the round-5 panel.** The first implementation was
+> one-directional and the threshold below was derived from the wrong corpus. See
+> "The regression this document caused" at the end. The tables above the
+> revision are kept as written, because the error is the point.
 
 ## Why nothing already caught it
 
@@ -107,3 +113,74 @@ otherwise dilute the ratio and inflate the length floor). A hit is
 so unlike a genuine bad capture there is no evidence in it worth keeping, and
 leaving it off disk keeps it away from the `round-N-*-response.md` glob
 entirely.
+
+
+---
+
+# The regression this document caused
+
+**Found by:** the round-5 grading panel (opus), hours after the detector shipped.
+**Status:** fixed — the ratio is now computed in both directions and both must
+clear the threshold.
+
+## What was wrong
+
+The corpus above is 69 pairs drawn from `.external-reviews/`, and I treated it
+as representative. It is not. The geometry of the metric is:
+
+```
+false positive requires a contiguous verbatim run of
+    WindowChars + 5 * span / (Samples - 1)   characters
+```
+
+- Against the 3–85 KB hand-written prompts most of the corpus is built from,
+  that is **~11,000 contiguous characters**. Hence the honest 0.000.
+- Against era's **own default template** (~628 chars normalised, `era.ps1:886-915`),
+  it is **~195 characters**. Two adjacent sentences of that template are 314.
+
+**34 of the 50 historical prompts are under 2,000 characters; 28 are under
+1,000.** The short regime is the dominant one in practice, and it is the one I
+did not measure. This document even names the axis — *"partial-echo sensitivity
+scales with prompt length and entropy"* — and then tests only the safe end of it.
+
+Reproduced: a **7,655-character genuine review** with 70 file:line findings,
+which restated 314 characters of its own instructions at the top, was flagged as
+an echo. Cost of that false positive: `ExitCode=-1`, **no artifact written** (the
+echo path deliberately writes nothing, so the good review is destroyed with no
+copy on disk), a billed fallback dispatch, and on a solo run `exit 2` on a round
+that had a usable review in hand.
+
+Fixing silent-success produced silent-failure.
+
+## The fix
+
+An echo is prompt-shaped in **both** directions; a review that merely quotes its
+instructions is prompt-shaped in one. Sample windows from the prompt into the
+response *and* from the response into the prompt, and require both.
+
+| case | forward | reverse | verdict |
+|---|---|---|---|
+| full echo | ~1.00 | ~1.00 | flagged |
+| quarter echo | ~0.23 | ~1.00 | flagged |
+| review quoting 314 chars of a 628-char prompt inside a 7,655-char answer | ~0.30 | ~0.05 | **passes** |
+
+## Re-derived, this time in both regimes
+
+| prompt regime | pairs | legit max (both directions) | full echo | half echo | quarter echo |
+|---|---:|---:|---:|---:|---:|
+| short (<2,000 ch) | 34 | **0.000** | 1.000 | 0.375 | n/a¹ |
+| long (≥2,000 ch) | 39 | **0.000** | 1.000 | 0.500–0.950 | 0.250–0.450 |
+
+¹ A quarter of a ~628-char prompt falls under the 240-char guard and is not
+judged at all. That is correct: a response that short is a non-review and
+belongs to the narration detector's 300-char length floor, not here.
+
+0.15 remains the threshold — now above every legitimate value in **both**
+regimes and below the worst measurable true positive.
+
+## The lesson, stated plainly
+
+The measurement was rigorous and the conclusion was wrong, because the sample
+was drawn from the regime I happened to have data for rather than the regime the
+code ships in. A threshold is only as good as the distribution it was fitted to,
+and "69 real pairs" sounded like enough evidence to stop looking.

@@ -332,6 +332,85 @@ every claim. If you cannot verify something, say so rather than guessing.
         Test-EraPromptEcho -PromptText $over -Response $over | Should -BeTrue
     }
 
+    It 'does NOT flag a real review that restates its instructions (SHORT shipped prompt)' {
+        # THE REGRESSION opus found in round 5, reproduced.
+        #
+        # The threshold was derived only against the 3-85 KB hand-written prompts
+        # in .external-reviews/. It ships against era's own DEFAULT template,
+        # which is ~628 chars normalised. The geometry: a false positive needs a
+        # contiguous verbatim run of 120 + 5*span/39 chars. At 85 KB that is
+        # ~11,000 chars (hence the honest 0.000). At 628 chars it is ~195 -- and
+        # two adjacent sentences of era's own template are 314.
+        #
+        # 34 of the 50 historical prompts in the corpus are under 2,000 chars and
+        # 28 are under 1,000, so the SHORT regime is the dominant one in practice
+        # and is precisely the one that was never measured.
+        #
+        # Cost of the false positive: ExitCode=-1, NO artifact written (the echo
+        # path deliberately writes nothing), a billed fallback dispatch, and on a
+        # solo run exit 2 on a round that had a good review in hand.
+        $shortPrompt = @"
+# External Review Prompt - My Topic
+
+You are reviewing the attached codebase bundle. Provide structured feedback.
+
+All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
+## Output format
+
+## Critical issues
+1. ...
+
+## Important issues
+1. ...
+
+Be terse. If a section is empty, write "(none)".
+"@
+        # A model restating its constraints before answering -- common behaviour.
+        $restated = 'All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle. Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.'
+        $findings = (1..70 | ForEach-Object { "- finding $_ : workflow.ps1:$(1000 + $_) mishandles the retry budget when the child is killed at the deadline." }) -join "`n"
+        $goodReview = "Understood. Restating my constraints before I begin:`n`n$restated`n`n## Critical issues`n$findings`n`n## What looks good`n1. The artifact-grounded content_ok is sound."
+
+        $goodReview.Length | Should -BeGreaterThan 5000 -Because 'this is a substantial, genuine review'
+        Test-EraPromptEcho -PromptText $shortPrompt -Response $goodReview | Should -BeFalse
+    }
+
+    It 'STILL flags a full echo of that same SHORT prompt (the fix must not disarm the detector)' {
+        $shortPrompt = @"
+# External Review Prompt - My Topic
+
+You are reviewing the attached codebase bundle. Provide structured feedback.
+
+All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+
+Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
+## Output format
+
+## Critical issues
+1. ...
+
+Be terse. If a section is empty, write "(none)".
+"@
+        Test-EraPromptEcho -PromptText $shortPrompt -Response $shortPrompt | Should -BeTrue
+    }
+
+    It 'requires overlap in BOTH directions, not just prompt-into-response' {
+        # The structural property that kills the false-positive class: an echo is
+        # mostly-prompt in BOTH directions; a review that quotes its prompt is
+        # only prompt-shaped in one.
+        $prompt = ('Review the dispatcher for correctness of the retry loop and the cost caps, citing file and line for every claim you make. ' * 6)
+        $quote  = $prompt.Substring(0, 400)
+        $review = $quote + ' ' + (('## Findings ' + ('- workflow.ps1:1517 trusts ContentOk over the artifact on disk, which is the defect. ' * 60)))
+        # Forward overlap is high (the quote covers much of a short prompt)...
+        # ...but the review is overwhelmingly NOT prompt text, so it must pass.
+        Test-EraPromptEcho -PromptText $prompt -Response $review | Should -BeFalse
+        # And the echo of that same prompt must still fire.
+        Test-EraPromptEcho -PromptText $prompt -Response $prompt | Should -BeTrue
+    }
+
     It 'is safe on null / empty input' {
         Test-EraPromptEcho -PromptText $null -Response $null | Should -BeFalse
         Test-EraPromptEcho -PromptText $script:Prompt -Response '' | Should -BeFalse
