@@ -313,13 +313,18 @@ Describe 'era.ps1 exits 2 on a void round' -Tag Unit {
         # the dispatcher (an empty approved list cannot bind to its Mandatory
         # parameter) and the gate after the metadata writer. Anchor on both
         # rather than on "the first one".
+        # SUPERSEDED again 2026-08-14: this asserted the COUNT of call sites
+        # (2), and broke when a third legitimate one was added -- the fallback
+        # now asks the same report for UsableCount before deciding to spend.
+        # Pin the POSITIONS, which is the actual invariant, so a fourth honest
+        # caller does not fail the suite.
         $metaIdx  = $script:EraSrc.IndexOf('Write-ReviewMetadata -ReviewDir')
         $dispatch = $script:EraSrc.IndexOf('$results = Invoke-ReviewerDispatch')
         $calls    = [regex]::Matches($script:EraSrc, 'Get-EraVoidRoundReport -ReviewDir')
         $metaIdx  | Should -BeGreaterThan 0
-        $calls.Count | Should -Be 2 -Because 'one guard before dispatch, one gate after metadata'
-        $calls[0].Index | Should -BeLessThan $dispatch -Because 'the guard must pre-empt the binding error'
-        $calls[1].Index | Should -BeGreaterThan $metaIdx -Because 'the telemetry must survive the non-zero exit'
+        $calls.Count | Should -BeGreaterOrEqual 2
+        $calls[0].Index | Should -BeLessThan $dispatch -Because 'the guard must pre-empt the empty-array binding error'
+        $calls[$calls.Count - 1].Index | Should -BeGreaterThan $metaIdx -Because 'the telemetry must survive the non-zero exit'
     }
 
     It 'no exit-2 path sets $runSucceeded first, so every failed run leaves its repomix receipt' {

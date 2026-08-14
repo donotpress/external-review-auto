@@ -1020,6 +1020,13 @@ Be terse. If a section is empty, write "(none)".
     # the prompt, it just must be read before untrusted text is spliced in.
     $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
 
+    # Did the CALLER ask for the previous round themselves? Must be recorded
+    # here: Invoke-PromptTokenSubstitution below consumes the token, so after it
+    # runs there is no way to tell. The -Diff block downstream uses this to avoid
+    # carrying the whole panel a second time (see Get-EraDiffPreviousReviewBlock).
+    $script:PromptHadPreviousRoundToken =
+        ((Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue) -match '\{\{PREVIOUS_ROUND\}\}')
+
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
     # If the finalized prompt contains {{PREVIOUS_ROUND}}, replace it with the
     # prior round's response text. Must run AFTER the prompt file is finalized
@@ -1179,6 +1186,11 @@ Be terse. If a section is empty, write "(none)".
             # it is in-flight-aware, skips demoted *.rejected.md answers, and
             # honours ERA_PREVIOUS_ROUND_MAX_CHARS.
             $priorResponse = Get-EraPreviousRoundText -ReviewDir $reviewDir -PreviousRound $priorRound
+            # Empty when the caller's own {{PREVIOUS_ROUND}} already put the panel
+            # in the prompt -- otherwise Merge-EraDiffPrompt concatenates panel
+            # onto panel, up to 160 KB of duplicated prior-round text per reviewer.
+            $previousReviewBlock = Get-EraDiffPreviousReviewBlock -PreviousText $priorResponse `
+                -AlreadyInPrompt $script:PromptHadPreviousRoundToken
             $changesSummary = @()
             if ($diffResult.Added) { $changesSummary += "Added: $($diffResult.Added -join ', ')" }
             if ($diffResult.Changed) { $changesSummary += "Changed: $($diffResult.Changed -join ', ')" }
@@ -1186,10 +1198,7 @@ Be terse. If a section is empty, write "(none)".
             $diffPrompt = @"
 # Follow-up Review - $TopicSlug, Round $round
 
-<previous_review>
-$($priorResponse)
-</previous_review>
-
+$($previousReviewBlock)
 ## What changed since round $priorRound
 
 $($changesSummary -join "`n")
@@ -1684,7 +1693,18 @@ Be terse. If a section is empty, write "(none)".
         # contract-checked afterwards.
         $failedRecoverable = @(Get-EraRecoverableFailures -ReviewerList $approvedList `
             -Results $results -Registry $registryHash)
-        if ($failedRecoverable.Count -gt 0) {
+        # Recover only when the round would otherwise be EMPTY. UsableCount is
+        # the artifact-grounded count from the void report, so "usable" means the
+        # same thing here as it does at the gate that decides exit 2.
+        $usableSoFar = (Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
+            -Results $results -RequestedCount @($reviewerList).Count).UsableCount
+        if (-not (Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar)) {
+            if ($failedRecoverable.Count -gt 0) {
+                Write-Host ("[era] {0} reviewer(s) failed recoverably ({1}), but the round already has {2} usable review(s); skipping the fallback." -f `
+                    $failedRecoverable.Count, ($failedRecoverable -join ', '), $usableSoFar)
+            }
+        }
+        elseif ($failedRecoverable.Count -gt 0) {
             # Hydrate subscription keys so opencode/nvidia fallbacks register as available.
             Resolve-EraAuthJsonKeys -ApiKeyEnvs @($registryHash.Keys | ForEach-Object { $registryHash[$_].api_key_env })
             # Exclude the FULL requested list, not just the approved one. A

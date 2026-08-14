@@ -153,3 +153,45 @@ Describe 'era.ps1 drives the fallback from that one decision' -Tag Unit {
         $script:EraSrc | Should -Match '\$fbCost -gt \$fbCap'
     }
 }
+
+Describe 'Test-EraFallbackNeeded — recover only when the round would otherwise be short' -Tag Unit {
+    # Round-6 (opus), finding 5. era.ps1 dispatched the fallback whenever
+    # $failedRecoverable.Count -gt 0, with no reference to whether a usable
+    # review already existed. Under the old agy-only trigger that was rare;
+    # 1f80b69 widened recovery to agentic-narration-capture and prompt-echo on
+    # ANY backend, so one flaky member of a healthy panel now buys a fourth
+    # full-bundle upload for nothing.
+    #
+    # Measured against the existing metadata, no new dispatch needed:
+    #   era-grade round 4: 3/4 usable, fallback $0.0232
+    #   era-grade round 6: 2/4 usable, fallback $0.0457
+    # Round 6 paid for this itself -- deepseek failed, the fallback fired, and
+    # opus and gemini had already returned usable reviews.
+    #
+    # The fallback exists to stop an EMPTY round. If the round already has an
+    # answer, a further full-bundle dispatch buys marginal diversity the caller
+    # did not ask for.
+
+    It 'fires when something is recoverable and nothing usable came back' {
+        Test-EraFallbackNeeded -RecoverableCount 1 -UsableCount 0 | Should -BeTrue
+        Test-EraFallbackNeeded -RecoverableCount 3 -UsableCount 0 | Should -BeTrue
+    }
+
+    It 'does NOT fire when the round already has a usable review' {
+        Test-EraFallbackNeeded -RecoverableCount 1 -UsableCount 1 | Should -BeFalse
+        Test-EraFallbackNeeded -RecoverableCount 1 -UsableCount 2 | Should -BeFalse -Because 'round 6: 2 usable and a fallback was billed anyway'
+    }
+
+    It 'does not fire when nothing is recoverable, whatever the round looks like' {
+        Test-EraFallbackNeeded -RecoverableCount 0 -UsableCount 0 | Should -BeFalse
+        Test-EraFallbackNeeded -RecoverableCount 0 -UsableCount 3 | Should -BeFalse
+    }
+
+    It 'era.ps1 gates the fallback on it, and counts usable the same way the void gate does' {
+        $era = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+        $era | Should -Match 'Test-EraFallbackNeeded'
+        # One definition of "usable": the artifact-grounded count from the void report.
+        $gate = $era.IndexOf('Test-EraFallbackNeeded')
+        $era.Substring([Math]::Max(0,$gate-900), 1000) | Should -Match 'Get-EraVoidRoundReport'
+    }
+}

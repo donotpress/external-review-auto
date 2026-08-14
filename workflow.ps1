@@ -306,6 +306,38 @@ function Get-ReviewDiff {
     }
 }
 
+function Get-EraDiffPreviousReviewBlock {
+    <#
+    .SYNOPSIS
+        The <previous_review> block for a -Diff prompt -- empty when the caller's
+        prompt already carried the previous round itself.
+
+    .DESCRIPTION
+        Round-6 finding, a regression from 4e6f6c4.
+        Invoke-PromptTokenSubstitution has ALREADY expanded {{PREVIOUS_ROUND}}
+        into the prompt file by the time the -Diff block runs. The diff block
+        then built <previous_review> from a SECOND Get-EraPreviousRoundText call
+        and Merge-EraDiffPrompt concatenated the two. Before 4e6f6c4 the
+        duplicate was canonical (one review) + panel (three); afterwards it was
+        panel + panel. Each call caps independently at 80,000 chars, so the
+        ceiling was 160 KB of duplicated prior-round text -- uploaded once per
+        reviewer.
+
+        Detect it on a real artifact:
+            (Select-String -Path round-N-prompt.md -Pattern '^### Reviewer: ' `
+                -AllMatches).Matches.Count
+        Three for a three-model panel; six means it is carried twice.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$PreviousText,
+        [bool]$AlreadyInPrompt
+    )
+    if ($AlreadyInPrompt) { return '' }
+    if ([string]::IsNullOrWhiteSpace($PreviousText)) { return '' }
+    return "<previous_review>`n$PreviousText`n</previous_review>`n"
+}
+
 function Merge-EraDiffPrompt {
     <#
     .SYNOPSIS
@@ -1840,6 +1872,38 @@ function Test-EraReviewerArtifact {
         return [bool](Test-Path -LiteralPath (Join-Path $ReviewDir "round-$Round-response.md"))
     }
     return $false
+}
+
+function Test-EraFallbackNeeded {
+    <#
+    .SYNOPSIS
+        Should the one bounded fallback re-dispatch actually run? Only when
+        something is recoverable AND the round has nothing usable yet.
+
+    .DESCRIPTION
+        Round-6 finding. era dispatched the fallback whenever anything was
+        recoverable, with no reference to whether a usable review already
+        existed. Under the original agy-only trigger that was rare; 1f80b69
+        widened recovery to agentic-narration-capture and prompt-echo on ANY
+        backend, which made "one flaky member of a healthy panel" the common
+        case -- and each occurrence buys a full extra bundle upload.
+
+        Measured over the existing rounds, no new dispatch needed:
+            era-grade round 4: 3/4 usable, fallback billed $0.0232
+            era-grade round 6: 2/4 usable, fallback billed $0.0457
+        Round 6 paid for it live: deepseek returned a 154-char non-review, the
+        fallback fired, and opus and gemini had already returned real reviews.
+
+        The fallback exists to stop an EMPTY round. If the round already has an
+        answer, another full-bundle dispatch buys marginal diversity the caller
+        did not ask for and did not price.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$RecoverableCount,
+        [Parameter(Mandatory)][int]$UsableCount
+    )
+    return (($RecoverableCount -gt 0) -and ($UsableCount -eq 0))
 }
 
 function Get-EraRecoverableFailures {

@@ -113,3 +113,39 @@ Describe 'era.ps1 marks every prompt that carries caller content' -Tag Unit {
             Should -BeGreaterOrEqual 4 -Because 'override, pending-prompt, SpecReview, and both ConversationFile paths'
     }
 }
+
+Describe 'Get-EraDiffPreviousReviewBlock — never carry the panel twice' -Tag Unit {
+    # Round-6 (opus), finding 3: a regression from 4e6f6c4 (mine).
+    # Invoke-PromptTokenSubstitution has ALREADY expanded {{PREVIOUS_ROUND}} into
+    # $promptPath by the time the -Diff block runs, and the diff block then built
+    # <previous_review> from a SECOND call to Get-EraPreviousRoundText, which
+    # Merge-EraDiffPrompt concatenates onto it. Before 4e6f6c4 the duplicate was
+    # canonical (1 review) + panel (3); afterwards it is panel + panel. Each call
+    # caps independently at 80,000 chars, so the ceiling is 160 KB of duplicated
+    # prior-round text, uploaded once per reviewer.
+
+    It 'omits the block when the prompt already carried {{PREVIOUS_ROUND}}' {
+        Get-EraDiffPreviousReviewBlock -PreviousText 'panel text' -AlreadyInPrompt $true |
+            Should -BeNullOrEmpty
+    }
+
+    It 'emits it when the prompt did not' {
+        $b = Get-EraDiffPreviousReviewBlock -PreviousText 'panel text' -AlreadyInPrompt $false
+        $b | Should -Match 'previous_review'
+        $b | Should -Match 'panel text'
+    }
+
+    It 'emits nothing for empty previous text either way' {
+        Get-EraDiffPreviousReviewBlock -PreviousText '' -AlreadyInPrompt $false | Should -BeNullOrEmpty
+    }
+
+    It 'era.ps1 records whether the prompt carried the token BEFORE substituting it' {
+        $era = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+        $era | Should -Match 'Get-EraDiffPreviousReviewBlock'
+        # The flag must be captured before Invoke-PromptTokenSubstitution consumes the token.
+        $flag  = $era.IndexOf('PromptHadPreviousRoundToken')
+        $subst = $era.IndexOf('Invoke-PromptTokenSubstitution -PromptFile')
+        $flag  | Should -BeGreaterThan 0
+        $flag  | Should -BeLessThan $subst -Because 'after substitution the token is gone and cannot be detected'
+    }
+}
