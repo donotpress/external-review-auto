@@ -1,0 +1,147 @@
+#!/usr/bin/env pwsh
+#Requires -Version 7.0
+<#
+.SYNOPSIS
+    Dispatch the next grading round of this skill against itself.
+
+.DESCRIPTION
+    Rounds 1-5 were assembled by hand, and the round-5 prompt lived in a temp
+    directory that did not survive. This makes the next round one command, and
+    keeps the rounds COMPARABLE -- same axes, same contract, same output format,
+    so the grade means the same thing each time.
+
+    Continuity is derived, not typed:
+
+      * the round number comes from era's own atomic reservation
+      * {{PREVIOUS_ROUND}} carries every reviewer's last-round response
+        (Get-EraPreviousRoundText -- all of them, not just the promoted one)
+      * "what changed" is read from the LAST ROUND'S MANIFEST, which stamps the
+        commit that round actually reviewed (git_head). No bookkeeping to keep
+        in sync and nothing to remember.
+
+.PARAMETER DryRun
+    Assemble the prompt, print it and the exact dispatch command, and stop.
+    Costs nothing. Use it first.
+
+.PARAMETER Topic
+    Review topic. Default 'era-grade' -- the continuous series.
+
+.PARAMETER Reviewer
+    Passed through to era.ps1. Omit for the default three-model panel.
+    Measured cost of that panel: ~$0.88/round, opus ~93% of it. For a cheap
+    check, 'gemini,deepseek-flash' costs cents and still finds structural bugs.
+
+.EXAMPLE
+    pwsh tools/grade-round.ps1 -DryRun
+    pwsh tools/grade-round.ps1
+    pwsh tools/grade-round.ps1 -Reviewer gemini,deepseek-flash
+#>
+[CmdletBinding()]
+param(
+    [switch]$DryRun,
+    [string]$Topic = 'era-grade',
+    [string]$Reviewer,
+    [string[]]$IncludeFiles
+)
+
+$ErrorActionPreference = 'Stop'
+$skillRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -LiteralPath $skillRoot
+
+# The bundle. Code first: the questions are about correctness, not prose, and a
+# bigger bundle costs money and raises the odds a reviewer truncates.
+if (-not $IncludeFiles) {
+    $IncludeFiles = @(
+        'workflow.ps1'
+        'runtimes/era.ps1'
+        'backends/agy.ps1'
+        'backends/claude.ps1'
+        'backends/opencode.ps1'
+        'backends/geminiapi.ps1'
+        'backends/openaicompat.ps1'
+        'backends/anthropic.ps1'
+        'backends/_capture-validation.ps1'
+        'tests/DispatchThreadJob.Tests.ps1'
+        'tests/VoidRound.Tests.ps1'
+        'tests/EchoCalibration.Tests.ps1'
+        'tests/RecoveryFallback.Tests.ps1'
+        'docs/assessments/2026-08-10-prompt-echo-threshold.md'
+        'docs/assessments/2026-08-10-threadjob-coverage.md'
+    )
+}
+
+# --- What was graded last time? ------------------------------------------
+# The manifest stamps the commit the round actually saw, so the delta needs no
+# separate bookkeeping. git_clean=false means that round covered no single
+# commit; say so rather than implying a clean range.
+$reviewDir = Join-Path $skillRoot ".external-reviews/$Topic"
+$lastManifest = Get-ChildItem -LiteralPath $reviewDir -Filter 'round-*-manifest.json' -ErrorAction SilentlyContinue |
+    Sort-Object { [int]([regex]::Match($_.Name, '\d+').Value) } | Select-Object -Last 1
+
+$changes = ''
+if ($lastManifest) {
+    $m = Get-Content -Raw -LiteralPath $lastManifest.FullName | ConvertFrom-Json
+    $lastRound = $m.round
+    $lastHead  = $m.git_head
+    if ($lastHead) {
+        $log  = @(& git log --oneline "$lastHead..HEAD" 2>$null)
+        $stat = (& git diff --shortstat "$lastHead..HEAD" 2>$null) -join ''
+        if ($log.Count -eq 0) {
+            $changes = "## Nothing has changed since round $lastRound`n`n" +
+                       "HEAD is still ``$lastHead``. Grade the same tree again only if you " +
+                       "believe the previous round missed something; otherwise say so and stop."
+        } else {
+            $fence = '```'   # not inline: ` is PowerShell's escape character
+            $dirtyNote = if ($m.git_clean -eq $false) {
+                "`n`n(Round $lastRound ran over a DIRTY tree, so its baseline covers no single commit; " +
+                "the range above is approximate at its lower end.)"
+            } else { '' }
+            $changes = "## What changed since round $lastRound (``$($lastHead.Substring(0,7))..HEAD``)`n`n" +
+                       "$stat`n`n$fence`n" + ($log -join "`n") + "`n$fence`n" + $dirtyNote +
+                       "`n`nVerify this list against the code. Commit messages in this repo state " +
+                       "measured numbers; treat them as claims to check, not as evidence."
+        }
+    }
+}
+if (-not $changes) {
+    $changes = "## First graded round for this topic`n`nNo prior manifest found; grade the tree as it stands."
+}
+
+# --- Assemble ------------------------------------------------------------
+$template = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'docs/grading-prompt.md')
+# .Replace, not -replace: the changes block contains $ and \ from paths and code.
+$prompt = $template.Replace('{{CHANGES_SINCE}}', $changes)
+
+$promptPath = Join-Path ([System.IO.Path]::GetTempPath()) "era-grade-prompt-$(Get-Date -Format 'yyyyMMdd-HHmmss').md"
+Set-Content -LiteralPath $promptPath -Value $prompt -Encoding utf8
+
+$eraArgs = @(
+    '-TopicSlug', $Topic
+    '-PromptOverrideFile', $promptPath
+    '-IncludeFiles', ($IncludeFiles -join ',')
+    '-AllowDirtyTree'      # this repo carries untracked META-REVIEW notes by design
+    '-Force'
+)
+if ($Reviewer) { $eraArgs += @('-Reviewer', $Reviewer) }
+
+Write-Host "[grade] Prompt : $promptPath"
+Write-Host "[grade] Bundle : $($IncludeFiles.Count) files"
+Write-Host "[grade] Command: pwsh runtimes/era.ps1 $($eraArgs -join ' ')"
+
+if ($DryRun) {
+    Write-Host ''
+    Write-Host '--- assembled prompt -------------------------------------------------'
+    Write-Host $prompt
+    Write-Host '--- end (dry run: nothing dispatched, nothing spent) -----------------'
+    return
+}
+
+& (Join-Path $skillRoot 'runtimes/era.ps1') @eraArgs
+$code = $LASTEXITCODE
+Write-Host "[grade] era exit code: $code"
+switch ($code) {
+    0 { Write-Host "[grade] Responses in $reviewDir. Adjudicate before believing: turn each finding into a failing test or a probe." }
+    2 { Write-Host "[grade] EXIT 2 = the round produced NO usable review. Money was spent; artifacts are kept. Do not silently re-dispatch." }
+    default { Write-Host "[grade] Non-zero exit; read the error above verbatim." }
+}
+exit $code
