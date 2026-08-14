@@ -152,12 +152,19 @@ function Get-EraIgnoreSets {
         SkipDirs     = [System.Collections.Generic.HashSet[string]]::new($cmp)
         SkipDirNames = [System.Collections.Generic.HashSet[string]]::new($cmp)
         SkipExts     = [System.Collections.Generic.HashSet[string]]::new($cmp)
+        # 'dir/**/*.ext' -- a directory AND an extension together. It cannot be
+        # decomposed into the buckets above without over-ignoring: as a bare dir
+        # it would swallow every other file under it, as a bare ext it would
+        # swallow that extension repo-wide. Round-6 (opus) measured this as the
+        # 1 of 6 shipped patterns the parser silently dropped.
+        SkipDirExt   = [System.Collections.Generic.List[hashtable]]::new()
     }
     foreach ($p in @($IgnorePatterns)) {
         $n = "$p" -replace '\\', '/'
-        if ($n -match '^\*\*/([^*/]+)/\*\*$') { [void]$sets.SkipDirNames.Add($matches[1]); continue }
-        if ($n -match '^([^*]+)/\*\*$')       { [void]$sets.SkipDirs.Add($matches[1].TrimEnd('/')); continue }
-        if ($n -match '^\*(\.[^*/]+)$')       { [void]$sets.SkipExts.Add($matches[1]); continue }
+        if ($n -match '^\*\*/([^*/]+)/\*\*$')          { [void]$sets.SkipDirNames.Add($matches[1]); continue }
+        if ($n -match '^([^*]+)/\*\*/\*(\.[^*/]+)$')     { $sets.SkipDirExt.Add(@{ Dir = $matches[1].TrimEnd('/'); Ext = $matches[2] }); continue }
+        if ($n -match '^([^*]+)/\*\*$')                  { [void]$sets.SkipDirs.Add($matches[1].TrimEnd('/')); continue }
+        if ($n -match '^\*(\.[^*/]+)$')                  { [void]$sets.SkipExts.Add($matches[1]); continue }
     }
     return $sets
 }
@@ -188,6 +195,13 @@ function Test-EraPathIgnored {
         for ($i = 0; $i -lt ($segs.Count - 1); $i++) {
             $prefix = ($segs[0..$i] -join '/')
             if ($Sets.SkipDirs.Contains($prefix)) { return $true }
+        }
+    }
+    if ($Sets.ContainsKey('SkipDirExt') -and $Sets.SkipDirExt.Count -gt 0) {
+        $ext2 = [System.IO.Path]::GetExtension($n)
+        foreach ($de in $Sets.SkipDirExt) {
+            if ($ext2 -and ($ext2 -ieq $de.Ext) -and
+                ($n.StartsWith(($de.Dir + '/'), [System.StringComparison]::OrdinalIgnoreCase))) { return $true }
         }
     }
     return $false

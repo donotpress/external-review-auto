@@ -254,21 +254,14 @@ function Invoke-ClaudeReview {
     # Honest content validation. Judged on the PRE-BANNER text: the truncation
     # banner adds ~190 characters, which would push a short non-answer over the
     # detector's 300-char length floor and defeat branch B2.
-    $detectorFired = $false
-    if (Test-AgenticNarrationCapture -Response $preBannerClean) {
-        $detectorFired = $true
-        $captureError = 'agentic-narration-capture'
-        $exitCode = -1
-        $detectorNote = 'claude returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
-    } elseif (Test-EraPromptEcho -PromptPath $PromptPath -Response $preBannerClean) {
-        # A well-formed-looking answer that is just the prompt handed back. The
-        # narration detector cannot catch it: all of its branches are gated on
-        # the response having no markdown heading, and an era prompt is full of
-        # them.
-        $detectorFired = $true
-        $captureError = 'prompt-echo'
-        $exitCode = -1
-        $detectorNote = 'claude returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.'
+    # Narration and echo are both classified by the shared helper, in that
+    # order, so a bundle-access refusal is reported as the refusal it is.
+    $verdict = Test-EraCaptureAcceptable -Response $preBannerClean -PromptPath $PromptPath -Vendor 'claude'
+    $detectorFired = -not $verdict.Ok
+    if ($detectorFired) {
+        $captureError = $verdict.Error
+        $exitCode     = -1
+        $detectorNote = $verdict.Warning
     }
 
     # A non-review is not written to disk, matching agy and opencode, so it

@@ -64,6 +64,28 @@ Describe 'Get-EraIgnoreSets / Test-EraPathIgnored' -Tag Unit {
         Test-EraPathIgnored -RelPath 'packages\p\node_modules\d\a.md' -Sets $script:Sets | Should -BeTrue
     }
 
+    It 'handles the dir/**/*.ext shape — the 1 of 6 shipped patterns that did not parse' {
+        # Round-6 (opus): "closed for 5 of 6 shipped patterns". Measured:
+        # 'validation_results/**/*.db' has a suffix after /** so it matched none
+        # of the three parse shapes and was silently dropped. Dormant, because
+        # .db is in no default include glob -- but the parser was quietly lying
+        # about what it enforced.
+        $sets = Get-EraIgnoreSets -IgnorePatterns @('validation_results/**/*.db')
+        Test-EraPathIgnored -RelPath 'validation_results/a.db'         -Sets $sets | Should -BeTrue
+        Test-EraPathIgnored -RelPath 'validation_results/deep/b.db'    -Sets $sets | Should -BeTrue
+        # ...but only that extension, and only under that directory.
+        Test-EraPathIgnored -RelPath 'validation_results/notes.md'     -Sets $sets | Should -BeFalse
+        Test-EraPathIgnored -RelPath 'elsewhere/a.db'                  -Sets $sets | Should -BeFalse
+    }
+
+    It 'every shipped vendor pattern is now recognised by the parser' {
+        $pats = @(Get-EraVendorIgnorePatterns)
+        $sets = Get-EraIgnoreSets -IgnorePatterns $pats
+        $sets.ContainsKey('SkipDirExt') | Should -BeTrue -Because 'the dir/**/*.ext shape needs its own bucket'
+        $recognised = $sets.SkipDirNames.Count + $sets.SkipDirs.Count + $sets.SkipExts.Count + $sets.SkipDirExt.Count
+        $recognised | Should -Be $pats.Count -Because 'a pattern the parser drops is protection that does not exist'
+    }
+
     It 'ignores nothing when given no patterns' {
         $empty = Get-EraIgnoreSets -IgnorePatterns @()
         Test-EraPathIgnored -RelPath 'node_modules/pkg/readme.md' -Sets $empty | Should -BeFalse

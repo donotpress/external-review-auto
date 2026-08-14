@@ -59,19 +59,66 @@ BeforeAll {
     }
 }
 
+Describe 'Test-EraCaptureAcceptable — one classification, not six copies' -Tag Unit {
+    # Round 5 and 6, both reviewers: the same ~15-line block (narration detector,
+    # echo detector, ExitCode/ContentOk/Error, skip the disk write) was
+    # replicated across six adapters. opus's verdict: "half is defensible, half
+    # is not". The three REST adapters and claude reach the decision at the same
+    # point with the same inputs -- that half is collapsed here. agy decides
+    # inside its retry loop and opencode returns early with its own shape; those
+    # two genuinely differ and keep their own call sites.
+
+    It 'accepts a real structured review' {
+        $v = Test-EraCaptureAcceptable -Response "## Critical issues`n- workflow.ps1:1 is wrong" -Vendor 'Gemini'
+        $v.Ok | Should -BeTrue
+        $v.Error | Should -BeNullOrEmpty
+    }
+
+    It 'rejects a narration / bundle-refusal capture, with a vendor-named reason' {
+        $v = Test-EraCaptureAcceptable -Response 'I cannot review the bundle content because it was not included. Please paste it.' -Vendor 'Gemini'
+        $v.Ok      | Should -BeFalse
+        $v.Error   | Should -Be 'agentic-narration-capture'
+        $v.Warning | Should -Match 'Gemini'
+    }
+
+    It 'rejects an echoed prompt and labels it distinctly' {
+        $prompt = ('Review the dispatcher for correctness of the retry loop and the cost caps, citing file and line for every claim. ' * 8)
+        $pf = New-TemporaryFile; Set-Content -LiteralPath $pf -Value $prompt
+        try {
+            $v = Test-EraCaptureAcceptable -Response $prompt -PromptPath $pf -Vendor 'Claude'
+            $v.Ok    | Should -BeFalse
+            $v.Error | Should -Be 'prompt-echo'
+        } finally { Remove-Item $pf -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'checks narration BEFORE echo, so the cheaper and more specific label wins' {
+        # A short refusal is also technically prompt-shaped; it should be
+        # reported as the refusal it is.
+        $v = Test-EraCaptureAcceptable -Response 'I am unable to access the attached bundle. Please paste the file content.' -Vendor 'X'
+        $v.Error | Should -Be 'agentic-narration-capture'
+    }
+}
+
 Describe 'every backend routes its capture through the shared detector' -Tag Unit {
     It '<_> dot-sources the shared _capture-validation.ps1' -ForEach @('agy','claude','opencode','geminiapi','openaicompat','anthropic') {
         $script:Src[$_] | Should -Match '_capture-validation\.ps1'
     }
 
-    It '<_> applies Test-AgenticNarrationCapture to its captured response' -ForEach @('agy','claude','opencode','geminiapi','openaicompat','anthropic') {
-        $script:Src[$_] | Should -Match 'Test-AgenticNarrationCapture'
+    It '<_> validates its capture before returning success' -ForEach @('agy','claude','opencode','geminiapi','openaicompat','anthropic') {
+        # SUPERSEDED 2026-08-14: this named Test-AgenticNarrationCapture
+        # directly. Four adapters now reach the decision through
+        # Test-EraCaptureAcceptable, which runs the narration check and the echo
+        # check in one place. The invariant is "this adapter validates", not
+        # "this adapter calls one particular function" -- accept either.
+        $script:Src[$_] | Should -Match 'Test-AgenticNarrationCapture|Test-EraCaptureAcceptable'
     }
 
-    It '<_> reports a detector hit as an honest failure, not a success' -ForEach @('claude','geminiapi','openaicompat','anthropic') {
-        # Mirrors the opencode precedent: ExitCode=-1 + ContentOk=$false +
-        # Error='agentic-narration-capture'.
-        $script:Src[$_] | Should -Match "agentic-narration-capture"
+    It '<_> classifies via the shared helper rather than its own copy' -ForEach @('claude','geminiapi','openaicompat','anthropic') {
+        # The four that reach the decision at the same point with the same
+        # inputs. agy and opencode keep their own call sites on purpose.
+        $script:Src[$_] | Should -Match 'Test-EraCaptureAcceptable'
+        # ...and no longer carry the inline pair.
+        $script:Src[$_] | Should -Not -Match 'elseif \(Test-EraPromptEcho'
     }
 }
 
@@ -424,8 +471,12 @@ Be terse. If a section is empty, write "(none)".
 }
 
 Describe 'every backend checks for a prompt echo' -Tag Unit {
-    It '<_> calls Test-EraPromptEcho' -ForEach @('agy','claude','opencode','geminiapi','openaicompat','anthropic') {
-        $script:Src[$_] | Should -Match 'Test-EraPromptEcho'
+    It '<_> checks for a prompt echo, directly or via the shared classifier' -ForEach @('agy','claude','opencode','geminiapi','openaicompat','anthropic') {
+        # SUPERSEDED 2026-08-14, same reason as the narration row above: four
+        # adapters now reach the echo check through Test-EraCaptureAcceptable.
+        # That the helper actually runs it is pinned behaviourally in
+        # 'Test-EraCaptureAcceptable — one classification, not six copies'.
+        $script:Src[$_] | Should -Match 'Test-EraPromptEcho|Test-EraCaptureAcceptable'
     }
 
     It 'geminiapi fails honestly on an echoed prompt (behavioural, HTTP mocked)' {

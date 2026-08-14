@@ -121,20 +121,12 @@ function Invoke-GeminiapiReview {
         # Honest content validation. Deliberately BEFORE the truncation banner:
         # the banner adds ~200 characters, which would push a short non-answer
         # over the detector's 300-char length floor and defeat branch B2.
-        if (Test-AgenticNarrationCapture -Response $response) {
+        $verdict = Test-EraCaptureAcceptable -Response $response -PromptPath $PromptPath -Vendor 'Gemini'
+        if (-not $verdict.Ok) {
             $detectorFired = $true
-            $captureError = 'agentic-narration-capture'
-            $exitCode = -1
-            $warnings += 'Gemini returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry.'
-        } elseif (Test-EraPromptEcho -PromptPath $PromptPath -Response $response) {
-            # A well-formed-looking answer that is just the prompt handed back.
-            # The narration detector cannot catch it: all of its branches are
-            # gated on the response having no markdown heading, and an era
-            # prompt is full of them.
-            $detectorFired = $true
-            $captureError = 'prompt-echo'
-            $exitCode = -1
-            $warnings += 'Gemini returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.'
+            $captureError  = $verdict.Error
+            $exitCode      = -1
+            $warnings     += $verdict.Warning
         }
 
         # Prepend truncation banner if needed (same format as agy adapter)

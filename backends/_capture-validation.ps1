@@ -243,3 +243,49 @@ function Get-EraPromptEchoRatio {
         Min     = [Math]::Min($forward, $reverse)
     }
 }
+
+function Test-EraCaptureAcceptable {
+    <#
+    .SYNOPSIS
+        Is this captured text a review? Returns @{ Ok; Error; Warning }.
+
+    .DESCRIPTION
+        One classification shared by the adapters that reach the decision at the
+        same point with the same inputs -- the three REST backends and claude.
+        Round 5 and 6 both flagged the same ~15-line block replicated across six
+        adapters; opus's verdict was "half is defensible, half is not". This is
+        the half that is not.
+
+        agy and opencode keep their own call sites on purpose: agy decides inside
+        its retry loop, where a rejection means "try again" rather than "fail",
+        and opencode returns a fully-formed failure hashtable early. Forcing
+        those through one signature would be worse than the duplication.
+
+        Order matters: narration is checked BEFORE echo, so a bundle-access
+        refusal -- which is also technically prompt-shaped -- is reported as the
+        refusal it actually is.
+
+        Call it on the model's OWN text, before any truncation banner is
+        prepended; the banners are this skill's prose and would both dilute the
+        echo ratio and inflate the narration length floor.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Response,
+        [AllowNull()][AllowEmptyString()][string]$PromptPath,
+        [string]$Vendor = 'The provider'
+    )
+    if (Test-AgenticNarrationCapture -Response $Response) {
+        return @{
+            Ok = $false; Error = 'agentic-narration-capture'
+            Warning = "$Vendor returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry."
+        }
+    }
+    if ($PromptPath -and (Test-EraPromptEcho -PromptPath $PromptPath -Response $Response)) {
+        return @{
+            Ok = $false; Error = 'prompt-echo'
+            Warning = "$Vendor returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry."
+        }
+    }
+    return @{ Ok = $true; Error = $null; Warning = $null }
+}
