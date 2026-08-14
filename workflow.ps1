@@ -348,6 +348,89 @@ function Merge-EraDiffPrompt {
     return ($DiffPrompt + "`n`n---`n`n" + $ExistingPrompt)
 }
 
+function Get-EraPreviousRoundText {
+    <#
+    .SYNOPSIS
+        The previous round's review text, aggregated across every reviewer,
+        in-flight-aware and length-capped. One definition, two consumers.
+
+    .DESCRIPTION
+        Extracted 2026-08-11. {{PREVIOUS_ROUND}} aggregated every per-preset
+        response; the -Diff template built <previous_review> from
+        round-N-response.md alone -- the CANONICAL, i.e. whichever single
+        reviewer happened to be promoted. So a -Diff follow-up on the shipped
+        three-model panel carried one review and silently dropped two. Flagged in
+        round 4, still open at round 5.
+
+        Two mechanisms answered the same question and one of them was worse.
+
+        The glob is 'round-N-*-response.md'. Rejected answers are deliberately
+        written as 'round-N-<preset>-response.rejected.md' by
+        Copy-PrimaryResponseAlias so they cannot match -- that is the whole point
+        of the naming, do not "tidy" it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ReviewDir,
+        [Parameter(Mandatory)][int]$PreviousRound
+    )
+    $previousN    = $PreviousRound
+    $responseFile = Join-Path $ReviewDir "round-$previousN-response.md"
+    $claimFile    = Join-Path $ReviewDir "round-$previousN-claim.json"
+
+    $inFlight  = Test-Path -LiteralPath $claimFile
+    $perPreset = @()
+    if (-not $inFlight) {
+        $perPreset = @(Get-ChildItem -LiteralPath $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
+            Sort-Object Name)
+    }
+    if ($inFlight) {
+        $substitution  = "[Round $previousN is in flight; not yet available]"
+    } elseif ($perPreset.Count -gt 0) {
+        $sections = foreach ($f in $perPreset) {
+            if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
+            "### Reviewer: $preset`n`n" + (Get-Content -LiteralPath $f.FullName -Raw)
+        }
+        $substitution = "## Previous round's review (round $previousN, $($perPreset.Count) reviewer(s))`n`n" +
+                        ($sections -join "`n`n---`n`n")
+    } elseif (Test-Path -LiteralPath $responseFile) {
+        # Single-reviewer rounds have no suffixed files; the canonical is their
+        # only artifact. Reachable only when $inFlight is false — see above.
+        $previousText  = Get-Content -LiteralPath $responseFile -Raw
+        $substitution  = "## Previous round's review (round $previousN)`n`n$previousText"
+    } else {
+        $substitution  = "[Round $previousN response not found]"
+    }
+
+    # --- Cap the carried-forward round -------------------------------------
+    # Uncapped, this grows with the panel: the shipped three-reviewer default
+    # measured 40,400 bytes carried into round 2 (gemini 10,658 + opus 19,869 +
+    # deepseek 9,873), and nothing bounded it. The cap is deliberately set well
+    # above that so a normal round is never touched — truncating real review
+    # content to save tokens would trade away the thing the panel is for. It
+    # exists to bound the tail, not to trim the common case.
+    #
+    # Truncation keeps the HEAD of the substitution: reviewers put the grade,
+    # the verdict and the blocker list at the top, so the head is the part the
+    # next round actually needs.
+    $maxChars = 80000
+    if ($env:ERA_PREVIOUS_ROUND_MAX_CHARS) {
+        $parsed = 0
+        if ([int]::TryParse($env:ERA_PREVIOUS_ROUND_MAX_CHARS, [ref]$parsed) -and $parsed -gt 0) {
+            $maxChars = $parsed
+        }
+    }
+    if ($substitution.Length -gt $maxChars) {
+        $dropped = $substitution.Length - $maxChars
+        Write-Host "[era] Previous round is $($substitution.Length) chars; truncating to $maxChars (raise with ERA_PREVIOUS_ROUND_MAX_CHARS)."
+        $substitution = $substitution.Substring(0, $maxChars) +
+            "`n`n[... previous round truncated: $dropped of $($substitution.Length + 0) chars omitted." +
+            " Raise ERA_PREVIOUS_ROUND_MAX_CHARS to carry more.]"
+    }
+
+    return $substitution
+}
+
 function Invoke-PromptTokenSubstitution {
     <#
     .SYNOPSIS
@@ -355,7 +438,9 @@ function Invoke-PromptTokenSubstitution {
 
     .DESCRIPTION
         If the prompt file at $PromptFile contains the literal token {{PREVIOUS_ROUND}},
-        this function replaces it with the contents of round-($RoundN-1)-response.md.
+        this function replaces it with the previous round's review text, built by
+        Get-EraPreviousRoundText -- EVERY reviewer's response aggregated, not
+        just the promoted round-($RoundN-1)-response.md.
 
         Callers in era.ps1 invoke this AFTER the prompt file is finalized (copied or
         written from template) and BEFORE repomix runs (the bundle picks up the prompt
@@ -427,55 +512,7 @@ function Invoke-PromptTokenSubstitution {
     # written as 'round-N-<preset>-response.rejected.md' by
     # Copy-PrimaryResponseAlias so they cannot match here — that is the whole
     # point of the naming, do not "tidy" it.
-    $inFlight  = Test-Path -LiteralPath $claimFile
-    $perPreset = @()
-    if (-not $inFlight) {
-        $perPreset = @(Get-ChildItem -LiteralPath $ReviewDir -Filter "round-$previousN-*-response.md" -File -ErrorAction SilentlyContinue |
-            Sort-Object Name)
-    }
-    if ($inFlight) {
-        $substitution  = "[Round $previousN is in flight; not yet available]"
-    } elseif ($perPreset.Count -gt 0) {
-        $sections = foreach ($f in $perPreset) {
-            if ($f.Name -match "^round-$previousN-(.+)-response\.md$") { $preset = $matches[1] } else { $preset = $f.BaseName }
-            "### Reviewer: $preset`n`n" + (Get-Content -LiteralPath $f.FullName -Raw)
-        }
-        $substitution = "## Previous round's review (round $previousN, $($perPreset.Count) reviewer(s))`n`n" +
-                        ($sections -join "`n`n---`n`n")
-    } elseif (Test-Path -LiteralPath $responseFile) {
-        # Single-reviewer rounds have no suffixed files; the canonical is their
-        # only artifact. Reachable only when $inFlight is false — see above.
-        $previousText  = Get-Content -LiteralPath $responseFile -Raw
-        $substitution  = "## Previous round's review (round $previousN)`n`n$previousText"
-    } else {
-        $substitution  = "[Round $previousN response not found]"
-    }
-
-    # --- Cap the carried-forward round -------------------------------------
-    # Uncapped, this grows with the panel: the shipped three-reviewer default
-    # measured 40,400 bytes carried into round 2 (gemini 10,658 + opus 19,869 +
-    # deepseek 9,873), and nothing bounded it. The cap is deliberately set well
-    # above that so a normal round is never touched — truncating real review
-    # content to save tokens would trade away the thing the panel is for. It
-    # exists to bound the tail, not to trim the common case.
-    #
-    # Truncation keeps the HEAD of the substitution: reviewers put the grade,
-    # the verdict and the blocker list at the top, so the head is the part the
-    # next round actually needs.
-    $maxChars = 80000
-    if ($env:ERA_PREVIOUS_ROUND_MAX_CHARS) {
-        $parsed = 0
-        if ([int]::TryParse($env:ERA_PREVIOUS_ROUND_MAX_CHARS, [ref]$parsed) -and $parsed -gt 0) {
-            $maxChars = $parsed
-        }
-    }
-    if ($substitution.Length -gt $maxChars) {
-        $dropped = $substitution.Length - $maxChars
-        Write-Host "[era] Previous round is $($substitution.Length) chars; truncating to $maxChars (raise with ERA_PREVIOUS_ROUND_MAX_CHARS)."
-        $substitution = $substitution.Substring(0, $maxChars) +
-            "`n`n[... previous round truncated: $dropped of $($substitution.Length + 0) chars omitted." +
-            " Raise ERA_PREVIOUS_ROUND_MAX_CHARS to carry more.]"
-    }
+    $substitution = Get-EraPreviousRoundText -ReviewDir $ReviewDir -PreviousRound $previousN
 
     # Use [regex]::Replace with a MatchEvaluator delegate so the replacement text
     # is treated as a literal string (no $ or \ interpretation). This is the only

@@ -211,3 +211,92 @@ Describe 'Invoke-PromptTokenSubstitution' -Tag Unit {
         $result | Should -Not -Match 'C:\\\\Users'
     }
 }
+
+Describe 'Get-EraPreviousRoundText — one definition of "the previous round"' -Tag Unit {
+    # Round-5 (opus), carried over unfixed from round 4: the -Diff template
+    # builds <previous_review> from round-N-response.md alone (the CANONICAL,
+    # i.e. one promoted reviewer), so a -Diff follow-up on the shipped
+    # three-model panel silently drops two of three reviews.
+    #
+    # {{PREVIOUS_ROUND}} already aggregates every per-preset response, honours
+    # the in-flight claim, and caps the carry-forward. Two mechanisms answering
+    # the same question, one of them worse. Extracted so both share it.
+
+    BeforeEach {
+        $script:PrDir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-prt-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $script:PrDir -Force | Out-Null
+    }
+    AfterEach { Remove-Item -Recurse -Force $script:PrDir -ErrorAction SilentlyContinue }
+
+    It 'aggregates EVERY per-preset response, not just the promoted one' {
+        foreach ($p in @('gemini','opus','deepseek-flash')) {
+            Set-Content -LiteralPath (Join-Path $script:PrDir "round-1-$p-response.md") -Value "finding from $p"
+        }
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-response.md') -Value 'finding from gemini'
+        $t = Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1
+        foreach ($p in @('gemini','opus','deepseek-flash')) {
+            $t | Should -Match ([regex]::Escape("finding from $p"))
+        }
+    }
+
+    It 'never carries a demoted *.rejected.md answer' {
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-gemini-response.md') -Value 'good review'
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-opus-response.rejected.md') -Value 'POISON'
+        $t = Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1
+        $t | Should -Match 'good review'
+        $t | Should -Not -Match 'POISON'
+    }
+
+    It 'reports in-flight and carries no content while a claim is live' {
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-gemini-response.md') -Value 'half-written'
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-claim.json') -Value '{"pid":1}'
+        $t = Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1
+        $t | Should -Match 'in flight'
+        $t | Should -Not -Match 'half-written'
+    }
+
+    It 'falls back to the canonical for a solo round' {
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-response.md') -Value 'solo review body'
+        (Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1) | Should -Match 'solo review body'
+    }
+
+    It 'says so when there is nothing to carry' {
+        (Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1) | Should -Match 'not found'
+    }
+
+    It 'honours ERA_PREVIOUS_ROUND_MAX_CHARS' {
+        Set-Content -LiteralPath (Join-Path $script:PrDir 'round-1-response.md') -Value ('x' * 5000)
+        $saved = $env:ERA_PREVIOUS_ROUND_MAX_CHARS
+        $env:ERA_PREVIOUS_ROUND_MAX_CHARS = '500'
+        try {
+            $t = Get-EraPreviousRoundText -ReviewDir $script:PrDir -PreviousRound 1
+            $t | Should -Match 'truncated'
+            $t.Length | Should -BeLessThan 2000
+        } finally {
+            if ($null -eq $saved) { Remove-Item Env:\ERA_PREVIOUS_ROUND_MAX_CHARS -ErrorAction SilentlyContinue }
+            else { $env:ERA_PREVIOUS_ROUND_MAX_CHARS = $saved }
+        }
+    }
+}
+
+Describe 'both consumers share it' -Tag Unit {
+    BeforeAll {
+        $root = Split-Path $PSScriptRoot -Parent
+        $script:Wf  = Get-Content -Raw (Join-Path $root 'workflow.ps1')
+        $script:Era = Get-Content -Raw (Join-Path $root 'runtimes/era.ps1')
+    }
+
+    It 'Invoke-PromptTokenSubstitution builds its substitution from it' {
+        # Bound the window to the FUNCTION, not to an arbitrary char count --
+        # the docstring alone is longer than 4000 chars.
+        $i = $script:Wf.IndexOf('function Invoke-PromptTokenSubstitution')
+        $j = $script:Wf.IndexOf("`nfunction ", $i + 10)
+        if ($j -lt 0) { $j = $script:Wf.Length }
+        $script:Wf.Substring($i, $j - $i) | Should -Match 'Get-EraPreviousRoundText'
+    }
+
+    It 'the -Diff template does too, instead of reading only the canonical' {
+        $script:Era | Should -Match 'Get-EraPreviousRoundText'
+        $script:Era | Should -Not -Match '\$priorResponsePath\s*=\s*Join-Path \$reviewDir "round-\$priorRound-response\.md"'
+    }
+}

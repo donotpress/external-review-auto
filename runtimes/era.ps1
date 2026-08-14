@@ -1171,8 +1171,14 @@ Be terse. If a section is empty, write "(none)".
         }
         if ($diffResult) {
             $effectiveInclude = [array]$diffResult.BundleFiles
-            $priorResponsePath = Join-Path $reviewDir "round-$priorRound-response.md"
-            $priorResponse = if (Test-Path -LiteralPath $priorResponsePath) { Get-Content -Raw -LiteralPath $priorResponsePath } else { $null }
+            # Every reviewer, not just the promoted one. This used to read the
+            # canonical alone, so a -Diff follow-up on the shipped three-model
+            # panel carried one review and silently dropped two -- flagged in
+            # round 4, still open at round 5. Get-EraPreviousRoundText is the
+            # same aggregation {{PREVIOUS_ROUND}} uses, so the two cannot drift:
+            # it is in-flight-aware, skips demoted *.rejected.md answers, and
+            # honours ERA_PREVIOUS_ROUND_MAX_CHARS.
+            $priorResponse = Get-EraPreviousRoundText -ReviewDir $reviewDir -PreviousRound $priorRound
             $changesSummary = @()
             if ($diffResult.Added) { $changesSummary += "Added: $($diffResult.Added -join ', ')" }
             if ($diffResult.Changed) { $changesSummary += "Changed: $($diffResult.Changed -join ', ')" }
