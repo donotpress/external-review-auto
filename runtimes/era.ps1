@@ -1164,7 +1164,7 @@ Be terse. If a section is empty, write "(none)".
     $isFollowUp = $priorRound -ge 1 -and $Diff.IsPresent
     if ($isFollowUp) {
         Write-Host "[era] Round $round (diff against round $priorRound)..."
-        $diffResult = Get-ReviewDiff -ReviewDir $reviewDir -PriorRound $priorRound -CurrentFiles $effectiveInclude -RepoRoot $repoRoot
+        $diffResult = Get-ReviewDiff -ReviewDir $reviewDir -PriorRound $priorRound -CurrentFiles $effectiveInclude -RepoRoot $repoRoot -IgnorePatterns (Get-EraVendorIgnorePatterns)
         if ($diffResult -and $diffResult.BundleFiles.Count -eq 0 -and $diffResult.Deleted.Count -eq 0) {
             Write-Host "[era] No files changed since round $priorRound. Omit -Diff to force a full re-bundle."
             return
@@ -1310,7 +1310,7 @@ Be terse. If a section is empty, write "(none)".
     # NOTE: '.external-reviews/**' arrives via $artifactIgnore and stays
     # deliberately ROOT-anchored -- era's artifact dir is always at the repo
     # root, and the staging carve-out enumerates root-relative siblings.
-    $repomixIgnorePatterns = @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db') + $artifactIgnore
+    $repomixIgnorePatterns = (Get-EraVendorIgnorePatterns) + $artifactIgnore
 
 
     # --- Broad-bundle consent gate (2026-08-09) -------------------------------
@@ -1564,7 +1564,7 @@ Be terse. If a section is empty, write "(none)".
     $aggregateCost = ($perReviewerCosts.Values | Measure-Object -Sum).Sum
     $approvedList = Invoke-CostPrompt -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
 
-    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState
+    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns
 
     Write-Host "Round $round. Reviewer(s): $($approvedList -join ', ')."
 

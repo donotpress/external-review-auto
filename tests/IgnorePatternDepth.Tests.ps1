@@ -89,11 +89,13 @@ Describe 'repomix actually excludes the nested tree (real measurement)' -Tag Int
 
 Describe 'Pattern/parser contract' -Tag Unit {
     It 'every shipped ignore pattern parses into a shape the measurer recognises' {
-        # Reads the LIVE list out of era.ps1 so the producer and consumer cannot
-        # drift apart silently again.
-        $src = Get-Content -Raw $script:EraPath
-        $src -match '\$repomixIgnorePatterns\s*=\s*@\(([^)]*)\)' | Should -BeTrue
-        $patterns = @([regex]::Matches($matches[1], "'([^']+)'") | ForEach-Object { $_.Groups[1].Value })
+        # SUPERSEDED 2026-08-11: this regexed the literal array out of era.ps1.
+        # The list moved into Get-EraVendorIgnorePatterns (workflow.ps1) so the
+        # manifest walk, the diff walk and the scale gate share ONE definition --
+        # opus's round-5 blocker 1. Calling the function is strictly better than
+        # scraping the source: same contract, no regex, and it breaks if the
+        # producer moves again.
+        $patterns = @(Get-EraVendorIgnorePatterns)
         $patterns.Count | Should -BeGreaterThan 0
 
         $recognised = @('^\*\*/[^*/]+/\*\*$', '^[^*]+/\*\*$', '^\*\.[^*/]+$')
@@ -108,10 +110,19 @@ Describe 'Pattern/parser contract' -Tag Unit {
     }
 
     It 'ships **/-prefixed patterns for the three generic junk directories' {
-        $src = Get-Content -Raw $script:EraPath
-        $src | Should -Match "'\*\*/node_modules/\*\*'"
-        $src | Should -Match "'\*\*/\.git/\*\*'"
-        $src | Should -Match "'\*\*/__pycache__/\*\*'"
+        # Root-anchoring matters: measured against repomix 1.12.0, a bare
+        # 'node_modules/**' still bundles packages/p/node_modules/d/a.md.
+        $patterns = @(Get-EraVendorIgnorePatterns)
+        $patterns | Should -Contain '**/node_modules/**'
+        $patterns | Should -Contain '**/.git/**'
+        $patterns | Should -Contain '**/__pycache__/**'
+    }
+
+    It 'and those patterns actually match at depth through the shared matcher' {
+        # The behavioural half the source-regex version could never assert.
+        $sets = Get-EraIgnoreSets -IgnorePatterns (Get-EraVendorIgnorePatterns)
+        Test-EraPathIgnored -RelPath 'packages/p/node_modules/d/a.md' -Sets $sets | Should -BeTrue
+        Test-EraPathIgnored -RelPath 'src/app.ts'                     -Sets $sets | Should -BeFalse
     }
 
     It 'keeps .external-reviews ROOT-anchored on purpose' {

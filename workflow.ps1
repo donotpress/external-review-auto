@@ -97,14 +97,115 @@ function Expand-EraIncludePath {
     return @($resolved)
 }
 
+function Get-EraVendorIgnorePatterns {
+    <#
+    .SYNOPSIS
+        The static "never a review subject" patterns, in repomix's own spelling.
+
+    .DESCRIPTION
+        One definition, because three walks need it at three different points in
+        era's control flow. The full repomix set is these PLUS the per-round
+        artifact patterns from Get-EraReviewArtifactIgnorePatterns, which cannot
+        be computed until staging is resolved -- but Get-ReviewDiff runs BEFORE
+        that and only needs these (it carries its own .external-reviews guard).
+
+        '**/' prefixes are load-bearing: a bare '<dir>/**' is ROOT-ANCHORED in
+        repomix (measured 1.12.0 -- 'node_modules/**' still bundles
+        packages/p/node_modules/d/a.md). Only node_modules changes real output;
+        the other two are spelled alike so sibling patterns behave alike.
+    #>
+    [CmdletBinding()]
+    param()
+    return @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db')
+}
+
+function Get-EraIgnoreSets {
+    <#
+    .SYNOPSIS
+        Parse repomix-style ignore patterns into the three sets every era walk
+        needs. Pair with Test-EraPathIgnored.
+
+    .DESCRIPTION
+        Extracted from Measure-EraBroadScope 2026-08-11 so that the manifest
+        baseline, the diff walk and the scale gate apply ONE definition of
+        "repomix will not bundle this".
+
+        Round-5 (opus) blocker 1: $repomixIgnorePatterns reached
+        Measure-EraBroadScope and the repomix config but NOT Write-ReviewManifest
+        or Get-ReviewDiff, which filtered only `.external-reviews`. On the broad
+        path the manifest therefore hashed node_modules/**/*.md as sources, the
+        next round's diff called them changed, era assigned them to
+        $effectiveInclude, and repomix's ignore list beat its include list --
+        producing a mis-scoped bundle or an "empty bundle" error blaming
+        -IncludeFiles.
+
+        Semantics deliberately match repomix 1.12.0, per the measurement already
+        recorded in Measure-EraBroadScope: a bare 'node_modules/**' is anchored
+        at the root and does NOT match packages/p/node_modules/d/a.md, while
+        '**/node_modules/**' matches at any depth. Pruning every directory merely
+        NAMED node_modules under-counted a monorepo by orders of magnitude.
+    #>
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][string[]]$IgnorePatterns = @())
+    $cmp = [System.StringComparer]::OrdinalIgnoreCase
+    $sets = @{
+        SkipDirs     = [System.Collections.Generic.HashSet[string]]::new($cmp)
+        SkipDirNames = [System.Collections.Generic.HashSet[string]]::new($cmp)
+        SkipExts     = [System.Collections.Generic.HashSet[string]]::new($cmp)
+    }
+    foreach ($p in @($IgnorePatterns)) {
+        $n = "$p" -replace '\\', '/'
+        if ($n -match '^\*\*/([^*/]+)/\*\*$') { [void]$sets.SkipDirNames.Add($matches[1]); continue }
+        if ($n -match '^([^*]+)/\*\*$')       { [void]$sets.SkipDirs.Add($matches[1].TrimEnd('/')); continue }
+        if ($n -match '^\*(\.[^*/]+)$')       { [void]$sets.SkipExts.Add($matches[1]); continue }
+    }
+    return $sets
+}
+
+function Test-EraPathIgnored {
+    <#
+    .SYNOPSIS
+        Would repomix refuse to bundle this repo-relative path? See
+        Get-EraIgnoreSets.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RelPath,
+        [Parameter(Mandatory)][hashtable]$Sets
+    )
+    if ([string]::IsNullOrWhiteSpace($RelPath)) { return $false }
+    $n = ($RelPath -replace '\\', '/').TrimStart('./')
+    if ($Sets.SkipExts.Count -gt 0) {
+        $ext = [System.IO.Path]::GetExtension($n)
+        if ($ext -and $Sets.SkipExts.Contains($ext)) { return $true }
+    }
+    $segs = @($n -split '/')
+    # Directory segments only -- the last element is the file name.
+    for ($i = 0; $i -lt ($segs.Count - 1); $i++) {
+        if ($Sets.SkipDirNames.Contains($segs[$i])) { return $true }
+    }
+    if ($Sets.SkipDirs.Count -gt 0) {
+        for ($i = 0; $i -lt ($segs.Count - 1); $i++) {
+            $prefix = ($segs[0..$i] -join '/')
+            if ($Sets.SkipDirs.Contains($prefix)) { return $true }
+        }
+    }
+    return $false
+}
+
 function Get-ReviewDiff {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$ReviewDir,
         [Parameter(Mandatory)][int]$PriorRound,
         [Parameter(Mandatory)][string[]]$CurrentFiles,
-        [Parameter(Mandatory)][string]$RepoRoot
+        [Parameter(Mandatory)][string]$RepoRoot,
+        # What repomix will refuse to bundle. Without this the diff reports
+        # vendored files as changed and era feeds them to repomix as the include
+        # set -- see Get-EraIgnoreSets. Defaults to empty for back-compat.
+        [string[]]$IgnorePatterns = @()
     )
+    $ignoreSets = Get-EraIgnoreSets -IgnorePatterns $IgnorePatterns
     $priorManifestPath = Join-Path $ReviewDir "round-$PriorRound-manifest.json"
     if (-not (Test-Path -LiteralPath $priorManifestPath)) { return $null }
 
@@ -159,6 +260,15 @@ function Get-ReviewDiff {
             # change. Two layers, one rule.
             $normCp = $cp -replace '\\', '/'
             if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
+            # ...and anything repomix itself would refuse to bundle. Compare on
+            # the REPO-RELATIVE path: a rooted pattern like 'dist/**' is anchored
+            # at the repo root, and testing it against an absolute path would
+            # silently never match.
+            $rootNorm = ($RepoRoot -replace '\\', '/').TrimEnd('/')
+            $relCp = if ($normCp.StartsWith($rootNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $normCp.Substring($rootNorm.Length).TrimStart('/')
+            } else { $normCp }
+            if (Test-EraPathIgnored -RelPath $relCp -Sets $ignoreSets) { continue }
             $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
             $currentHashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
         }
@@ -521,10 +631,15 @@ function Write-ReviewManifest {
         [Parameter(Mandatory)][string[]]$Files,
         [string[]]$SourceFiles,
         [string]$RepoRoot,
+        # What repomix will refuse to bundle. The manifest is the round's
+        # provenance record; without this it claims a superset of what was
+        # actually reviewed -- see Get-EraIgnoreSets.
+        [string[]]$IgnorePatterns = @(),
         # HEAD sha / branch / dirty list at dispatch time, from
         # era.ps1's Get-EraGitState. Null outside a git work tree.
         $GitState
     )
+    $ignoreSets = Get-EraIgnoreSets -IgnorePatterns $IgnorePatterns
     $arr = New-Object System.Collections.ArrayList
     foreach ($f in $Files) {
         # -LiteralPath avoids PowerShell wildcard expansion when paths contain
@@ -575,6 +690,15 @@ function Write-ReviewManifest {
                 # those artifacts as changed.
                 $normCp = $cp -replace '\\', '/'
                 if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
+            # ...and anything repomix itself would refuse to bundle. Compare on
+            # the REPO-RELATIVE path: a rooted pattern like 'dist/**' is anchored
+            # at the repo root, and testing it against an absolute path would
+            # silently never match.
+            $rootNorm = ($RepoRoot -replace '\\', '/').TrimEnd('/')
+            $relCp = if ($normCp.StartsWith($rootNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $normCp.Substring($rootNorm.Length).TrimStart('/')
+            } else { $normCp }
+            if (Test-EraPathIgnored -RelPath $relCp -Sets $ignoreSets) { continue }
                 $relPath = $cp.Substring($RepoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
                 $manifest.source_hashes[$relPath] = (Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash.ToLower()
             }
@@ -2384,15 +2508,12 @@ function Measure-EraBroadScope {
     # Nothing used to assert this parser understood the list era hands repomix,
     # which is how the original under-count shipped. See the contract test in
     # tests/IgnorePatternDepth.Tests.ps1.
-    $skipDirs     = [System.Collections.Generic.HashSet[string]]::new($cmp)
-    $skipDirNames = [System.Collections.Generic.HashSet[string]]::new($cmp)
-    $skipExts     = [System.Collections.Generic.HashSet[string]]::new($cmp)
-    foreach ($p in @($IgnorePatterns)) {
-        $n = "$p" -replace '\\', '/'
-        if ($n -match '^\*\*/([^*/]+)/\*\*$') { [void]$skipDirNames.Add($matches[1]); continue }
-        if ($n -match '^([^*]+)/\*\*$')       { [void]$skipDirs.Add($matches[1].TrimEnd('/')); continue }
-        if ($n -match '^\*(\.[^*/]+)$')       { [void]$skipExts.Add($matches[1]); continue }
-    }
+    # One definition of the ignore rule, shared with Write-ReviewManifest and
+    # Get-ReviewDiff. See Get-EraIgnoreSets.
+    $ignoreSets   = Get-EraIgnoreSets -IgnorePatterns $IgnorePatterns
+    $skipDirs     = $ignoreSets.SkipDirs
+    $skipDirNames = $ignoreSets.SkipDirNames
+    $skipExts     = $ignoreSets.SkipExts
 
     # Split includes into leaf matches ('**/*.md' -> '*.md', the shape every
     # shipped default glob uses) and full-relative-path matches for anything
