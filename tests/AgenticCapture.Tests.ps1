@@ -46,6 +46,29 @@ Describe 'Test-AgenticNarrationCapture — TRUE positives (must be flagged)' {
         Test-AgenticNarrationCapture -Response $resp | Should -BeFalse
     }
 
+    It 'flags a SHORT gerund-opener non-answer that happens to contain a whitelist word' {
+        # Round-5 (opus): the prose whitelist runs BEFORE the B2 length check and
+        # matches any occurrence of issue|correct|valid|sound|edge case|suggest.
+        # So a 24-char non-answer containing "issues" was classified as a
+        # legitimate terse review, defeating the sub-floor branch entirely --
+        # the branch that catches two-character answers on `opus`. Verified
+        # before fixing.
+        Test-AgenticNarrationCapture -Response 'Checking for issues now.'              | Should -BeTrue
+        Test-AgenticNarrationCapture -Response 'Looking into the correctness of this.' | Should -BeTrue
+        Test-AgenticNarrationCapture -Response 'Reviewing the code for edge cases.'    | Should -BeTrue
+    }
+
+    It 'does NOT flag a LONG prose review that merely opens with a gerund' {
+        # The overreach guard. A bare gerund opener is narration only when the
+        # text is also short; a substantial prose review may legitimately begin
+        # "Checking the dispatcher..." and must survive. This is why the rule
+        # belongs to the length branch and not to B1.
+        $long = 'Checking the dispatcher for races, I found three problems worth naming. ' +
+                ('The straggler grace fires on a lone job and tree-kills its child, which is correct, but the no-killable-child branch waits out the whole budget. ' * 4)
+        $long.Length | Should -BeGreaterThan 300
+        Test-AgenticNarrationCapture -Response $long | Should -BeFalse
+    }
+
     It 'flags file-listing narration even when it contains a list ("I will check these:")' {
         # The list-marker gate applies ONLY to the length branch; the narration
         # branch must still fire so an agentic capture that lists files it will

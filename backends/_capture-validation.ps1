@@ -88,7 +88,19 @@ function Test-AgenticNarrationCapture {
     # which is a legitimate terse review, not agentic narration.
     $hasProseReview = $text -match '(?im)\b(correct|incorrect|issue|sound|valid|should\s+(be|fix|work)|seems?\s+(fine|good|ok|correct|right)|looks?\s+(good|fine|correct|right)|no\s+(problems?|issues?|bugs?|concerns?|edge.cases?)|edge\s+case|suggest(|ion|ed)\b)'
     $noNarration = -not ($text -match '(?im)(I will|I.ll|Let me|I need to|First,?\s+I)\b')
-    if ($hasProseReview -and $noNarration) {
+    # A bare GERUND OPENER ("Checking...", "Looking into...") is the same
+    # tool-intent narration B1 catches, minus the "I will". Round-5 (opus): the
+    # prose whitelist above matches any occurrence of issue|correct|valid|sound|
+    # edge case|suggest, so "Checking for issues now." (24 chars) was classified
+    # as a legitimate terse review and the sub-floor branch -- the one that
+    # catches two-character answers on `opus` -- was defeated by one common word.
+    #
+    # This belongs to the LENGTH branch, not to B1. A substantial prose review
+    # may legitimately open "Checking the dispatcher for races, I found..."; it
+    # is only narration when the text is also short. Putting it in B1 (which has
+    # no length gate) would reject those. Both directions are pinned by test.
+    $gerundOpener = $text -match '(?im)^\s*(checking|looking|reviewing|analy[sz]ing|examining|inspecting|scanning|starting|beginning|working)\b'
+    if ($hasProseReview -and $noNarration -and -not $gerundOpener) {
         # Legitimate terse review prose — let it pass even if under the floor.
     } elseif (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) { return $true }
 

@@ -1690,8 +1690,17 @@ Be terse. If a section is empty, write "(none)".
                                            ($fbEstOut / 1000000.0) * $fbPricing.output_per_m, 4)
                 $fbCap     = Get-PerReviewerCap -Pricing $fbPricing
                 if ($fbCost -gt $fbCap) {
-                    Write-Host ("[era] Fallback '{0}' would cost ~`${1}, over its `${2} cap — skipping. " -f $fallbackPreset, $fbCost, $fbCap) +
-                               "The round keeps its honest failure telemetry."
+                    # One argument, not three: Write-Host's -Object has
+                    # ValueFromRemainingArguments, so `Write-Host (...) + "..."`
+                    # printed a literal ' +' and a line break in the middle of
+                    # the message a user sees when a fallback is refused on cost.
+                    # Build the string first. `Write-Host (...) + "..."` printed a
+                    # literal ' +' mid-message, because -Object has
+                    # ValueFromRemainingArguments and took three positional args.
+                    # Relying on -f binding tighter than + would work but is not
+                    # worth making a reader verify.
+                    $capMsg = "[era] Fallback '{0}' would cost ~`${1}, over its `${2} cap — skipping. " -f $fallbackPreset, $fbCost, $fbCap
+                    Write-Host ($capMsg + "The round keeps its honest failure telemetry.")
                     $fallbackPreset = $null
                 } else {
                     Write-Host ("[era] Fallback '{0}' estimated ~`${1} (cap `${2})." -f $fallbackPreset, $fbCost, $fbCap)
