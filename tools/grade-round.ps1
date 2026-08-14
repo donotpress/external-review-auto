@@ -115,18 +115,34 @@ $prompt = $template.Replace('{{CHANGES_SINCE}}', $changes)
 $promptPath = Join-Path ([System.IO.Path]::GetTempPath()) "era-grade-prompt-$(Get-Date -Format 'yyyyMMdd-HHmmss').md"
 Set-Content -LiteralPath $promptPath -Value $prompt -Encoding utf8
 
-$eraArgs = @(
-    '-TopicSlug', $Topic
-    '-PromptOverrideFile', $promptPath
-    '-IncludeFiles', ($IncludeFiles -join ',')
-    '-AllowDirtyTree'      # this repo carries untracked META-REVIEW notes by design
-    '-Force'
-)
-if ($Reviewer) { $eraArgs += @('-Reviewer', $Reviewer) }
+# HASHTABLE splat, not an array. Array splatting is POSITIONAL: the strings go
+# in by position and '-TopicSlug' is passed as a VALUE, so $TopicSlug got the
+# literal "-TopicSlug" and 'era-grade' landed on $Mode (positional 1), failing
+# its ValidateSet. Hashtable splatting binds by NAME.
+# IncludeFiles stays an ARRAY -- this is an in-process `&` call, where array
+# parameters bind correctly (the comma-joined string form is only for `pwsh -File`).
+$eraPath = Join-Path $skillRoot 'runtimes/era.ps1'
+$eraSplat = @{
+    TopicSlug          = $Topic
+    PromptOverrideFile = $promptPath
+    IncludeFiles       = $IncludeFiles
+    AllowDirtyTree     = $true   # this repo carries untracked META-REVIEW notes by design
+    Force              = $true
+}
+if ($Reviewer) { $eraSplat.Reviewer = $Reviewer }
+
+# Validate the binding BEFORE dispatching, and inside -DryRun. The original bug
+# survived a dry run precisely because -DryRun returned before the call; a dry
+# run that does not exercise the dispatch shape is not a dry run of the dispatch.
+$known   = (Get-Command $eraPath).Parameters.Keys
+$unknown = @($eraSplat.Keys | Where-Object { $_ -notin $known })
+if ($unknown.Count -gt 0) {
+    throw "grade-round: era.ps1 declares no parameter(s): $($unknown -join ', ')"
+}
 
 Write-Host "[grade] Prompt : $promptPath"
 Write-Host "[grade] Bundle : $($IncludeFiles.Count) files"
-Write-Host "[grade] Command: pwsh runtimes/era.ps1 $($eraArgs -join ' ')"
+Write-Host "[grade] Params : $(($eraSplat.Keys | Sort-Object) -join ', ')  [all bind to era.ps1]"
 
 if ($DryRun) {
     Write-Host ''
@@ -136,7 +152,7 @@ if ($DryRun) {
     return
 }
 
-& (Join-Path $skillRoot 'runtimes/era.ps1') @eraArgs
+& $eraPath @eraSplat
 $code = $LASTEXITCODE
 Write-Host "[grade] era exit code: $code"
 switch ($code) {
