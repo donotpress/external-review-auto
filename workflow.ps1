@@ -954,6 +954,72 @@ function Test-AggregateCostCap {
     return ($TotalEstCost -gt $AggregateCap)
 }
 
+function Get-EraCostReport {
+    <#
+    .SYNOPSIS
+        The round's cost estimate, always. Returns
+        @{ Lines; Warnings; OverCap } -- never blocks, never prompts.
+
+    .DESCRIPTION
+        Invoke-CostPrompt returns the full reviewer list immediately when
+        Get-ForceMode is true, with NO cap check. Get-ForceMode is true when
+        -Force is passed OR when the host is non-interactive -- and SKILL.md
+        instructs the driving LLM to always pass -Force. So the $2/$10
+        per-reviewer caps and the $15 aggregate cap never fired in the documented
+        usage: they are enforced through a prompt that is always skipped. The
+        fallback's own cap check is NOT force-gated, so the recovery dispatch was
+        capped while the dispatch it recovers from was not.
+
+        Decision 2026-08-11: report loudly, never block. Measured across 43
+        recorded rounds -- worst round $1.76 against the $15 aggregate cap, worst
+        single reviewer $1.71 against its $10 cap, zero breaches ever -- a
+        ceiling would have bought nothing while a wrong one could refuse a
+        legitimate large round. Visibility was the real gap.
+
+        Call this UNCONDITIONALLY, before Invoke-CostPrompt, so the numbers are
+        on the record whether or not the gate runs.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ReviewerList,
+        [Parameter(Mandatory)][hashtable]$PerReviewerCosts,
+        [Parameter(Mandatory)][hashtable]$PerReviewerCaps,
+        [Parameter(Mandatory)][double]$AggregateCost,
+        [double]$AggregateCap = 15.0
+    )
+    $lines    = [System.Collections.Generic.List[string]]::new()
+    $warnings = [System.Collections.Generic.List[string]]::new()
+    $overCap  = [System.Collections.Generic.List[string]]::new()
+
+    if (@($ReviewerList).Count -eq 0) {
+        return @{ Lines = @(); Warnings = @(); OverCap = @() }
+    }
+
+    $parts = foreach ($r in $ReviewerList) {
+        $c = $PerReviewerCosts[$r]
+        if ($null -eq $c) { "{0} ~unknown" -f $r } else { "{0} ~`${1}" -f $r, [Math]::Round([double]$c, 4) }
+    }
+    $lines.Add("[era] Estimated: " + ($parts -join ' | ') + (" (round ~`${0})" -f [Math]::Round($AggregateCost, 4)))
+
+    foreach ($r in $ReviewerList) {
+        $c = $PerReviewerCosts[$r]
+        $cap = $PerReviewerCaps[$r]
+        # PowerShell coerces $null -le N to $true, which would silently pass an
+        # unknown estimate. Treat unknown as unbounded, exactly as the gate does.
+        if ($null -eq $c)   { $c = [double]::PositiveInfinity }
+        if ($null -eq $cap) { $cap = 0.0 }
+        if ($c -gt $cap) {
+            $overCap.Add($r)
+            $shown = if ([double]::IsInfinity($c)) { 'unknown' } else { "`$$([Math]::Round([double]$c,4))" }
+            $warnings.Add("[era] WARNING: reviewer '$r' estimated $shown exceeds its `$$cap cap; proceeding (cost caps are advisory under -Force).")
+        }
+    }
+    if ($AggregateCost -gt $AggregateCap) {
+        $warnings.Add("[era] WARNING: round total ~`$$([Math]::Round($AggregateCost,4)) exceeds the `$$AggregateCap aggregate cap; proceeding (advisory under -Force).")
+    }
+    return @{ Lines = @($lines); Warnings = @($warnings); OverCap = @($overCap) }
+}
+
 function Invoke-CostPrompt {
     [CmdletBinding()]
     param(
@@ -1923,6 +1989,9 @@ function Write-ReviewMetadata {
         # logs lie about which model actually ran.
         [hashtable]$ModelOverrides = @{},
         [string[]]$ConvergenceWarnings = @(),
+        # Cap breaches noticed before dispatch. Advisory (see Get-EraCostReport),
+        # so they must survive into the record even though nothing blocked.
+        [string[]]$CostWarnings = @(),
         [string[]]$IncludeFilesList = @(),
         [int]$BundleFileCount = 0,
         [int]$TopicRoundCount = 0
@@ -2069,6 +2138,7 @@ function Write-ReviewMetadata {
         include_files = @($IncludeFilesList)
         bundle_file_count = $BundleFileCount
         convergence_warnings = @($ConvergenceWarnings)
+        cost_warnings = @($CostWarnings)
         reviewers = @($reviewerEntries)
     }
     $meta | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8

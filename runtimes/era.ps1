@@ -1568,6 +1568,14 @@ Be terse. If a section is empty, write "(none)".
         $perReviewerCaps[$r] = Get-PerReviewerCap -Pricing $pricing
     }
     $aggregateCost = ($perReviewerCosts.Values | Measure-Object -Sum).Sum
+    # Report the estimate UNCONDITIONALLY. Invoke-CostPrompt below returns early
+    # under -Force (and under any non-interactive host), so anything that only
+    # happens inside it never happens in the way era is actually used.
+    $costReport = Get-EraCostReport -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts `
+        -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
+    foreach ($line in $costReport.Lines)    { Write-Host $line }
+    foreach ($warn in $costReport.Warnings) { Write-Host $warn }
+
     $approvedList = Invoke-CostPrompt -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
 
     Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns
@@ -1776,7 +1784,7 @@ Be terse. If a section is empty, write "(none)".
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
         -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
-        -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
+        -CostWarnings $costReport.Warnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
         -TopicRoundCount $topicRoundCount
 
     # --- Void-round gate (2026-08-10) ----------------------------------------
