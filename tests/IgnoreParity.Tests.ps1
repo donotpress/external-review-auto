@@ -203,3 +203,125 @@ Describe 'a -Diff round can never hand repomix an empty include list' -Tag Unit 
         $guard  | Should -BeLessThan $config
     }
 }
+
+Describe 'a leading dot survives normalisation — root-level dot-directories' -Tag Unit {
+    # Round-7: found by MEASUREMENT while adjudicating opus finding 5 / gemini
+    # blocker 3. Neither reviewer named this; both attributed the ignore gap
+    # purely to a missing pattern SHAPE. The deeper bug is that patterns which
+    # parse perfectly still never match.
+    #
+    # Test-EraPathIgnored normalised with .TrimStart('./'), and .NET treats that
+    # argument as a SET OF CHARACTERS, not a prefix. So every leading '.' was
+    # eaten:
+    #
+    #   '.external-reviews/t/x.md'.TrimStart('./')  ->  'external-reviews/t/x.md'
+    #   '.venv/lib/x.py'.TrimStart('./')            ->  'venv/lib/x.py'
+    #
+    # Measured consequence: '**/.git/**' is a SHIPPED vendor ignore pattern, it
+    # parses into SkipDirNames correctly, and it returned $false for '.git/config'
+    # -- so the manifest and diff walks were free to hash .git. Nested paths were
+    # unaffected ('sub/.venv/...' keeps its dot), which is why this survived.
+    #
+    # The intent was to strip a leading './' PREFIX. That is what it does now.
+
+    It 'ignores a root-level .git via the shipped **/.git/** pattern' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('**/.git/**')
+        Test-EraPathIgnored -RelPath '.git/config' -Sets $s | Should -BeTrue
+        Test-EraPathIgnored -RelPath '.git/refs/heads/master' -Sets $s | Should -BeTrue
+    }
+
+    It 'ignores a root-level dot-dir named by a rooted pattern' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('.venv/**')
+        Test-EraPathIgnored -RelPath '.venv/lib/site.py' -Sets $s | Should -BeTrue
+    }
+
+    It 'still ignored the NESTED case before this fix, which is why it went unnoticed' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('**/.venv/**')
+        Test-EraPathIgnored -RelPath 'sub/.venv/lib/x.py' -Sets $s | Should -BeTrue
+    }
+
+    It 'still strips a leading ./ prefix, which is what TrimStart was there for' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('src/**')
+        Test-EraPathIgnored -RelPath './src/a.ps1' -Sets $s | Should -BeTrue
+    }
+
+    It 'does not ignore an undotted sibling by accident' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('**/.git/**')
+        Test-EraPathIgnored -RelPath 'gitignore-docs/readme.md' -Sets $s | Should -BeFalse
+        Test-EraPathIgnored -RelPath 'src/git/config' -Sets $s | Should -BeFalse
+    }
+}
+
+Describe 'every pattern era generates is understood, and the rest say so' -Tag Unit {
+    # Round-7 (opus) finding 5 / gemini blocker 3. Get-EraIgnoreSets silently
+    # discarded any pattern it did not recognise, and THREE of the five shapes
+    # era itself generates for a staging round were unrecognised:
+    #
+    #   .external-reviews/othertopic          bare path, no wildcard
+    #   .external-reviews/t/*.*               files directly in a dir
+    #   .external-reviews/t/round-1-external  bare path, no wildcard
+    #
+    # Adjudication of the two reviewers' claims, both measured:
+    #
+    #   gemini's stated impact -- era's own round-N-prompt.md hashed into the
+    #   manifest -- is WRONG. The hardcoded '.external-reviews' guards at
+    #   Get-ReviewDiff and Write-ReviewManifest mask it. Measured: the manifest
+    #   did NOT contain it.
+    #
+    #   opus's narrower residual is RIGHT. Those guards deliberately ADMIT
+    #   '/round-N-external/' (staged review subjects are the thing being
+    #   reviewed), so a PRIOR round's staging dir was admitted by the guard and
+    #   then not ignored by the sets. Measured: the manifest DID hash
+    #   '.external-reviews/t/round-1-external/stale-subject.ps1'.
+    #
+    # A silently-dropped ignore pattern is precisely how this bug class
+    # reproduces, so the parser now reports what it could not understand.
+
+    BeforeAll {
+        $script:Stg = Join-Path ([System.IO.Path]::GetTempPath()) ("era-ign-" + [guid]::NewGuid())
+        New-Item -ItemType Directory (Join-Path $script:Stg '.external-reviews/t/round-2-external') -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $script:Stg '.external-reviews/t/round-1-external') -Force | Out-Null
+        New-Item -ItemType Directory (Join-Path $script:Stg '.external-reviews/othertopic') -Force | Out-Null
+        $script:Gen = Get-EraReviewArtifactIgnorePatterns -RepoRoot $script:Stg -TopicSlug 't' -Round 2 -AllowStaging
+        $script:GenSets = Get-EraIgnoreSets -IgnorePatterns $script:Gen
+    }
+    AfterAll { Remove-Item -LiteralPath $script:Stg -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'understands every pattern era generates for a staging round' {
+        $script:Gen.Count | Should -BeGreaterThan 0
+        # ContainsKey first: without it this assertion passes vacuously when the
+        # bucket does not exist at all, which is exactly the state it was written
+        # against.
+        $script:GenSets.ContainsKey('Unparsed') | Should -BeTrue -Because 'the parser must report its own misses'
+        @($script:GenSets.Unparsed) | Should -BeNullOrEmpty -Because "era must not emit shapes its own walk cannot read: $($script:GenSets.Unparsed -join ', ')"
+    }
+
+    It 'ignores this topic''s own round artifacts via <base>/<slug>/*.*' {
+        Test-EraPathIgnored -RelPath '.external-reviews/t/round-1-prompt.md' -Sets $script:GenSets | Should -BeTrue
+        Test-EraPathIgnored -RelPath '.external-reviews/t/round-1-manifest.json' -Sets $script:GenSets | Should -BeTrue
+    }
+
+    It 'but <slug>/*.* is NOT recursive, so the current round''s staging survives' {
+        # This is the whole reason the pattern is written '*.*' and not '**'.
+        # round-N-external holds the review SUBJECTS staged from outside the
+        # repo. Ignoring them would bundle nothing and hash nothing.
+        Test-EraPathIgnored -RelPath '.external-reviews/t/round-2-external/subject.ps1' -Sets $script:GenSets |
+            Should -BeFalse -Because 'the current round''s staged subjects are the review, not era output'
+    }
+
+    It 'ignores a PRIOR round''s staging dir — opus finding 5, measured open' {
+        Test-EraPathIgnored -RelPath '.external-reviews/t/round-1-external/stale-subject.ps1' -Sets $script:GenSets |
+            Should -BeTrue -Because 'the hardcoded guard admits round-N-external; only the ignore sets can exclude the stale ones'
+    }
+
+    It 'ignores an unrelated topic named as a bare path' {
+        Test-EraPathIgnored -RelPath '.external-reviews/othertopic/round-1-prompt.md' -Sets $script:GenSets | Should -BeTrue
+        Test-EraPathIgnored -RelPath '.external-reviews/othertopic' -Sets $script:GenSets | Should -BeTrue
+    }
+
+    It 'reports a shape it genuinely cannot read rather than dropping it' {
+        $s = Get-EraIgnoreSets -IgnorePatterns @('a/*/b/**', 'dist/**')
+        @($s.Unparsed) | Should -Contain 'a/*/b/**'
+        Test-EraPathIgnored -RelPath 'dist/x.js' -Sets $s | Should -BeTrue -Because 'the readable ones still work'
+    }
+}

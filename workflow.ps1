@@ -158,13 +158,38 @@ function Get-EraIgnoreSets {
         # swallow that extension repo-wide. Round-6 (opus) measured this as the
         # 1 of 6 shipped patterns the parser silently dropped.
         SkipDirExt   = [System.Collections.Generic.List[hashtable]]::new()
+        # 'dir/*.*' -- files DIRECTLY in a directory, NOT recursively. era emits
+        # this for its own round artifacts ('<base>/<slug>/*.*'), and the
+        # non-recursion is the entire point: 'round-N-external/' underneath must
+        # survive, because that holds the staged review SUBJECTS. Round-7 (opus
+        # finding 5 / gemini blocker 3) measured this as silently dropped.
+        SkipDirFiles = [System.Collections.Generic.HashSet[string]]::new($cmp)
+        # A bare path with no wildcard at all -- 'a/b'. repomix reads it as both
+        # "this exact path" and "everything under it". era emits it for unrelated
+        # topics and for prior rounds' staging dirs. Also silently dropped.
+        SkipExact    = [System.Collections.Generic.HashSet[string]]::new($cmp)
+        # What this parser could NOT read. A silently-discarded ignore pattern is
+        # precisely how this bug class reproduces -- three of the five patterns
+        # era generates for a staging round were being dropped without a word --
+        # so misses are now reported rather than swallowed.
+        Unparsed     = [System.Collections.Generic.List[string]]::new()
     }
     foreach ($p in @($IgnorePatterns)) {
         $n = "$p" -replace '\\', '/'
         if ($n -match '^\*\*/([^*/]+)/\*\*$')          { [void]$sets.SkipDirNames.Add($matches[1]); continue }
         if ($n -match '^([^*]+)/\*\*/\*(\.[^*/]+)$')     { $sets.SkipDirExt.Add(@{ Dir = $matches[1].TrimEnd('/'); Ext = $matches[2] }); continue }
         if ($n -match '^([^*]+)/\*\*$')                  { [void]$sets.SkipDirs.Add($matches[1].TrimEnd('/')); continue }
+        if ($n -match '^([^*]+)/\*\.\*$')                { [void]$sets.SkipDirFiles.Add($matches[1].TrimEnd('/')); continue }
         if ($n -match '^\*(\.[^*/]+)$')                  { [void]$sets.SkipExts.Add($matches[1]); continue }
+        # Last: no wildcard anywhere. Both readings apply, as repomix applies them.
+        if ($n -notmatch '\*' -and $n.Trim()) {
+            $bare = $n.TrimEnd('/')
+            [void]$sets.SkipExact.Add($bare)
+            [void]$sets.SkipDirs.Add($bare)
+            continue
+        }
+        [void]$sets.Unparsed.Add("$p")
+        Write-Host "[era] WARNING: ignore pattern '$p' was not understood by the manifest/diff walk; it will NOT be applied there. repomix may still honour it, which makes the two layers disagree."
     }
     return $sets
 }
@@ -181,7 +206,21 @@ function Test-EraPathIgnored {
         [Parameter(Mandatory)][hashtable]$Sets
     )
     if ([string]::IsNullOrWhiteSpace($RelPath)) { return $false }
-    $n = ($RelPath -replace '\\', '/').TrimStart('./')
+    # Strip a leading './' PREFIX -- and nothing else. This was .TrimStart('./'),
+    # and .NET reads that argument as a SET OF CHARACTERS, so it ate the leading
+    # dot of every root-level dot-path:
+    #
+    #   '.git/config'    -> 'git/config'
+    #   '.venv/lib/x.py' -> 'venv/lib/x.py'
+    #
+    # Measured (round-7): '**/.git/**' is a SHIPPED vendor pattern, it parses
+    # into SkipDirNames correctly, and it still returned $false for '.git/config'
+    # -- so a correctly-written, correctly-parsed ignore never matched and the
+    # manifest/diff walks were free to hash .git. NESTED dot-dirs were unaffected
+    # ('sub/.venv/...' keeps its dot), which is why it went unnoticed.
+    $n = ($RelPath -replace '\\', '/')
+    if ($n.StartsWith('./')) { $n = $n.Substring(2) }
+    if ($Sets.ContainsKey('SkipExact') -and $Sets.SkipExact.Contains($n)) { return $true }
     if ($Sets.SkipExts.Count -gt 0) {
         $ext = [System.IO.Path]::GetExtension($n)
         if ($ext -and $Sets.SkipExts.Contains($ext)) { return $true }
@@ -195,6 +234,18 @@ function Test-EraPathIgnored {
         for ($i = 0; $i -lt ($segs.Count - 1); $i++) {
             $prefix = ($segs[0..$i] -join '/')
             if ($Sets.SkipDirs.Contains($prefix)) { return $true }
+        }
+    }
+    # 'dir/*.*' -- direct children only. NOT a prefix test: anything in a
+    # SUBdirectory must fall through, or era's '<base>/<slug>/*.*' would swallow
+    # the current round's round-N-external/ staging, which holds the review
+    # subjects themselves.
+    if ($Sets.ContainsKey('SkipDirFiles') -and $Sets.SkipDirFiles.Count -gt 0) {
+        $slash = $n.LastIndexOf('/')
+        if ($slash -gt 0) {
+            $parent = $n.Substring(0, $slash)
+            $leaf   = $n.Substring($slash + 1)
+            if ($leaf.Contains('.') -and $Sets.SkipDirFiles.Contains($parent)) { return $true }
         }
     }
     if ($Sets.ContainsKey('SkipDirExt') -and $Sets.SkipDirExt.Count -gt 0) {
