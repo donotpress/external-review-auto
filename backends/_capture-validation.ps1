@@ -164,21 +164,59 @@ function Test-EraPromptEcho {
         [AllowNull()][AllowEmptyString()][string]$PromptPath,
         [int]$WindowChars = 120,
         [int]$Samples = 40,
-        [double]$Threshold = 0.15
+        # Forward = how much of the PROMPT reappears in the response. A cheap
+        # pre-filter only -- measured on tests/fixtures/echo-corpus, forward
+        # CANNOT separate the two populations: legitimate max 0.450 EXCEEDS true
+        # positive min 0.350. That overlap is exactly why the one-directional
+        # detector rejected good reviews.
+        [double]$Threshold = 0.15,
+        # Reverse = how much of the RESPONSE is verbatim prompt. This is the
+        # real discriminator, and it is not close: every echo measures 1.000
+        # (the response IS prompt text) against a legitimate maximum of 0.100.
+        # 0.60 sits in the middle of a 10x gap and costs nothing -- no measured
+        # true positive is below 1.000. See tests/EchoCalibration.Tests.ps1.
+        [double]$ReverseThreshold = 0.60
     )
     if ($PromptPath -and [string]::IsNullOrEmpty($PromptText)) {
         $PromptText = Get-Content -Raw -LiteralPath $PromptPath -ErrorAction SilentlyContinue
     }
     if ([string]::IsNullOrWhiteSpace($PromptText) -or [string]::IsNullOrWhiteSpace($Response)) { return $false }
 
+    $ratio = Get-EraPromptEchoRatio -PromptText $PromptText -Response $Response `
+        -WindowChars $WindowChars -Samples $Samples
+    if (-not $ratio.Judged) { return $false }
+    return (($ratio.Forward -ge $Threshold) -and ($ratio.Reverse -ge $ReverseThreshold))
+}
+
+function Get-EraPromptEchoRatio {
+    <#
+    .SYNOPSIS
+        The raw bidirectional overlap between a prompt and a response. Returns
+        @{ Judged; Forward; Reverse; Min }.
+
+    .DESCRIPTION
+        Split out of Test-EraPromptEcho 2026-08-11 so the calibration harness can
+        measure the MARGIN between legitimate reviews and echoes, not merely
+        whether the current threshold happens to separate them today. A boolean
+        cannot tell you the separation is narrowing; a ratio can.
+
+        Judged=$false means the pair is outside this detector's competence (one
+        side shorter than WindowChars*2) and the caller must fail open.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$PromptText,
+        [AllowNull()][AllowEmptyString()][string]$Response,
+        [int]$WindowChars = 120,
+        [int]$Samples = 40
+    )
+    $unjudged = @{ Judged = $false; Forward = 0.0; Reverse = 0.0; Min = 0.0 }
+    if ([string]::IsNullOrWhiteSpace($PromptText) -or [string]::IsNullOrWhiteSpace($Response)) { return $unjudged }
+
     $p = (($PromptText -replace '\s+', ' ').Trim()).ToLowerInvariant()
     $r = (($Response   -replace '\s+', ' ').Trim()).ToLowerInvariant()
-
-    # Too short to sample meaningfully. Fail open -- this detector exists to
-    # catch a specific measured failure, not to guess. A response this short is
-    # a non-review anyway and belongs to the narration detector's length floor.
-    if ($p.Length -lt ($WindowChars * 2)) { return $false }
-    if ($r.Length -lt ($WindowChars * 2)) { return $false }
+    if ($p.Length -lt ($WindowChars * 2)) { return $unjudged }
+    if ($r.Length -lt ($WindowChars * 2)) { return $unjudged }
 
     # Fraction of evenly-spaced windows sampled from $From that appear verbatim
     # in $In.
@@ -196,27 +234,12 @@ function Test-EraPromptEcho {
         return ([double]$hit / $starts.Count)
     }
 
-    # BIDIRECTIONAL, and both directions must clear the bar.
-    #
-    # The forward ratio alone was unsafe in the regime this actually ships in.
-    # A false positive needs a contiguous verbatim run of
-    # WindowChars + 5*span/(Samples-1) characters. Against the 3-85 KB
-    # hand-written prompts the threshold was originally tuned on, that is
-    # ~11,000 chars -- hence a measured 0.000 across 69 pairs. Against era's own
-    # DEFAULT template (~628 chars normalised) it is ~195, and two adjacent
-    # sentences of that template are 314. 34 of 50 historical prompts are under
-    # 2,000 chars, so the short regime is the common one and was the one never
-    # measured. Found by the round-5 panel on the day the detector shipped.
-    #
-    # The asymmetry that fixes it: an echo is prompt-shaped in BOTH directions,
-    # while a review that merely quotes its instructions is prompt-shaped in one.
-    #   full echo      forward ~1.00  reverse ~1.00  -> flagged
-    #   quarter echo   forward ~0.23  reverse ~1.00  -> flagged
-    #   review quoting 314 chars of a 628-char prompt inside a 7,655-char answer
-    #                  forward ~0.30  reverse ~0.05  -> PASSES
     $forward = & $overlap $p $r
-    # Cheap exit: no need to scan the response if the prompt barely appears in it.
-    if ($forward -lt $Threshold) { return $false }
     $reverse = & $overlap $r $p
-    return ($reverse -ge $Threshold)
+    return @{
+        Judged  = $true
+        Forward = $forward
+        Reverse = $reverse
+        Min     = [Math]::Min($forward, $reverse)
+    }
 }

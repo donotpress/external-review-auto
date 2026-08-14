@@ -184,3 +184,56 @@ The measurement was rigorous and the conclusion was wrong, because the sample
 was drawn from the regime I happened to have data for rather than the regime the
 code ships in. A threshold is only as good as the distribution it was fitted to,
 and "69 real pairs" sounded like enough evidence to stop looking.
+
+
+---
+
+# Second revision, 2026-08-11: the harness immediately found the next problem
+
+The fix above (bidirectional, both directions over 0.15) was still calibrated
+against an un-committed corpus. So the corpus was rebuilt as a **committed,
+deterministic fixture set** spanning three length regimes
+(`tests/fixtures/echo-corpus/`), and `tests/EchoCalibration.Tests.ps1` asserts
+two things a boolean test cannot:
+
+1. **Regime coverage** — calibrating on one regime again is itself a test failure.
+2. **Margin** — it fails when the gap narrows, before any case flips.
+
+On its first run it reported:
+
+```
+forward: legit max=0.450 vs TP min=0.350   (OVERLAPS - unusable alone)
+reverse: legit max=0.100 vs TP min=1.000   (separates)
+```
+
+**The forward direction cannot separate the two populations at all.** The worst
+legitimate review scores *higher* forward (0.450) than the weakest true positive
+(0.350). That is the numerical statement of why the one-directional detector
+rejected good reviews — previously argued from geometry, now measured.
+
+It also showed the symmetric 0.15 bar was thinner than it looked: the
+`short/restates-instructions` pair passed only because reverse was 0.100, i.e.
+**0.05 under the bar**. Solving `(314 - 120) / (N - 120) >= 0.15` puts the false
+positive boundary at a genuine review of roughly **1,400 characters** — well
+within the range of a real terse review (the corpus holds real ones at 1,102 and
+1,550 bytes).
+
+## Thresholds are now asymmetric
+
+| direction | meaning | bar | measured |
+|---|---|---:|---|
+| forward | how much of the PROMPT reappears in the response | 0.15 | cheap pre-filter only; populations overlap |
+| reverse | how much of the RESPONSE is verbatim prompt | **0.60** | legit max 0.100 · every echo 1.000 |
+
+Raising the reverse bar from 0.15 to 0.60 costs **nothing**: no measured true
+positive is below 1.000, because an echo's response *is* prompt text. It moves
+the false-positive boundary from a ~1,400-character review down to a
+~440-character one, which is mostly-restatement and not a review.
+
+## The actual lesson
+
+Both revisions of this document were caused by the same thing, not by bad
+arithmetic: **the sample was drawn from the data that happened to exist rather
+than from the regime the code runs in.** The first time it cost a shipped
+regression. The second time a committed harness caught it in the same sitting.
+That is the whole argument for the harness.
