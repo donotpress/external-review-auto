@@ -65,8 +65,15 @@ if (-not $IncludeFiles) {
         'tests/VoidRound.Tests.ps1'
         'tests/EchoCalibration.Tests.ps1'
         'tests/RecoveryFallback.Tests.ps1'
-        'docs/assessments/2026-08-10-prompt-echo-threshold.md'
-        'docs/assessments/2026-08-10-threadjob-coverage.md'
+        'tests/IgnoreParity.Tests.ps1'
+        'tests/IgnorePatternDepth.Tests.ps1'
+        # The harness that produces the round. Round 7 was asked to grade a fix
+        # TO this file and answered "cannot verify -- not in the bundle".
+        'tools/grade-round.ps1'
+        # The design record. Every measured DECLINE lives here, and a reviewer
+        # that cannot see it re-argues what this repo already settled -- opus
+        # spent part of two rounds re-listing items closed by measurement.
+        'docs/assessments/*.md'
     )
 }
 
@@ -105,6 +112,37 @@ if ($lastManifest) {
 }
 if (-not $changes) {
     $changes = "## First graded round for this topic`n`nNo prior manifest found; grade the tree as it stands."
+}
+
+# --- Anything under review must be IN the bundle --------------------------
+# Round 7 closed with "What I could not verify from this bundle", and two of the
+# FOUR commits it was asked to grade were on that list -- c8f4c56 (a fix to this
+# very file) and 4419f97 (an assessment doc). Asking a reviewer "what changed
+# since round N" and then handing it a bundle missing half of that range can
+# only produce "I cannot tell", and that lands in the grade as if it were a
+# quality problem.
+#
+# The curated list above is stable CONTEXT. This union is COVERAGE: whatever the
+# range actually touched, derived from the same $lastHead the prose reports, so
+# the two cannot disagree. An explicit -IncludeFiles is left exactly as passed.
+$MaxDerived = 40
+if ($lastHead -and -not $PSBoundParameters.ContainsKey('IncludeFiles')) {
+    $touched = @(& git diff --name-only "$lastHead..HEAD" 2>$null |
+        Where-Object { $_ -and (Test-Path -LiteralPath (Join-Path $skillRoot $_)) })
+    $derived = @($touched | Where-Object { $_ -notin $IncludeFiles })
+    if ($derived.Count -gt $MaxDerived) {
+        # NO SILENT CAPS. A bundle that quietly truncates its own scope reads as
+        # "covered everything" when it did not -- which is the failure this
+        # block exists to fix, so it must not reintroduce it by another door.
+        $dropped = @($derived | Select-Object -Skip $MaxDerived)
+        Write-Host "[grade] WARNING: $($derived.Count) files changed since round $lastRound, over the $MaxDerived-file derived cap."
+        Write-Host "[grade] NOT bundled (name them in -IncludeFiles if they matter): $($dropped -join ', ')"
+        $derived = @($derived | Select-Object -First $MaxDerived)
+    }
+    if ($derived.Count -gt 0) {
+        $IncludeFiles = @($IncludeFiles) + $derived
+        Write-Host "[grade] +$($derived.Count) file(s) touched since round ${lastRound}: $($derived -join ', ')"
+    }
 }
 
 # --- Assemble ------------------------------------------------------------
