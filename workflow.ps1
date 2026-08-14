@@ -1725,6 +1725,17 @@ function Invoke-ReviewerDispatch {
     foreach ($d in $dispatched) {
         try {
             if ($d.Job.State -ne 'Completed') {
+                # Unblock the job BEFORE stopping it. Stop-EraAdapterChild's
+                # docstring records the measurement: a ThreadJob sitting inside
+                # Process.WaitForExit() cannot be interrupted, so Stop-Job blocks
+                # indefinitely and the native child keeps running. The straggler
+                # grace path above already tree-kills first for exactly this
+                # reason; this path -- budget expiry -- did not, and it is the
+                # path an adapter that overruns its own budget drives us down
+                # (round-7 opus, blocker 4). Killing the child makes the
+                # adapter's WaitForExit return, so Stop-Job has nothing to hang
+                # on. Harmless when there is no child: it returns $false.
+                $null = Stop-EraAdapterChild -PidFile $d.PidPath
                 Stop-Job -Job $d.Job -ErrorAction SilentlyContinue
                 $why = if ($stopReason -eq 'grace') {
                     "Abandoned after ${graceSec}s grace as the last outstanding reviewer" +

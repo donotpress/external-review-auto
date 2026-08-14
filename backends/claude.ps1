@@ -17,6 +17,42 @@
 # review -- on `opus`, a shipped default panel member.
 . (Join-Path $PSScriptRoot '_capture-validation.ps1')
 
+function Get-ClaudeRemainingMs {
+    <#
+    .SYNOPSIS
+        Milliseconds left until $Deadline, never negative.
+
+    .DESCRIPTION
+        An attempt gets ONE budget. Both of the blocking waits below
+        (stdinCopyTask.Wait and Process.WaitForExit) draw from this, so the sum
+        of the two can never exceed it.
+
+        It used to be $attemptTimeoutSec * 1000 passed to each in turn -- one
+        budget granted twice. Worst case 2 x TimeoutSec against a dispatcher
+        budget of TimeoutSec + 30, which puts the dispatcher into the one
+        collection path that calls Stop-Job on a job blocked inside
+        WaitForExit (see Stop-EraAdapterChild: measured to block indefinitely).
+
+        MEASURED by reproducing the shape against a child that never drains
+        stdin -- a 600 KB bundle cannot fit the ~64 KB pipe buffer, so the copy
+        blocks until someone reads:
+
+            stdin copy Wait returned False after 5.0s (budget 5s)
+            WaitForExit  returned False after a FURTHER 5.0s
+            TOTAL 10.1s against a single 5s budget -- 2.03x
+
+        THE CLAMP IS NOT COSMETIC. Task.Wait(int) and Process.WaitForExit(int)
+        both read a negative millisecond count as Timeout.Infinite, so an
+        exhausted budget expressed as a negative number would wait FOREVER --
+        turning a timeout into the exact hang this is meant to avoid.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][datetime]$Deadline)
+    $ms = ($Deadline - (Get-Date)).TotalMilliseconds
+    if ($ms -lt 0) { return 0 }
+    return [int][Math]::Ceiling($ms)
+}
+
 function Test-ClaudeTruncation {
     <#
     Detect whether claude CLI's stderr indicates response truncation or
@@ -141,6 +177,11 @@ function Invoke-ClaudeReview {
     # single unloaded verification run cannot surface it. The second attempt therefore gets whatever
     # is LEFT, floored at 60s so a nearly-exhausted budget fails fast instead of pretending to try.
     $attemptTimeoutSec = [Math]::Max(60, $TimeoutSec - [int]$sw.Elapsed.TotalSeconds)
+    # ONE deadline for this attempt. Both blocking waits below draw from it via
+    # Get-ClaudeRemainingMs, so stdin drain + process wait share the budget
+    # instead of each getting a full copy of it. See Get-ClaudeRemainingMs for
+    # the 2.03x measurement that motivated this.
+    $attemptDeadline = (Get-Date).AddSeconds($attemptTimeoutSec)
     $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
@@ -162,13 +203,22 @@ function Invoke-ClaudeReview {
         $bundleStream = [System.IO.File]::OpenRead($BundlePath)
         try {
             $stdinCopyTask = $bundleStream.CopyToAsync($claudeProc.StandardInput.BaseStream)
-            $null = $stdinCopyTask.Wait($attemptTimeoutSec * 1000)
+            $stdinStartSec = [int]$sw.Elapsed.TotalSeconds
+            $null = $stdinCopyTask.Wait((Get-ClaudeRemainingMs -Deadline $attemptDeadline))
+            # Instrumentation opus asked for before fixing. It could not measure
+            # how long real `claude` takes to drain a large bundle from stdin,
+            # and neither could I without a billed round -- so report it when it
+            # is slow enough to matter. Quiet on every healthy round.
+            $stdinSpentSec = [int]$sw.Elapsed.TotalSeconds - $stdinStartSec
+            if ($stdinSpentSec -ge 5) {
+                Write-Host "[claude] stdin drain took ${stdinSpentSec}s of the ${attemptTimeoutSec}s attempt budget."
+            }
         } finally {
             $bundleStream.Dispose()
             $claudeProc.StandardInput.Close()
         }
 
-        if (-not $claudeProc.WaitForExit($attemptTimeoutSec * 1000)) {
+        if (-not $claudeProc.WaitForExit((Get-ClaudeRemainingMs -Deadline $attemptDeadline))) {
             # Kill($true): tear down the whole tree. claude is a shim (cmd -> node);
             # a bare Kill() would orphan the node child.
             try { $claudeProc.Kill($true) } catch {}
