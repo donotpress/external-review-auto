@@ -1653,6 +1653,14 @@ function Copy-PrimaryResponseAlias {
         if (-not (Test-Path -LiteralPath $canonical)) { return }
         $evidence = Join-Path $ReviewDir (& $rejectedName $solo)
         Move-Item -LiteralPath $canonical -Destination $evidence -Force -ErrorAction SilentlyContinue
+        # Symmetric with the panel path below. This Move IS the boundary keeping
+        # a rejected answer out of round N+1; if it fails (lock, permissions) the
+        # canonical survives, still matches the {{PREVIOUS_ROUND}} glob, and
+        # poisons the next round -- silently, until now. Needs an I/O failure to
+        # bite, which is why round 5 called it a door rather than a blocker.
+        if (Test-Path -LiteralPath $canonical) {
+            Write-Host "[era] WARNING: could not demote $canonical; round N+1 may read a rejected response."
+        }
         return
     }
 

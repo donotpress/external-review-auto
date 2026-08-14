@@ -326,6 +326,25 @@ Describe 'Write-ReviewMetadata — Fix 4 honest fields' {
     }
 }
 
+Describe 'Copy-PrimaryResponseAlias — a failed demote is never silent' -Tag Unit {
+    # Round-5 (deepseek), "one unguarded door": the PANEL path warns when
+    # Move-Item fails to demote a rejected answer, because that file then still
+    # matches the {{PREVIOUS_ROUND}} glob and poisons round N+1. The SOLO path
+    # does the same Move with -ErrorAction SilentlyContinue and says nothing.
+    # Requires an I/O failure (lock/permissions) to bite, which is why it is a
+    # door and not a blocker -- but the whole point of the demote is that it is
+    # the boundary keeping rejected content out of the next round.
+    It 'the solo demote warns on failure, exactly as the panel demote does' {
+        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $i = $src.IndexOf('function Copy-PrimaryResponseAlias')
+        $j = $src.IndexOf("`nfunction ", $i + 10)
+        $body = $src.Substring($i, $j - $i)
+        # Two demote sites, two warnings.
+        ([regex]::Matches($body, 'could not demote')).Count |
+            Should -Be 2 -Because 'the solo path and the panel path both leave a rejected canonical behind on failure'
+    }
+}
+
 Describe 'Copy-PrimaryResponseAlias — first successful in preference order' {
     BeforeEach {
         $script:Dir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-alias-" + [guid]::NewGuid())
