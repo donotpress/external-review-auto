@@ -503,6 +503,21 @@ function Invoke-PromptTokenSubstitution {
         If {{PREVIOUS_ROUND}} is absent from the prompt, no action is taken (callers
         that manually summarize the previous round are unaffected).
 
+    .OUTPUTS
+        [bool] -- $true iff a token was actually substituted, i.e. the prompt file
+        NOW CARRIES the previous round's text. $false when the file is missing,
+        when there is no token, or when the only occurrences are BACKTICKED
+        mentions (which are deliberately not substitution sites -- see below).
+
+        This return value is the ONLY correct way to answer "does this prompt
+        already carry the previous round?", because the token is consumed here and
+        cannot be detected afterwards. era.ps1 feeds it straight to
+        Get-EraDiffPreviousReviewBlock. It used to ask its own unguarded regex
+        instead, which said "yes" for a backticked mention that this function had
+        correctly left alone -- so the -Diff block was suppressed and the
+        follow-up round dispatched with no prior review at all (round-7 blocker 1,
+        a regression from ab17ea0). Do not reintroduce a second copy of the rule.
+
     .PARAMETER PromptFile
         Absolute path to the prompt file to transform in place.
 
@@ -519,9 +534,17 @@ function Invoke-PromptTokenSubstitution {
         [Parameter(Mandatory)][int]$RoundN
     )
 
-    if (-not (Test-Path -LiteralPath $PromptFile)) { return }
+    # ONE definition of "is there a substitutable token here", used by the
+    # early-out below AND by the Replace at the bottom. Round-7 (opus) blocker 1:
+    # era.ps1 used to keep its OWN, unguarded copy of this rule to decide whether
+    # to suppress the -Diff <previous_review> block, and the two disagreed on
+    # exactly the case the guard exists for -- a backticked mention. See the
+    # comment above the Replace, and the return contract in .OUTPUTS.
+    $tokenPattern = '(?<!`)\{\{PREVIOUS_ROUND\}\}(?!`)'
+
+    if (-not (Test-Path -LiteralPath $PromptFile)) { return $false }
     $promptText = Get-Content -LiteralPath $PromptFile -Raw
-    if ($promptText -notmatch '\{\{PREVIOUS_ROUND\}\}') { return }
+    if ($promptText -notmatch $tokenPattern) { return $false }
 
     $previousN    = $RoundN - 1
     $responseFile = Join-Path $ReviewDir "round-$previousN-response.md"
@@ -578,11 +601,15 @@ function Invoke-PromptTokenSubstitution {
     # Known limitation: this recognises inline code spans only. A token inside a
     # fenced ``` block is still expanded; fixing that needs a real Markdown
     # parse, and the inline-span form is the one that occurs in practice.
-    $newText = [regex]::Replace($promptText, '(?<!`)\{\{PREVIOUS_ROUND\}\}(?!`)', [System.Text.RegularExpressions.MatchEvaluator]{
+    $newText = [regex]::Replace($promptText, $tokenPattern, [System.Text.RegularExpressions.MatchEvaluator]{
         param($m)
         return $substitution
     })
     Set-Content -LiteralPath $PromptFile -Value $newText -Encoding UTF8
+    # $true means the prompt NOW CARRIES the previous round. Only this function
+    # can answer that -- the token is gone by the time anyone else can look, and
+    # asking a second regex is what produced round-7's blocker 1.
+    return $true
 }
 
 function Stop-EraAdapterChild {

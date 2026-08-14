@@ -1020,18 +1020,25 @@ Be terse. If a section is empty, write "(none)".
     # the prompt, it just must be read before untrusted text is spliced in.
     $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
 
-    # Did the CALLER ask for the previous round themselves? Must be recorded
-    # here: Invoke-PromptTokenSubstitution below consumes the token, so after it
-    # runs there is no way to tell. The -Diff block downstream uses this to avoid
-    # carrying the whole panel a second time (see Get-EraDiffPreviousReviewBlock).
-    $script:PromptHadPreviousRoundToken =
-        ((Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue) -match '\{\{PREVIOUS_ROUND\}\}')
-
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
     # If the finalized prompt contains {{PREVIOUS_ROUND}}, replace it with the
     # prior round's response text. Must run AFTER the prompt file is finalized
     # and BEFORE repomix (which reads the prompt via instructionFilePath).
-    Invoke-PromptTokenSubstitution -PromptFile $promptPath -ReviewDir $reviewDir -RoundN $round
+    #
+    # The RETURN VALUE answers "does the prompt now carry the previous round?",
+    # which the -Diff block downstream uses to avoid carrying the whole panel a
+    # second time (see Get-EraDiffPreviousReviewBlock).
+    #
+    # This used to be a SEPARATE -match against '\{\{PREVIOUS_ROUND\}\}' run just
+    # above the call. Two regexes answering one question, and they disagreed:
+    # the substituting one skips BACKTICKED mentions on purpose, this one did
+    # not. A prompt that merely mentioned the token in an inline code span --
+    # the shape this repo's own meta-review prompts take -- therefore set the
+    # flag $true while nothing was substituted, and the -Diff block was
+    # suppressed: a follow-up round dispatched with NO prior review, silently.
+    # Round-7 blocker 1, a regression from ab17ea0. One rule, one definition.
+    $script:PromptHadPreviousRoundToken =
+        Invoke-PromptTokenSubstitution -PromptFile $promptPath -ReviewDir $reviewDir -RoundN $round
 
     # --- PR 4: -AutoDetect — derive candidate files from git status + HEAD~1 ---
     if ($AutoDetect.IsPresent) {
