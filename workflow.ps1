@@ -196,6 +196,48 @@ function Get-ReviewDiff {
     }
 }
 
+function Merge-EraDiffPrompt {
+    <#
+    .SYNOPSIS
+        Combine the generated -Diff prompt with whatever prompt already exists,
+        without discarding caller-supplied content.
+
+    .DESCRIPTION
+        The -Diff branch used to gate this on $script:UserSuppliedPromptOverride,
+        which answers "did the caller pass -PromptOverrideFile?" -- a narrower
+        question than the one it needed. Three things put caller content in that
+        file and only one was checked:
+
+          -PromptOverrideFile   explicit, or auto-detected pending-prompt.md
+          -ConversationFile     injected via placeholder, or appended as
+                                '## Session context'
+          -SpecReview           generates a prompt and assigns the LOCAL
+                                $PromptOverrideFile, never the script flag
+
+        So `-Diff -ConversationFile` silently dropped the session context, and
+        `-SpecReview -Diff` silently dropped the spec-review prompt. Both found by
+        the round-5 panel; the round-4 fix comment on that branch even lists
+        "-ConversationFile injection" among the things it protects.
+
+        NOT "always prepend": the diff template is self-contained, carrying its
+        own '## Output format' and instructions. Prepending it to the untouched
+        generic default would hand the reviewer two conflicting output formats.
+        Replace only when the existing prompt is that generic default.
+
+        Diff context goes FIRST -- stable caller context reads better after the
+        delta the reviewer must react to.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DiffPrompt,
+        [AllowNull()][AllowEmptyString()][string]$ExistingPrompt,
+        [bool]$ExistingCarriesCallerContent
+    )
+    if (-not $ExistingCarriesCallerContent) { return $DiffPrompt }
+    if ([string]::IsNullOrWhiteSpace($ExistingPrompt)) { return $DiffPrompt }
+    return ($DiffPrompt + "`n`n---`n`n" + $ExistingPrompt)
+}
+
 function Invoke-PromptTokenSubstitution {
     <#
     .SYNOPSIS

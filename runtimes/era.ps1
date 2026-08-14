@@ -148,6 +148,11 @@ if ($script:UserSuppliedIncludeFiles) {
 # auto-detect) — user-supplied prompts only honor -ConversationFile via an
 # explicit {{CONVERSATION_CONTEXT}} placeholder.
 $script:UserSuppliedPromptOverride = $PSBoundParameters.ContainsKey('PromptOverrideFile')
+# Broader than the flag above, and the one -Diff must consult: does $promptPath
+# carry content the CALLER supplied, from any source? -PromptOverrideFile,
+# -ConversationFile and -SpecReview all put content there; only the first sets
+# the flag above. See Merge-EraDiffPrompt.
+$script:PromptCarriesCallerContent = $PSBoundParameters.ContainsKey('PromptOverrideFile')
 
 $skillRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $skillRoot 'workflow.ps1')
@@ -611,6 +616,10 @@ Be terse. Don't pad. If a section is empty, write "(none)".
     $tmpPromptPath = Join-Path $tmpTopicDir 'spec-review-generated-prompt.md'
     Set-Content -LiteralPath $tmpPromptPath -Value $specPromptContent -Encoding UTF8
     $PromptOverrideFile = $tmpPromptPath
+    # NOT $script:UserSuppliedPromptOverride: that flag also controls the
+    # -ConversationFile placeholder contract, which a generated spec prompt does
+    # not participate in. This one only says "there is caller content here".
+    $script:PromptCarriesCallerContent = $true
     Write-Host "[era] -SpecReview: generated spec-review prompt at $tmpPromptPath"
     if ($relatedFiles.Count -gt 0) {
         Write-Host "[era] -SpecReview: auto-included related files from frontmatter: $($relatedFiles -join ', ')"
@@ -822,6 +831,7 @@ if (-not $PromptOverrideFile) {
         # Pre-written prompt = user-authored for -ConversationFile purposes
         # (honored only via {{CONVERSATION_CONTEXT}} placeholder).
         $script:UserSuppliedPromptOverride = $true
+        $script:PromptCarriesCallerContent = $true
         Write-Host "[era] Auto-detected pending-prompt.md in topic dir; using it as prompt override."
     }
 }
@@ -955,6 +965,7 @@ Be terse. If a section is empty, write "(none)".
             # .Replace = literal (no regex metacharacter surprises in $convText)
             $promptText = $promptText.Replace('{{CONVERSATION_CONTEXT}}', $convText)
             Set-Content -LiteralPath $promptPath -Value $promptText -Encoding utf8
+            $script:PromptCarriesCallerContent = $true
             Write-Host "[era] -ConversationFile: injected into {{CONVERSATION_CONTEXT}} placeholder."
         } elseif ($script:UserSuppliedPromptOverride) {
             # Hard error (smoke-review round 1): silently dropping session
@@ -974,6 +985,7 @@ Be terse. If a section is empty, write "(none)".
                 $promptText = $promptText.TrimEnd() + "`n`n" + $section
             }
             Set-Content -LiteralPath $promptPath -Value $promptText -Encoding utf8
+            $script:PromptCarriesCallerContent = $true
             Write-Host "[era] -ConversationFile: appended as '## Session context'."
         }
     } else {
@@ -1204,18 +1216,24 @@ Cite locations as file:line using the line numbers shown in the bundle; if unsur
 
 Be terse. If a section is empty, write "(none)".
 "@
-            # Do NOT clobber a caller-supplied prompt. This used to overwrite
-            # $promptPath outright, so -Diff silently discarded
+            # Do NOT clobber caller-supplied prompt content. This used to
+            # overwrite $promptPath outright, so -Diff silently discarded
             # -PromptOverrideFile, -ConversationFile injection, AND any
             # <!-- era-require --> marker — turning the response contract off
-            # exactly when a follow-up round most needs it. Prepend the diff
-            # context instead and keep the caller's prompt intact.
-            if ($script:UserSuppliedPromptOverride) {
-                $existingPrompt = Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue
-                ($diffPrompt + "`n`n---`n`n" + $existingPrompt) | Set-Content -LiteralPath $promptPath -Encoding utf8
-            } else {
-                $diffPrompt | Set-Content -LiteralPath $promptPath -Encoding utf8
-            }
+            # exactly when a follow-up round most needs it.
+            #
+            # The first fix (round 4) gated preservation on
+            # $script:UserSuppliedPromptOverride, which only answers "did the
+            # caller pass -PromptOverrideFile?". The round-5 panel found the two
+            # cases that leaves out — -ConversationFile and -SpecReview — i.e.
+            # two of the three sources this very comment claims to protect.
+            # $script:PromptCarriesCallerContent is the question that was
+            # actually meant. See Merge-EraDiffPrompt for why this is not simply
+            # "always prepend".
+            $existingPrompt = Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue
+            (Merge-EraDiffPrompt -DiffPrompt $diffPrompt -ExistingPrompt $existingPrompt `
+                -ExistingCarriesCallerContent $script:PromptCarriesCallerContent) |
+                Set-Content -LiteralPath $promptPath -Encoding utf8
             Write-Host "[era] Diff bundle: $($diffResult.BundleFiles.Count) changed, $($diffResult.Deleted.Count) deleted"
         }
     }
