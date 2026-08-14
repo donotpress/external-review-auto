@@ -325,3 +325,38 @@ Describe 'every pattern era generates is understood, and the rest say so' -Tag U
         Test-EraPathIgnored -RelPath 'dist/x.js' -Sets $s | Should -BeTrue -Because 'the readable ones still work'
     }
 }
+
+Describe 'Test-EraOwnReviewArtifact — one definition of "this is era output"' -Tag Unit {
+    # Round-7 (opus) finding 6: this predicate existed VERBATIM TWICE, in
+    # Get-ReviewDiff and Write-ReviewManifest, and the ignore-parser refactor
+    # that landed between them absorbed neither. Two copies of one rule is
+    # exactly how the {{PREVIOUS_ROUND}} blocker happened in the same round, so
+    # it is extracted rather than left to drift.
+
+    It 'treats era output under .external-reviews as its own' {
+        Test-EraOwnReviewArtifact -Path '.external-reviews/t/round-1-prompt.md' | Should -BeTrue
+        Test-EraOwnReviewArtifact -Path 'C:/repo/.external-reviews/t/round-1-response.md' | Should -BeTrue
+    }
+
+    It 'but NOT the staged review subjects, which are the thing being reviewed' {
+        # round-N-external/ holds files staged in from outside the repo because
+        # repomix can only bundle beneath repoRoot. Ignoring them would review
+        # nothing.
+        Test-EraOwnReviewArtifact -Path '.external-reviews/t/round-2-external/subject.ps1' | Should -BeFalse
+    }
+
+    It 'leaves ordinary source alone, including lookalike names' {
+        Test-EraOwnReviewArtifact -Path 'src/external-reviews-helper.ps1' | Should -BeFalse
+        Test-EraOwnReviewArtifact -Path 'docs/external-reviews.md' | Should -BeFalse
+        Test-EraOwnReviewArtifact -Path '' | Should -BeFalse
+    }
+
+    It 'is the only definition — both walks call it rather than inlining the regex' {
+        $wf = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $calls = [regex]::Matches($wf, 'Test-EraOwnReviewArtifact -Path')
+        $calls.Count | Should -BeGreaterOrEqual 2 -Because 'Get-ReviewDiff and Write-ReviewManifest both need it'
+        # The inline copies are gone. Anchored on the guard shape, not on the
+        # bare regex text, which still appears inside the function itself.
+        $wf | Should -Not -Match 'if \(\$normCp -match ''\(\^\|/\)\\\.external-reviews'
+    }
+}

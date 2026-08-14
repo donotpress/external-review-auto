@@ -256,16 +256,23 @@ function Test-EraCaptureAcceptable {
         Is this captured text a review? Returns @{ Ok; Error; Warning }.
 
     .DESCRIPTION
-        One classification shared by the adapters that reach the decision at the
-        same point with the same inputs -- the three REST backends and claude.
-        Round 5 and 6 both flagged the same ~15-line block replicated across six
-        adapters; opus's verdict was "half is defensible, half is not". This is
-        the half that is not.
+        One classification shared by every adapter that reaches the decision at
+        the same point with the same inputs -- the three REST backends, claude,
+        and opencode. Rounds 5 and 6 both flagged the same ~15-line block
+        replicated across six adapters.
 
-        agy and opencode keep their own call sites on purpose: agy decides inside
-        its retry loop, where a rejection means "try again" rather than "fail",
-        and opencode returns a fully-formed failure hashtable early. Forcing
-        those through one signature would be worse than the duplication.
+        opencode joined in round 7 (opus, finding 7). It had been excluded
+        because it "returns a fully-formed failure hashtable early" -- but the
+        SHAPE of an adapter's return is its own business and the CLASSIFICATION
+        is not, which is exactly what this verdict object separates. The
+        evidence that the exclusion cost something: fixing the gerund rule in
+        round 7 required no paste, and leaving opencode out meant the next
+        detector change would.
+
+        agy keeps its own call site on purpose and genuinely differs: it decides
+        INSIDE its retry loop, where a rejection means "try again" rather than
+        "fail". Forcing that through this signature would be worse than the
+        duplication.
 
         Order matters: narration is checked BEFORE echo, so a bundle-access
         refusal -- which is also technically prompt-shaped -- is reported as the

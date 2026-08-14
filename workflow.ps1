@@ -194,6 +194,36 @@ function Get-EraIgnoreSets {
     return $sets
 }
 
+function Test-EraOwnReviewArtifact {
+    <#
+    .SYNOPSIS
+        Is this path era's OWN output, as opposed to something it was asked to
+        review? Repo-relative or absolute, either way.
+
+    .DESCRIPTION
+        The rule: anything under .external-reviews is era's own artifact and must
+        never be hashed into a manifest or a diff -- EXCEPT round-N-external/,
+        which holds review SUBJECTS staged in from outside the repo because
+        repomix can only bundle beneath repoRoot. Those are the review, not the
+        output.
+
+        Extracted round-7 (opus, finding 6): this predicate existed VERBATIM
+        TWICE, in Get-ReviewDiff and Write-ReviewManifest, and the ignore-parser
+        refactor that landed between them absorbed neither. Two copies of a rule
+        is how the {{PREVIOUS_ROUND}} blocker happened in the same round.
+
+        NOT the same rule as era.ps1's own .external-reviews filter, which has no
+        round-N-external carve-out because it is answering a different question
+        (what to put in the include list, not what to hash). Deliberately left
+        separate rather than force-fitted here.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $n = $Path -replace '\\', '/'
+    return ($n -match '(^|/)\.external-reviews(/|$)' -and $n -notmatch '/round-\d+-external/')
+}
+
 function Test-EraPathIgnored {
     <#
     .SYNOPSIS
@@ -324,7 +354,7 @@ function Get-ReviewDiff {
             # uploaded and then never hashed, and no later round could see it
             # change. Two layers, one rule.
             $normCp = $cp -replace '\\', '/'
-            if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
+            if (Test-EraOwnReviewArtifact -Path $normCp) { continue }
             # ...and anything repomix itself would refuse to bundle. Compare on
             # the REPO-RELATIVE path: a rooted pattern like 'dist/**' is anchored
             # at the repo root, and testing it against an absolute path would
@@ -850,7 +880,7 @@ function Write-ReviewManifest {
                 # used to sweep up .external-reviews and every later round saw
                 # those artifacts as changed.
                 $normCp = $cp -replace '\\', '/'
-                if ($normCp -match '(^|/)\.external-reviews(/|$)' -and $normCp -notmatch '/round-\d+-external/') { continue }
+                if (Test-EraOwnReviewArtifact -Path $normCp) { continue }
             # ...and anything repomix itself would refuse to bundle. Compare on
             # the REPO-RELATIVE path: a rooted pattern like 'dist/**' is anchored
             # at the repo root, and testing it against an absolute path would

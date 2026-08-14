@@ -33,7 +33,10 @@ BeforeAll {
     $script:Root = Split-Path $PSScriptRoot -Parent
     . (Join-Path $script:Root 'backends/_capture-validation.ps1')
     $script:CorpusDir = Join-Path $PSScriptRoot 'fixtures/echo-corpus'
-    $script:Threshold = 0.15   # must track Test-EraPromptEcho's default
+    # No threshold literal lives here. It used to ($script:Threshold = 0.15, a
+    # third copy of a number defined twice already in _capture-validation.ps1),
+    # and the only test that read it scored a predicate the detector does not
+    # use. Verdict assertions call Test-EraPromptEcho directly instead.
 
     function script:Get-Pairs {
         param([string]$Regime)
@@ -145,30 +148,29 @@ Describe 'the MARGIN, which is the thing that actually degrades' -Tag Unit {
         ($tpRevMin - $legRevMax) | Should -BeGreaterThan 0.50 -Because 'the reverse gap is the safety margin'
     }
 
-    It 'the worst legitimate pair sits well below the worst echo' {
-        $legit = @()
-        $echo  = @()
-        foreach ($p in $script:All) {
-            $l = Get-EraPromptEchoRatio -PromptText $p.Prompt -Response $p.Response
-            if ($l.Judged) { $legit += $l.Min }
-            foreach ($frac in @(1.0, 0.5)) {
-                $slice = $p.Prompt.Substring(0, [int]($p.Prompt.Length * $frac))
-                $e = Get-EraPromptEchoRatio -PromptText $p.Prompt -Response $slice
-                if ($e.Judged) { $echo += $e.Min }
-            }
-        }
-        $legit.Count | Should -BeGreaterThan 0
-        $echo.Count  | Should -BeGreaterThan 0
-        $worstLegit = ($legit | Measure-Object -Maximum).Maximum
-        $worstEcho  = ($echo  | Measure-Object -Minimum).Minimum
-
-        Write-Host ("[calibration] worst legitimate={0:N3}  threshold={1:N2}  worst echo={2:N3}" -f `
-            $worstLegit, $script:Threshold, $worstEcho)
-
-        $worstLegit | Should -BeLessThan $script:Threshold -Because 'a legitimate review must never reach the bar'
-        $worstEcho  | Should -BeGreaterOrEqual $script:Threshold -Because 'an echo must always reach it'
-        # Separation, not just ordering: this fails when the gap narrows, which a
-        # pass/fail test cannot see until a case has already flipped.
-        ($worstEcho - $worstLegit) | Should -BeGreaterThan 0.20 -Because 'the threshold needs room on both sides'
-    }
+    # DELETED 2026-08-14 (round-7 opus, finding 8): 'the worst legitimate pair
+    # sits well below the worst echo'.
+    #
+    # It scored min(Forward, Reverse) against a single $script:Threshold = 0.15.
+    # That is NEITHER conjunct of the shipped predicate, which is
+    #
+    #     Forward >= 0.15  AND  Reverse >= 0.60        (Test-EraPromptEcho)
+    #
+    # so the test and the detector could disagree in both directions. A
+    # legitimate pair at Forward=0.45, Reverse=0.20 fails the deleted assertion
+    # while the detector correctly passes it -- i.e. it would have blocked a
+    # perfectly good corpus addition. It was also the THIRD copy of the 0.15
+    # literal, and it is deleted rather than annotated because everything it
+    # covered is already covered better, without the drift:
+    #
+    #   verdicts -- 'no legitimate review is flagged' and 'echoes ARE flagged'
+    #               above call Test-EraPromptEcho ITSELF, so they cannot drift
+    #               from the predicate; they ARE the predicate.
+    #   margin   -- 'the REVERSE direction is what separates them' above asserts
+    #               a gap of > 0.50 on the dimension that actually discriminates,
+    #               which is strictly stronger than the > 0.20 asserted here on a
+    #               dimension the detector does not use that way.
+    #
+    # $script:Threshold went with it. Get-EraPromptEchoRatio stays in this file
+    # for MARGIN NUMBERS only, which is what the file header says it is for.
 }

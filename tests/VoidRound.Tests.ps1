@@ -400,7 +400,15 @@ Describe 'the "everyone dropped at the cost prompt" void path is actually reacha
         # Two exit-2 sites now: the empty-approved guard and the post-metadata
         # void gate. Both must be exit 2 so a caller cannot tell a spent round
         # from an unspent one by accident.
-        ([regex]::Matches($script:VrEra, '(?m)^\s*exit 2\s*$')).Count | Should -Be 2
+        # SUPERSEDED 2026-08-14 (round-7 opus, finding 8): this pinned the COUNT
+        # to exactly 2, which breaks the moment a legitimate third void-round
+        # exit appears -- the same brittleness already corrected for the
+        # Get-EraVoidRoundReport call sites above, and for the same reason.
+        # What matters is that at least the two known sites exist and sit where
+        # they belong (asserted below); that no exit-2 path sets $runSucceeded
+        # first, and that every exit 2 is a void-round exit, are both pinned by
+        # their own tests.
+        ([regex]::Matches($script:VrEra, '(?m)^\s*exit 2\s*$')).Count | Should -BeGreaterOrEqual 2
         $guard = $script:VrEra.IndexOf('@($approvedList).Count -eq 0')
         $exit  = $script:VrEra.IndexOf('exit 2', $guard)
         $next  = $script:VrEra.IndexOf('$results = Invoke-ReviewerDispatch')

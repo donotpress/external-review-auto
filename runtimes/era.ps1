@@ -1729,6 +1729,22 @@ Be terse. If a section is empty, write "(none)".
         # Recover only when the round would otherwise be EMPTY. UsableCount is
         # the artifact-grounded count from the void report, so "usable" means the
         # same thing here as it does at the gate that decides exit 2.
+        #
+        # WHY THIS CALL IS SAFE BEFORE Copy-PrimaryResponseAlias, whose docstring
+        # says to call it AFTER (round-7 opus, finding 9 -- a real violation of a
+        # documented invariant, with no current consequence, one refactor away
+        # from having one):
+        #
+        # The invariant exists so that DEMOTED answers (*.rejected.md) are not
+        # counted as usable. Every path that leaves an un-demoted file on disk
+        # also carries ExitCode = -1 -- agy's 'agy-process-exit', a contract
+        # failure via Assert-EraResponseContract -- and Test-EraReviewerArtifact
+        # is gated on ExitCode -eq 0 inside Get-EraVoidRoundReport. So a
+        # not-yet-demoted reject cannot reach UsableCount from here.
+        #
+        # That reasoning is load-bearing: if the ExitCode gate in
+        # Get-EraVoidRoundReport is ever relaxed, this call site must move below
+        # Copy-PrimaryResponseAlias.
         $usableSoFar = (Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
             -Results $results -RequestedCount @($reviewerList).Count).UsableCount
         if (-not (Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar)) {

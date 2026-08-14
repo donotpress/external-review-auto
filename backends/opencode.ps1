@@ -386,43 +386,33 @@ function Invoke-OpencodeReview {
     }
 
     # Honest content validation: even on a clean exit, the capture can be a
-    # NON-review (a tool-intent narration or a bundle-access refusal). Flag those
-    # and fail honestly instead of recording the garbage as a successful review.
-    if (Test-AgenticNarrationCapture -Response $clean) {
+    # NON-review (a tool-intent narration, a bundle-access refusal, or the prompt
+    # handed straight back). Flag those and fail honestly instead of recording
+    # the garbage as a successful review.
+    #
+    # ONE classification, shared with claude and the three REST adapters. This
+    # used to be 37 lines running the two detectors itself and building a
+    # failure hashtable per branch. The justification for keeping the copy was
+    # that opencode "returns a fully-formed failure hashtable early" -- but the
+    # SHAPE of the return is this adapter's business and the CLASSIFICATION is
+    # not, so the verdict object supports it directly (round-7 opus, finding 7).
+    # Narration-before-echo ordering lives in the helper, so a bundle-access
+    # refusal is still reported as the refusal it is rather than as an echo.
+    $verdict = Test-EraCaptureAcceptable -Response $clean -PromptPath $PromptPath -Vendor 'opencode'
+    if (-not $verdict.Ok) {
         return @{
             Response      = $clean
             ExitCode      = -1
-            Error         = 'agentic-narration-capture'
+            Error         = $verdict.Error
             CaptureMethod = 'direct'
             ContentOk     = $false
             RetryCount    = 0
-            RetryReason   = 'agentic-narration-capture'
+            RetryReason   = $verdict.Error
             InputTokens   = $null
             OutputTokens  = [Math]::Ceiling($clean.Length / 4)
             WallClockSec  = [math]::Round($sw.Elapsed.TotalSeconds, 1)
             Stderr        = $stderr
-            Warnings      = @('opencode returned a non-review (tool-intent narration / bundle-access refusal); detector fired — re-dispatch to retry.')
-        }
-    }
-
-    # Prompt-echo detection: a well-formed-looking answer that is just the
-    # prompt handed back. The narration detector above cannot catch it -- every
-    # one of its branches is gated on the response having no markdown heading,
-    # and an era prompt is full of them.
-    if (Test-EraPromptEcho -PromptPath $PromptPath -Response $clean) {
-        return @{
-            Response      = $clean
-            ExitCode      = -1
-            Error         = 'prompt-echo'
-            CaptureMethod = 'direct'
-            ContentOk     = $false
-            RetryCount    = 0
-            RetryReason   = 'prompt-echo'
-            InputTokens   = $null
-            OutputTokens  = [Math]::Ceiling($clean.Length / 4)
-            WallClockSec  = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-            Stderr        = $stderr
-            Warnings      = @('opencode returned the prompt echoed back rather than a review (prompt-echo detector fired); re-dispatch to retry.')
+            Warnings      = @($verdict.Warning)
         }
     }
 

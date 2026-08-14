@@ -113,12 +113,24 @@ Describe 'every backend routes its capture through the shared detector' -Tag Uni
         $script:Src[$_] | Should -Match 'Test-AgenticNarrationCapture|Test-EraCaptureAcceptable'
     }
 
-    It '<_> classifies via the shared helper rather than its own copy' -ForEach @('claude','geminiapi','openaicompat','anthropic') {
-        # The four that reach the decision at the same point with the same
-        # inputs. agy and opencode keep their own call sites on purpose.
+    It '<_> classifies via the shared helper rather than its own copy' -ForEach @('claude','geminiapi','openaicompat','anthropic','opencode') {
+        # Round-7 (opus) finding 7: opencode was the LAST remaining copy -- 37
+        # lines of narration-then-echo that Test-EraCaptureAcceptable expresses
+        # in one call. Its stated justification was that it "returns a
+        # fully-formed failure hashtable early", but that is exactly what the
+        # verdict object supports: the shape of the return is the adapter's
+        # business, the CLASSIFICATION is not. Fixing the gerund rule in round 7
+        # required no paste; leaving opencode out meant the next detector change
+        # would.
+        #
+        # agy remains excluded on purpose and genuinely differs: it decides
+        # inside a retry loop, where a rejection means "try again", not "fail".
         $script:Src[$_] | Should -Match 'Test-EraCaptureAcceptable'
-        # ...and no longer carry the inline pair.
-        $script:Src[$_] | Should -Not -Match 'elseif \(Test-EraPromptEcho'
+        # ...and no longer runs the detectors itself. Anchored on the CALL shape,
+        # not the bare name: these files legitimately name the detectors in
+        # comments explaining why the shared classifier exists.
+        $script:Src[$_] | Should -Not -Match 'if \(Test-AgenticNarrationCapture -Response'
+        $script:Src[$_] | Should -Not -Match 'if \(Test-EraPromptEcho -PromptPath'
     }
 }
 

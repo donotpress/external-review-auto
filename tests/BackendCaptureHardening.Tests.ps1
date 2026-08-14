@@ -32,8 +32,30 @@ Describe 'shared narration/refusal detector' {
         $script:Src['opencode'] | Should -Match '_capture-validation\.ps1'
     }
     It 'opencode applies the detector to its captured output and fails honestly' {
-        $script:Src['opencode'] | Should -Match 'Test-AgenticNarrationCapture -Response \$clean'
+        # SUPERSEDED 2026-08-14 (round-7 opus, finding 7). This asserted that
+        # opencode called 'Test-AgenticNarrationCapture -Response $clean'
+        # DIRECTLY -- i.e. it pinned the last remaining copy of the
+        # narration-then-echo block, which is the thing finding 7 asked to
+        # remove. opencode now reaches the same decision through
+        # Test-EraCaptureAcceptable, which runs the narration check and the echo
+        # check in one place, in that order. (Same supersession already applied
+        # to DetectorCoverage.Tests.ps1 when the other four adapters collapsed.)
+        #
+        # The invariant is unchanged and is asserted more completely here than
+        # before: opencode CLASSIFIES its capture, and when the verdict is bad it
+        # fails honestly rather than recording garbage as a successful review.
+        $script:Src['opencode'] | Should -Match 'Test-EraCaptureAcceptable -Response \$clean'
         $script:Src['opencode'] | Should -Match 'ContentOk\s*=\s*\$false'
+        # "Fails honestly" in full: a non-review must not be recorded as success,
+        # and must say why. These were not asserted before.
+        $script:Src['opencode'] | Should -Match 'ExitCode\s*=\s*-1'
+        $script:Src['opencode'] | Should -Match 'RetryReason\s*=\s*\$verdict\.Error'
+        # And it must not write the artifact to disk on a bad verdict: the
+        # Set-Content of the response comes AFTER the early return.
+        $reject = $script:Src['opencode'].IndexOf('if (-not $verdict.Ok)')
+        $write  = $script:Src['opencode'].IndexOf('$clean | Set-Content -LiteralPath $ResponsePath')
+        $reject | Should -BeGreaterThan 0
+        $write  | Should -BeGreaterThan $reject -Because 'a rejected capture must never be written as a review'
     }
     It 'still flags a bundle-refusal and a tool-narration (behavioral, via shared file)' {
         Test-AgenticNarrationCapture -Response 'I cannot read the bundle file; please paste the content of the bundle here.' | Should -BeTrue
