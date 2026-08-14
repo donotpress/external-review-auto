@@ -99,7 +99,13 @@ function Test-AgenticNarrationCapture {
     # may legitimately open "Checking the dispatcher for races, I found..."; it
     # is only narration when the text is also short. Putting it in B1 (which has
     # no length gate) would reject those. Both directions are pinned by test.
-    $gerundOpener = $text -match '(?im)^\s*(checking|looking|reviewing|analy[sz]ing|examining|inspecting|scanning|starting|beginning|working)\b'
+    # (?i) only -- deliberately NOT (?m). Round-7 (opus): with (?m), ^ matches at
+    # every line start, so this disqualified the whitelist for a gerund on ANY
+    # line. Measured: "No correctness issues found; the concurrency fix is
+    # sound.\nReviewing the retry loop confirmed it." (97 chars) was flagged as a
+    # non-review purely for its second sentence. \A anchors to the start of the
+    # whole text, which is what "opener" was always supposed to mean.
+    $gerundOpener = $text -match '(?i)\A\s*(checking|looking|reviewing|analy[sz]ing|examining|inspecting|scanning|starting|beginning|working)\b'
     if ($hasProseReview -and $noNarration -and -not $gerundOpener) {
         # Legitimate terse review prose — let it pass even if under the floor.
     } elseif (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) { return $true }

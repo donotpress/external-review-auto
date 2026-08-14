@@ -1172,7 +1172,23 @@ Be terse. If a section is empty, write "(none)".
     if ($isFollowUp) {
         Write-Host "[era] Round $round (diff against round $priorRound)..."
         $diffResult = Get-ReviewDiff -ReviewDir $reviewDir -PriorRound $priorRound -CurrentFiles $effectiveInclude -RepoRoot $repoRoot -IgnorePatterns (Get-EraVendorIgnorePatterns)
-        if ($diffResult -and $diffResult.BundleFiles.Count -eq 0 -and $diffResult.Deleted.Count -eq 0) {
+        # Deletions do NOT justify a bundle. This used to require Deleted to be
+        # empty as well, so a deletions-only round proceeded with
+        # $effectiveInclude = @() -- and repomix reads an empty include array as
+        # NO FILTER, i.e. the whole tree. Verified against repomix directly:
+        # include:[] bundled 6 files from a 5-file tree. Meanwhile
+        # Measure-EraBroadScope, measuring that same empty list, reported
+        # "files: 0" and the scale gate waved it through: a full-repo upload
+        # with the consent gate reporting zero.
+        #
+        # 70093f3 manufactures the trigger -- a manifest written before the
+        # ignore filter existed holds node_modules paths that the filtered walk
+        # now skips, so they all classify as Deleted.
+        if ($diffResult -and $diffResult.BundleFiles.Count -eq 0) {
+            if ($diffResult.Deleted.Count -gt 0) {
+                Write-Host "[era] Only deletions since round $priorRound ($($diffResult.Deleted.Count) path(s)); nothing to review."
+                Write-Host ("[era]   " + (@($diffResult.Deleted) | Select-Object -First 20) -join ', ')
+            }
             Write-Host "[era] No files changed since round $priorRound. Omit -Diff to force a full re-bundle."
             return
         }
@@ -1437,6 +1453,16 @@ Be terse. If a section is empty, write "(none)".
     }
 
     # --- repomix config (built AFTER staging, see above) ----------------------
+    # An EMPTY include list is not "no files" to repomix -- it is "no filter",
+    # i.e. the entire repository. Nothing downstream distinguishes the two, and
+    # the scale gate measures the same empty list and reports zero. Fail loudly
+    # here rather than silently uploading the tree.
+    if (@($effectiveInclude).Count -eq 0) {
+        Stop-EraWithError ("The include list resolved to zero paths, which repomix would read as " +
+            "NO FILTER (the whole repository) rather than as an empty bundle. Refusing. " +
+            "On a -Diff round this means nothing changed; omit -Diff for a full re-bundle.")
+    }
+
     $configData = @{
         # showLineNumbers (2026-06-10 hardening P4): reviewers fabricate
         # bundle-relative line numbers on large bundles — observed on BOTH

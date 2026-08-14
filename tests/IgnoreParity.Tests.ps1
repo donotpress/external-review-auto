@@ -164,3 +164,42 @@ Describe 'era.ps1 passes the repomix patterns to both walks' -Tag Unit {
         $body | Should -Match 'Get-EraIgnoreSets'
     }
 }
+
+Describe 'a -Diff round can never hand repomix an empty include list' -Tag Unit {
+    # Round-7 blocker 1, found by opus in round 6 and independently by gemini in
+    # round 7. VERIFIED, including the part opus could not run:
+    #
+    #   repomix with include:[] bundled 6 files from a 5-file tree -- i.e. the
+    #   WHOLE REPOSITORY. It is not "no files", it is "no filter".
+    #
+    # Reachable because era.ps1's early return required BundleFiles.Count -eq 0
+    # AND Deleted.Count -eq 0. Deletions-only therefore proceeded with
+    # $effectiveInclude = @(), which went straight into the repomix config --
+    # while Measure-EraBroadScope, measuring that same empty list, reported
+    # "files: 0" and the scale gate waved it through. A full-repo upload with
+    # the consent gate reporting zero.
+    #
+    # 70093f3 (mine) MANUFACTURES the trigger: the prior round's manifest was
+    # written before the ignore filter existed, so it holds node_modules paths;
+    # the filtered walk now skips them and classifies every one as Deleted. The
+    # first post-upgrade -Diff round with no real edits has Deleted in the
+    # thousands and BundleFiles at zero.
+
+    BeforeAll { $script:EraSrc = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1') }
+
+    It 'stops a deletions-only diff round instead of bundling for it' {
+        # The early return must not require Deleted to be empty too.
+        $script:EraSrc | Should -Not -Match '\$diffResult\.BundleFiles\.Count -eq 0 -and \$diffResult\.Deleted\.Count -eq 0'
+        $script:EraSrc | Should -Match '\$diffResult\.BundleFiles\.Count -eq 0'
+    }
+
+    It 'carries a hard guard before the repomix config is written' {
+        # Belt and braces: any future path that empties the list is caught too,
+        # rather than silently becoming a repo-wide bundle.
+        $guard  = $script:EraSrc.IndexOf('@($effectiveInclude).Count -eq 0')
+        $config = $script:EraSrc.IndexOf('include = $effectiveInclude')
+        $guard  | Should -BeGreaterThan 0 -Because 'an empty include list is a repo-wide bundle, not an empty one'
+        $config | Should -BeGreaterThan 0
+        $guard  | Should -BeLessThan $config
+    }
+}

@@ -415,3 +415,24 @@ Describe 'Copy-PrimaryResponseAlias — first successful in preference order' {
         (Get-Content -Raw (Join-Path $script:Dir 'round-1-response.md')).Trim() | Should -Be 'GEMINI'
     }
 }
+
+Describe 'the gerund rule is an OPENER rule, not an any-line rule' -Tag Unit {
+    # Round-7 (opus) blocker 2, against cb52552 (mine). The pattern used (?im),
+    # and (?m) makes ^ match at EVERY line start -- so "opener" was a misnomer.
+    # Any line beginning with a gerund disqualified the prose whitelist, and a
+    # legitimate terse review was discarded for its second sentence.
+    #
+    # Measured before fixing: the two-line review below (97 chars) was flagged;
+    # the same text without its second line was not.
+
+    It 'does NOT flag a terse review whose LATER line starts with a gerund' {
+        $r = "No correctness issues found; the concurrency fix is sound.`nReviewing the retry loop confirmed it."
+        $r.Length | Should -BeLessThan 300
+        Test-AgenticNarrationCapture -Response $r | Should -BeFalse
+    }
+
+    It 'still flags one that OPENS with a gerund' {
+        Test-AgenticNarrationCapture -Response 'Checking for issues now.' | Should -BeTrue
+        Test-AgenticNarrationCapture -Response "Reviewing the code for edge cases.`nWill report shortly." | Should -BeTrue
+    }
+}
