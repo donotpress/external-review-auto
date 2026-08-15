@@ -97,13 +97,56 @@ quotes — i.e. a response-contract change, which lands it in the same place as
 every other contract feature here: **opt-in, presence-based, and carried by no
 built-in prompt**, so it would not fire on a default run.
 
+## The `path:line` variant — also measured, also declined
+
+**Added 2026-08-14, same day.** The section above left this open as "never
+measured, cheaper to test"; the interim panel (deepseek-flash) then proposed it
+independently with the same shape of prediction — *healthy rounds ground ≥ 80%
+of citations, a wrong-subject review fabricates them.* So it was measured too:
+extract `path.ext:NNN` citations, check the path exists in the bundle and the
+line is within that file's length. 32 reviewer-rounds with ≥ 5 citations.
+
+```
+FILE-OK  mean 99.5%   min 83.3%   max 100%
+LINE-OK  mean 85.1%   min 0%      max 100%
+```
+
+**The file half is saturated.** 99.5% mean, and not one round fell below the
+80% the prediction nominated as the failure line. A metric that says everyone is
+perfect cannot discriminate. Reviewers cite real filenames because the filenames
+are in the prompt and the bundle manifest — getting one wrong takes effort.
+
+**The line half is confounded three ways, and the outliers are artefacts.**
+Three rounds scored exactly 0%, which is too clean to be 26 independent
+mistakes. It is:
+
+1. **Agentic reviewers read the real tree.** opencode/agy backends have
+   filesystem access and cite the file on disk, not the subset in the bundle.
+2. **`-Diff` bundles hold a subset.** `era-heavy-investigation` round 2 bundled
+   10 files; `workflow.ps1` appears there at 510 lines. Any citation past that
+   scores wrong while being perfectly correct about the repo.
+3. **Reviewers do not share a citation convention.** Some cite per-file line
+   numbers; some cite BUNDLE-relative ones — gemini's interim response cites
+   `round-1-bundle.xml#L1983-L2052` explicitly. `backends/opencode.ps1:3021`
+   is not a per-file line number in any tree; it is a position in the merged
+   document. The same string means different things per reviewer.
+
+So the signal is bundle/tree divergence and convention drift, not fabrication.
+**No change made**; no `citation_total` / `citation_grounded` in metadata either.
+
 ## What survives
 
-The *diagnosis* is worth keeping even though the gate is not:
+Both grounding variants are now measured and declined, for *different* reasons —
+quote grounding because its denominator is dominated by code the reviewer
+authored, citation grounding because its file half is saturated and its line
+half is confounded. That pair is the useful result: it says the fluent-but-wrong
+review is not detectable by checking the reviewer's own references against the
+bundle, in either form.
 
-- **Wrong-subject review remains ungated.** It is still the failure mode with no
-  detector, and round 6's `path:line` variant is not refuted by this — it was
-  never measured. It is cheaper to test than this was and remains open.
+- **Wrong-subject review remains ungated**, and is now the failure mode with no
+  detector *and* no proposed detector that survives measurement. A future
+  proposal should be tested against the three confounds above before it is
+  built: agentic filesystem access, `-Diff` subsets, and citation convention.
 - **Do not reuse `Get-EraPromptEchoRatio` against the bundle** for any variant of
   this without re-running the split above. The engine works; the population it
   would be pointed at is the problem.
