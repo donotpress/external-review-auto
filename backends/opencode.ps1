@@ -79,6 +79,81 @@ function Restore-OpencodeVariantEntry {
     } catch {} finally { if ($mutex) { if ($held) { try { $mutex.ReleaseMutex() } catch {} }; $mutex.Dispose() } }
 }
 
+function Resolve-OpencodeStallPlan {
+    <#
+    .SYNOPSIS
+        How long may opencode go quiet before we call it stalled, given the
+        budget we were actually handed? Returns
+        @{ StallThresholdMs; WantedMs; CeilingMs; Clamped; BundleTokenEst }.
+
+    .DESCRIPTION
+        Reasoning-heavy variants ('max') can think silently for minutes before
+        the first token, so the appetite scales with the variant, plus a
+        bundle-size overlay (20ms/token ~ 50 tok/sec) for large bundles.
+
+        THE STALL MUST FIRE BEFORE OUR OWN TIMEOUT, or both land at once and the
+        timeout label wins -- mis-attributing a silent-think stall and skipping
+        the forensic snapshot the stall path writes.
+
+        This used to be achieved by ESCALATING $TimeoutSec to (stall + 30s). An
+        adapter cannot do that: the dispatcher waits TimeoutSec + 30 and then
+        abandons the reviewer, so time the adapter grants itself beyond that
+        does not exist. Measured, from the round that surfaced it:
+
+          [dispatch] Scaled TimeoutSec 600s -> 1800s for 174313-token bundle.
+          [opencode] Escalating timeout from 1800s to 3152s (variant=max,
+                     bundle=156116tok, stall threshold 3122.32s + 30s margin).
+
+        Dispatcher patience 1830s; stall 3122s; adapter timeout 3152s. BOTH of
+        the adapter's deadlines sat beyond the dispatcher's, so for a large
+        max-variant bundle neither could ever fire, the dispatcher always won,
+        and every failure was labelled "Timed out (global)" with no snapshot --
+        precisely the outcome the escalation existed to prevent.
+
+        So the budget is now taken as given and the THRESHOLD is clamped to fit
+        inside it. Same intent, using time that actually exists. The resulting
+        order holds at every size and variant:
+
+            stall threshold  <  adapter TimeoutSec  <  dispatcher TimeoutSec+30
+
+        A clamp is reported, not silent: it means the budget is too small for
+        this variant/bundle, which is a real thing for an operator to know.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [string]$Variant,
+        [long]$BundleBytes = 0
+    )
+    $variantBaseMs = switch ($Variant) {
+        'max'    { 600000 }
+        'high'   { 300000 }
+        default  { 120000 }
+    }
+    $bundleTokenEst = [int]($BundleBytes / 4)
+    $bundleScaledMs = [long]$bundleTokenEst * 20
+    $wantedMs       = [Math]::Max([long]$variantBaseMs, $bundleScaledMs)
+
+    # Leave the same 30s margin the escalation used, so the stall throw has room
+    # to fire cleanly before our own deadline. Floored so an absurdly small
+    # budget still yields a positive, sub-timeout threshold rather than 0 or a
+    # negative one.
+    $ceilingMs = [Math]::Max(1000L, ([long]$TimeoutSec - 30) * 1000)
+    if ($ceilingMs -ge ([long]$TimeoutSec * 1000)) {
+        $ceilingMs = [long][Math]::Floor($TimeoutSec * 1000 * 0.75)
+    }
+    $clamped = $wantedMs -gt $ceilingMs
+    $useMs   = if ($clamped) { $ceilingMs } else { $wantedMs }
+
+    return @{
+        StallThresholdMs = [int]$useMs
+        WantedMs         = [int]$wantedMs
+        CeilingMs        = [int]$ceilingMs
+        Clamped          = $clamped
+        BundleTokenEst   = $bundleTokenEst
+    }
+}
+
 function Invoke-OpencodeReview {
     [CmdletBinding()]
     param(
@@ -274,27 +349,20 @@ function Invoke-OpencodeReview {
         # Reasoning-heavy variants ('max') can think silently for minutes before the
         # first token, so the base scales with the variant; a bundle-size overlay
         # (20ms/token ~ 50 tok/sec) adds headroom for large bundles. Max of the two.
-        $pollMs        = 10000
-        $variantBaseMs = switch ($chosenVariant) {
-            'max'    { 600000 }
-            'high'   { 300000 }
-            default  { 120000 }
-        }
-        $bundleSize       = try { (Get-Item -LiteralPath $BundlePath -ErrorAction Stop).Length } catch { 0 }
-        $bundleTokenEst   = [int]($bundleSize / 4)
-        $bundleScaledMs   = $bundleTokenEst * 20
-        $stallThresholdMs = [Math]::Max($variantBaseMs, $bundleScaledMs)
-
-        # Auto-escalate the global timeout if the stall threshold would otherwise
-        # equal/exceed it (else both fire at the same instant and the timeout label
-        # wins, mis-attributing a silent-think stall). +30s margin lets the stall
-        # throw fire cleanly with the right label.
-        $minTimeoutForVariant = [int](($stallThresholdMs / 1000) + 30)
-        if ($TimeoutSec -lt $minTimeoutForVariant) {
-            Write-Host "[opencode] Escalating timeout from ${TimeoutSec}s to ${minTimeoutForVariant}s (variant=$chosenVariant, bundle=$($bundleTokenEst)tok, stall threshold $($stallThresholdMs/1000)s + 30s margin)."
-            $TimeoutSec = $minTimeoutForVariant
+        $pollMs     = 10000
+        $bundleSize = try { (Get-Item -LiteralPath $BundlePath -ErrorAction Stop).Length } catch { 0 }
+        # The budget is what the dispatcher handed us. We do NOT raise it -- see
+        # Resolve-OpencodeStallPlan for the measurement showing that an escalated
+        # $TimeoutSec is time the dispatcher never waits, which put BOTH of this
+        # adapter's deadlines out of reach on large max-variant bundles.
+        $stallPlan        = Resolve-OpencodeStallPlan -TimeoutSec $TimeoutSec -Variant $chosenVariant -BundleBytes $bundleSize
+        $stallThresholdMs = $stallPlan.StallThresholdMs
+        if ($stallPlan.Clamped) {
+            Write-Host ("[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok) " +
+                "-- CLAMPED from $($stallPlan.WantedMs/1000)s to fit the ${TimeoutSec}s budget. A silent think longer than " +
+                "$($stallThresholdMs/1000)s will be called a stall; raise the reviewer timeout if this variant needs longer.")
         } else {
-            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant base=$($variantBaseMs/1000)s, bundle=$($bundleTokenEst)tok scaled=$($bundleScaledMs/1000)s); TimeoutSec=${TimeoutSec}s."
+            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok); TimeoutSec=${TimeoutSec}s."
         }
         $lastSize   = $stdoutSink.Length + $stderrSink.Length
         $lastGrowth = [System.Diagnostics.Stopwatch]::StartNew()
