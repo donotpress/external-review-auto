@@ -170,3 +170,72 @@ try {
         }
     }
 }
+
+Describe 'a wildcard include entry cannot reach outside the repo root' -Tag Unit {
+    # Interim round (gemini), blocker 1 -- CONFIRMED by measurement, including
+    # the severity half the reviewer could only assert.
+    #
+    # era.ps1's traversal guard exempted any entry containing '*' or '?':
+    #
+    #     if ($_ -match '[*?]') { return $false }      # $false = "not a traversal"
+    #
+    # because Resolve-Path -LiteralPath cannot resolve a glob. That is fail-OPEN:
+    # the guard skipped exactly the entries it could not evaluate. Measured:
+    #
+    #     entry '../*.md'   -> traversal BLOCKED? False
+    #
+    # and repomix honours it. Ran repomix directly with include ['../<dir>/*.md']
+    # against a sibling directory holding a marker file:
+    #
+    #     bundle files: 1
+    #       ../era-outside-<guid>/SECRET-OUTSIDE.md
+    #     CONTAINS THE OUT-OF-ROOT SECRET? : True
+    #
+    # So the file is uploaded to the reviewer APIs, while Write-ReviewManifest
+    # filters out-of-root paths OUT of source_hashes -- the round transmits
+    # content it does not record. era prints "path traversal blocked" and did
+    # not block it.
+    #
+    # A glob cannot be resolved, but its LITERAL PREFIX can: everything up to the
+    # first wildcard is a real path, and if that escapes the root the whole
+    # pattern does.
+
+    BeforeAll { . (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1') }
+
+    It 'blocks a relative wildcard that climbs out' {
+        Test-EraIncludeEntryEscapesRoot -Entry '../*.md'          -Root 'C:/repo' | Should -BeTrue
+        Test-EraIncludeEntryEscapesRoot -Entry '../../secret/*'   -Root 'C:/repo' | Should -BeTrue
+        Test-EraIncludeEntryEscapesRoot -Entry '..\*.md'          -Root 'C:/repo' | Should -BeTrue
+        Test-EraIncludeEntryEscapesRoot -Entry '../sib/**/*.ts'   -Root 'C:/repo' | Should -BeTrue
+    }
+
+    It 'allows every ordinary glob shape era actually ships' {
+        # Regression guard: the default include globs must keep working.
+        foreach ($g in @('**/*.md', '**/*.ts', 'src/**/*.ps1', 'docs/assessments/*.md',
+                         'tests/*.Tests.ps1', '*.ps1', 'a/b/c/*.json')) {
+            Test-EraIncludeEntryEscapesRoot -Entry $g -Root 'C:/repo' | Should -BeFalse -Because "$g is inside the root"
+        }
+    }
+
+    It 'allows a climb that lands back inside the root' {
+        Test-EraIncludeEntryEscapesRoot -Entry 'src/../docs/*.md' -Root 'C:/repo' | Should -BeFalse
+    }
+
+    It 'blocks an absolute wildcard outside the root, and allows one inside' {
+        Test-EraIncludeEntryEscapesRoot -Entry 'C:/elsewhere/*.md' -Root 'C:/repo' | Should -BeTrue
+        Test-EraIncludeEntryEscapesRoot -Entry 'C:/repo/src/*.md'  -Root 'C:/repo' | Should -BeFalse
+    }
+
+    It 'is not fooled by a prefix that merely starts with the root string' {
+        # 'C:/repo-secrets' is NOT under 'C:/repo'.
+        Test-EraIncludeEntryEscapesRoot -Entry 'C:/repo-secrets/*.md' -Root 'C:/repo' | Should -BeTrue
+    }
+
+    It 'era.ps1 no longer waves wildcards through its traversal guard' {
+        $era = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+        # Anchored on the guard's own predicate line, not on a bare pattern that
+        # would also match the comment explaining the fix.
+        $era | Should -Match 'Test-EraIncludeEntryEscapesRoot'
+        $era | Should -Not -Match '(?m)^\s*if \(\$_ -match ''\[\*\?\]''\) \{ return \$false \}\s*$'
+    }
+}

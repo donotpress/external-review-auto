@@ -194,6 +194,65 @@ function Get-EraIgnoreSets {
     return $sets
 }
 
+function Test-EraIncludeEntryEscapesRoot {
+    <#
+    .SYNOPSIS
+        Would this -IncludeFiles entry reach outside $Root? Works for GLOBS,
+        which cannot be resolved and were therefore skipped entirely.
+
+    .DESCRIPTION
+        era's traversal guard exempted any entry containing '*' or '?', because
+        Resolve-Path -LiteralPath cannot resolve a glob. That is fail-OPEN: it
+        skipped precisely the entries it could not evaluate. Interim-round
+        (gemini) blocker 1, confirmed by measurement:
+
+            entry '../*.md'  ->  traversal BLOCKED? False
+
+        and repomix honours it. Run directly with include ['../<dir>/*.md']
+        against a sibling directory holding a marker file:
+
+            bundle files: 1
+              ../era-outside-<guid>/SECRET-OUTSIDE.md
+            CONTAINS THE OUT-OF-ROOT SECRET? : True
+
+        So the content is uploaded to the reviewer APIs while
+        Write-ReviewManifest filters out-of-root paths OUT of source_hashes --
+        the round transmits what it does not record, and era prints "path
+        traversal blocked" while not blocking it.
+
+        A glob cannot be resolved, but its LITERAL PREFIX can: everything up to
+        the first wildcard is an ordinary path, and if that escapes the root then
+        every file the pattern can match escapes it too. GetFullPath normalises
+        the '..' segments without touching the disk, so this works on patterns
+        that match nothing yet.
+
+        Comparison is on the normalised full path with a trailing separator, so
+        'C:/repo-secrets' does not count as inside 'C:/repo'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Entry,
+        [Parameter(Mandatory)][string]$Root
+    )
+    if ([string]::IsNullOrWhiteSpace($Entry)) { return $false }
+    $e = $Entry -replace '\\', '/'
+    # Everything before the first wildcard is literal.
+    $literal = ($e -split '[*?]')[0]
+    # Keep only the directory part: a trailing partial filename is harmless, and
+    # 'src/foo' would otherwise be treated as a directory that must exist.
+    if ($literal -notmatch '/$') { $literal = ($literal -replace '[^/]*$', '') }
+
+    $rootFull = [System.IO.Path]::GetFullPath((($Root -replace '\\', '/').TrimEnd('/')) + '/')
+    try {
+        $target = if ([System.IO.Path]::IsPathRooted($literal)) { $literal }
+                  else { [System.IO.Path]::Combine($rootFull, $literal) }
+        $targetFull = [System.IO.Path]::GetFullPath($target)
+    } catch { return $true }   # unparseable -> refuse, do not fail open
+
+    if ($targetFull -notmatch '[\\/]$') { $targetFull += [System.IO.Path]::DirectorySeparatorChar }
+    return -not $targetFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
 function Test-EraOwnReviewArtifact {
     <#
     .SYNOPSIS

@@ -1536,8 +1536,20 @@ Be terse. If a section is empty, write "(none)".
             # -LiteralPath so a bracketed name resolves to itself instead of
             # being read as a character class and silently resolving to nothing
             # (which would return $false here — fail-open, the wrong direction).
+            # A GLOB used to be waved through here ('if ($_ -match "[*?]") {
+            # return $false }'), because Resolve-Path cannot resolve one. That
+            # was fail-OPEN on exactly the entries the guard could not evaluate.
+            # Measured (interim round, gemini blocker 1): '../*.md' was NOT
+            # blocked, and repomix bundled the sibling directory's file --
+            # verified end to end, the marker text landed in the bundle. Since
+            # Write-ReviewManifest filters out-of-root paths OUT of
+            # source_hashes, the round uploaded content it did not record, under
+            # a message claiming traversal was blocked.
+            #
+            # Test-EraIncludeEntryEscapesRoot judges a glob by its LITERAL
+            # PREFIX, which is a real path even when the pattern matches nothing.
             $traversal = @($IncludeFiles | Where-Object {
-                if ($_ -match '[*?]') { return $false }
+                if ($_ -match '[*?]') { return (Test-EraIncludeEntryEscapesRoot -Entry $_ -Root $repoRoot) }
                 $resolved = (Resolve-Path -LiteralPath $_ -ErrorAction SilentlyContinue).Path
                 if (-not $resolved) { return $false }
                 -not (Test-EraPathInsideRoot -Path $resolved -Root $repoRoot)
