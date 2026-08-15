@@ -761,7 +761,26 @@ if ($Model) {
         }
         if ($Provider) {
             $providerOverrides[$reviewerList[0]] = $Provider
-            Write-Host "[era] Provider override: $Provider"
+            # HONEST, because it is currently inert. Every adapter declares
+            # -OpencodeProvider and every one of them ignores it by name
+            # ("Accepted-and-ignored", "ignored -- provider is in ModelInfo"):
+            # agy.ps1:520, claude.ps1:97, opencode.ps1:169, geminiapi.ps1:33,
+            # anthropic.ps1:33, openaicompat.ps1:35. The provider is derived
+            # from the model_id / ModelInfo since the stateless refactor, so
+            # this override reaches the dispatcher, is passed to the adapter,
+            # and is dropped there.
+            #
+            # This used to print "[era] Provider override: X", which told the
+            # user it had taken effect. Interim round (deepseek-flash) F1: a
+            # user-facing flag that prints a confirmation and does nothing is
+            # the same class as the silent-success failures this skill exists to
+            # prevent, pointed at the operator instead of the reviewer.
+            #
+            # Kept accepted rather than deleted: removing a shipped flag and the
+            # $providerOverrides plumbing changes the dispatcher signature, which
+            # is a larger change than this defect warrants. Saying the truth
+            # costs two lines and can never mislead.
+            Write-Host "[era] WARNING: -Provider '$Provider' is currently INERT. Every adapter ignores it; the provider is derived from the resolved model id. Use a provider-specific -Model hint, or -Reviewer, to choose where a review runs."
         }
     } else {
         Write-Host "[era] WARNING: Model hint '$Model' did not resolve to a known model."

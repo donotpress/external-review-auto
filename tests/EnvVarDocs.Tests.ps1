@@ -57,3 +57,47 @@ Describe 'Every ERA_* env var the code reads is documented' -Tag Unit {
         @($missing) -join ', ' | Should -BeNullOrEmpty
     }
 }
+
+Describe '-Provider does not claim an effect it does not have' -Tag Unit {
+    # Interim round (deepseek-flash), F1. Every adapter declares
+    # -OpencodeProvider and every one ignores it by name -- the provider is
+    # derived from the resolved model id since the stateless refactor. era.ps1
+    # nevertheless printed "[era] Provider override: X", telling the operator it
+    # had taken effect.
+    #
+    # A user-facing flag that prints a confirmation and does nothing is the same
+    # class as the silent-success failures this skill exists to prevent, aimed
+    # at the operator instead of the reviewer.
+    #
+    # The flag stays ACCEPTED (deleting it and the $providerOverrides plumbing
+    # changes the dispatcher signature); it just stops lying.
+
+    BeforeAll {
+        $script:R = Split-Path $PSScriptRoot -Parent
+        $script:Era = Get-Content -Raw (Join-Path $script:R 'runtimes/era.ps1')
+    }
+
+    It 'no longer reports a plain "Provider override" confirmation' {
+        $script:Era | Should -Not -Match 'Write-Host "\[era\] Provider override: \$Provider"'
+    }
+
+    It 'says it is inert, and says what to use instead' {
+        $line = [regex]::Match($script:Era, '(?m)^\s*Write-Host "\[era\] WARNING: -Provider[^\r\n]*$').Value
+        $line | Should -Not -BeNullOrEmpty
+        $line | Should -Match 'INERT'
+        $line | Should -Match '-Model|-Reviewer' -Because 'an honest warning names the working alternative'
+    }
+
+    It 'and the claim is true: every adapter still ignores the parameter' {
+        # If an adapter ever WIRES it up, this fails and the warning must go.
+        foreach ($b in @('agy','claude','opencode','geminiapi','anthropic','openaicompat')) {
+            $src = Get-Content -Raw (Join-Path $script:R "backends/$b.ps1")
+            $src | Should -Match '\$OpencodeProvider' -Because "$b declares it"
+            # Declared-and-unused: it must not appear in any expression beyond
+            # its own param declaration and comments.
+            $uses = [regex]::Matches($src, '(?m)^\s*(?!#).*\$OpencodeProvider.*$') |
+                Where-Object { $_.Value -notmatch '^\s*\[string\]\$OpencodeProvider' }
+            @($uses).Count | Should -Be 0 -Because "$b must still ignore it, or era's warning is now wrong"
+        }
+    }
+}
