@@ -1285,7 +1285,18 @@ Be terse. If a section is empty, write "(none)".
         # matched the FIRST candidate instead of failing. Measured:
         #   hint '.*' -> norm '' -> 'gemini 36 flash high' -match '' = True
         # Silently dispatching an arbitrary model is worse than not resolving.
-        if (-not $hintNorm.Trim()) { $hintNorm = $null }
+        # ABORT resolution, do not merely null the pattern. Setting $hintNorm to
+        # $null and falling through reached '$displayNorm -match $hintNorm'
+        # below, and PowerShell measures '-match $null' as TRUE for EVERY string
+        # -- so every candidate matched, the highest tier rank won, and the hint
+        # silently selected an arbitrary model: exactly the outcome the comment
+        # above says must not happen.
+        #
+        # agy.ps1's Find-AgyModelFromHint got this right ('return $null') and
+        # this copy got it wrong. Round-7 (opus) listed these two as one of the
+        # four rules with two definitions and named this very patch as the
+        # evidence they drift; the interim round found the half that drifted.
+        $hintUsable = [bool]$hintNorm.Trim()
         $agyMap = @{}
         if ($registry._agy_model_map) {
             $registry._agy_model_map.PSObject.Properties | ForEach-Object {
@@ -1299,7 +1310,7 @@ Be terse. If a section is empty, write "(none)".
             foreach ($tierKey in $family.PSObject.Properties.Name) {
                 $entry = $family.$tierKey
                 $displayNorm = $entry.display.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
-                if ($displayNorm -match $hintNorm -or $hintNorm -match $displayNorm) {
+                if ($hintUsable -and ($displayNorm -match $hintNorm -or $hintNorm -match $displayNorm)) {
                     $tierRank = if ($tierKey -eq 'high') { 3 } elseif ($tierKey -eq 'medium') { 2 } else { 1 }
                     $candidates += @{ Display = $entry.display; TierKey = $tierKey; TierRank = $tierRank }
                 }

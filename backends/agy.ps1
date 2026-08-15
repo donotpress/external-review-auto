@@ -301,7 +301,14 @@ function _SpawnAndCaptureOnce {
         [Parameter(Mandatory)][string]$PromptPath,
         [Parameter(Mandatory)][hashtable]$ModelInfo,
         [int]$TimeoutSec = 600,
-        [string]$ResolvedModelToken
+        [string]$ResolvedModelToken,
+        # DECLARED, because this function WRITES it (see the Set-Content below).
+        # It was missing here while the write referenced $PidFile anyway, so
+        # under no-StrictMode it was always $null and the file was never
+        # created. Measured: Stop-EraAdapterChild returned $false for agy every
+        # time, which silently disabled BOTH dispatcher abandon paths for the
+        # default panel's first reviewer.
+        [string]$PidFile
     )
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $errFile  = [System.IO.Path]::GetTempFileName()
@@ -580,7 +587,8 @@ function Invoke-AgyReview {
         $threwError = $null
         try {
             $result = _SpawnAndCaptureOnce -BundlePath $BundlePath -PromptPath $PromptPath `
-                -ModelInfo $ModelInfo -TimeoutSec $perAttemptTimeoutSec -ResolvedModelToken $resolvedToken
+                -ModelInfo $ModelInfo -TimeoutSec $perAttemptTimeoutSec -ResolvedModelToken $resolvedToken `
+                -PidFile $PidFile
         } catch {
             $threwError = $_.Exception.Message
             $result = @{ Response = $null; ExitCode = -1; Strategy = $null; Stderr = $threwError; WallClockSec = 0 }

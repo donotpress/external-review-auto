@@ -129,3 +129,45 @@ Describe 'the dispatcher never calls Stop-Job on a job that may be inside WaitFo
         $script:Wf | Should -Match 'Stop-EraAdapterChild -PidFile \$straggler\.PidPath'
     }
 }
+
+Describe 'every native adapter actually WRITES the pid file the dispatcher kills by' -Tag Unit {
+    # Interim round (deepseek-flash), top finding, confirmed by measurement.
+    #
+    # agy.ps1 writes the child pid at :377 -- inside _SpawnAndCaptureOnce, which
+    # DOES NOT DECLARE $PidFile. Invoke-AgyReview declares it (:518, with a
+    # docstring explaining that the dispatcher needs it to tree-kill) and never
+    # forwards it. Under no-StrictMode $PidFile is silently $null there, so the
+    # Set-Content never runs and the file never exists.
+    #
+    # Measured consequence: Stop-EraAdapterChild returns $false for agy, always.
+    # So BOTH abandon paths degrade for the default panel's FIRST reviewer --
+    # the grace path falls into "no killable child -> disable grace and wait out
+    # the whole budget", and the budget-expiry path calls Stop-Job on a thread
+    # that may be inside WaitForExit, which is the hang its own docstring
+    # records as measured. The straggler machinery did not work for agy at all.
+    #
+    # This is also what made the previous commit's budget-path tree-kill a no-op
+    # for agy specifically: it had nothing to kill by.
+
+    BeforeAll {
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/agy.ps1')
+    }
+
+    It 'agy: the function that spawns the child DECLARES -PidFile' {
+        (Get-Command _SpawnAndCaptureOnce).Parameters.Keys | Should -Contain 'PidFile' `
+            -Because 'it writes $PidFile at agy.ps1:377; undeclared, that is always $null'
+    }
+
+    It 'agy: the retry loop FORWARDS -PidFile to it' {
+        $src  = $script:Adapters['agy']
+        $call = [regex]::Match($src, '_SpawnAndCaptureOnce -BundlePath[\s\S]{0,400}?(?=\r?\n\s*\}?\s*catch)').Value
+        $call | Should -Not -BeNullOrEmpty
+        $call | Should -Match '-PidFile' -Because 'declaring it and not passing it is the same dead code by another door'
+    }
+
+    It '<_>: writes the pid file it was handed' -ForEach @('agy','claude','opencode') {
+        # claude.ps1 and opencode.ps1 already did this; agy is the one that did
+        # not, and the -ForEach is what stops the next adapter from regressing.
+        $script:Adapters[$_] | Should -Match 'Set-Content -LiteralPath \$PidFile'
+    }
+}

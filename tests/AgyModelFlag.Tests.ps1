@@ -197,9 +197,23 @@ Describe 'A hint that normalises to empty must not match everything' -Tag Unit {
         $script:SkillRootEH = Split-Path $PSScriptRoot -Parent
     }
 
-    It 'era.ps1 nulls an empty-normalised agy hint instead of matching' {
+    It 'era.ps1 refuses to resolve an empty-normalised agy hint' {
+        # SUPERSEDED 2026-08-14 (interim round, gemini regression 1). This
+        # asserted the PRESENCE OF A LINE -- 'if (-not $hintNorm.Trim()) {
+        # $hintNorm = $null }' -- rather than the EFFECT that line was supposed
+        # to have. The line was there, the test was green, and the behaviour was
+        # still wrong: nulling $hintNorm and falling through reaches
+        # '-match $hintNorm', which PowerShell measures as TRUE for every
+        # string, so a punctuation-only hint matched every candidate and the
+        # top tier won.
+        #
+        # A test that pins the patch instead of the outcome cannot fail when the
+        # patch is written incorrectly. This one now pins the outcome: nothing
+        # may be matched when the hint is unusable.
         $src = Get-Content -Raw (Join-Path $script:SkillRootEH 'runtimes/era.ps1')
-        $src | Should -Match 'if \(-not \$hintNorm\.Trim\(\)\) \{ \$hintNorm = \$null \}'
+        $call = [regex]::Match($src, '(?m)^\s*if \([^\r\n]*-match \$hintNorm[^\r\n]*$').Value
+        $call | Should -Not -BeNullOrEmpty -Because 'the candidate match must exist to be guarded'
+        $call | Should -Match '\$hintUsable' -Because 'the match must not be reached with an unusable hint'
     }
 
     It 'the agy adapter returns null for an empty-normalised hint' {
@@ -220,5 +234,76 @@ Describe 'A hint that normalises to empty must not match everything' -Tag Unit {
             $norm = $case.Hint.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
             (-not $norm.Trim()) | Should -Be $case.ShouldGuard -Because "hint '$($case.Hint)'"
         }
+    }
+}
+
+Describe 'a hint that normalises to EMPTY must never resolve to a model' -Tag Unit {
+    # Interim round (gemini), regression 1, confirmed by measurement -- and it is
+    # exactly the drift round-7 opus predicted when it listed this rule as one of
+    # the four with two definitions:
+    #
+    #   "Both needed the SAME empty-hint patch separately; that is the evidence."
+    #
+    # The patch landed correctly in one and incorrectly in the other:
+    #
+    #   agy.ps1  if (-not $hintNorm.Trim()) { return $null }        <- aborts
+    #   era.ps1  if (-not $hintNorm.Trim()) { $hintNorm = $null }   <- falls through
+    #
+    # era's version then reaches `$displayNorm -match $hintNorm`, and PowerShell
+    # measures '-match $null' as TRUE for every string (verified: 'gemini 36
+    # flash high' -match $null = True). So every candidate matched, the
+    # highest tier rank won, and '-AgyModel ".*"' silently dispatched an
+    # arbitrary model -- which is the precise outcome era.ps1's own comment says
+    # must not happen.
+
+    BeforeAll {
+        $script:SkillRoot = Split-Path $PSScriptRoot -Parent
+        . (Join-Path $script:SkillRoot 'backends/agy.ps1')
+        $script:EraTxt = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
+        $script:AgyTxt = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/agy.ps1')
+    }
+
+    It 'the PowerShell trap this rule exists for is real' {
+        # Non-vacuity: if this ever stops being true, the guards below are moot.
+        ('gemini 36 flash high' -match $null) | Should -BeTrue
+        ('anything at all' -match '') | Should -BeTrue
+    }
+
+    It 'agy resolves a punctuation-only hint to nothing' {
+        Find-AgyModelFromHint -Hint '.*'  | Should -BeNullOrEmpty
+        Find-AgyModelFromHint -Hint '???' | Should -BeNullOrEmpty
+        Find-AgyModelFromHint -Hint '  '  | Should -BeNullOrEmpty
+    }
+
+    It 'agy still resolves a REAL hint, so the guard did not just break resolution' {
+        (Find-AgyModelFromHint -Hint 'flash').Display | Should -Not -BeNullOrEmpty
+    }
+
+    It 'era never matches on an unusable hint either' {
+        # era.ps1's block cannot be invoked in isolation, so pin the shape: the
+        # match must be guarded, not reached with a null pattern.
+        # Anchored on a LINE THAT IS AN `if (`, not on the bare expression: the
+        # comment added above the fix quotes '$displayNorm -match $hintNorm' to
+        # explain the bug, and a loose pattern matches that comment instead of
+        # the call. Third time this hazard has bitten in this session.
+        $m = [regex]::Match($script:EraTxt, '(?m)^\s*if \([^\r\n]*-match \$hintNorm[^\r\n]*$')
+        $m.Success | Should -BeTrue
+        $m.Value | Should -Match 'hintUsable' `
+            -Because 'an unguarded -match against a null hint is true for every candidate'
+    }
+
+    It 'and it does not keep the assignment that made the fall-through possible' {
+        $script:EraTxt | Should -Not -Match 'if \(-not \$hintNorm\.Trim\(\)\) \{ \$hintNorm = \$null \}'
+    }
+
+    It 'both implementations agree that an empty hint resolves to nothing' {
+        # The contract test. opus asked for these two to be collapsed (finding 6);
+        # collapsing needs era.ps1 to dot-source an adapter at load time, which is
+        # a bigger change than this defect warrants. Until then, this pins the two
+        # against drifting apart AGAIN -- which is how this bug got here.
+        $script:AgyTxt | Should -Match '\$hintNorm\.Trim\(\)'
+        $script:EraTxt | Should -Match '\$hintNorm\.Trim\(\)'
+        # agy aborts by returning; era aborts by refusing to match. Different
+        # mechanics, same rule, and each is asserted above.
     }
 }
