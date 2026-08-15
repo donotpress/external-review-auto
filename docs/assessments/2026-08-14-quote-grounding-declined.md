@@ -153,7 +153,26 @@ bundle, in either form.
 
 ## Reproducing
 
-`quote-grounding.ps1` and `quote-grounding2.ps1` (the split) were throwaway
-probes; both are ~40 lines and are reproduced in the round-7 response and in
-this document's tables. Re-measure before revisiting — as with
-`2026-08-14-enumerate-once-declined.md`, do not re-argue it from the text alone.
+Both probes are **committed**, because this document tells you to re-measure and
+that instruction is worthless if the scripts are gone:
+
+```
+pwsh tools/probes/quote-grounding.ps1 -Split     # the 5% result and the fenced/inline diagnosis
+pwsh tools/probes/citation-grounding.ps1         # the path:line variant
+```
+
+They read `.external-reviews/` (gitignored, local-only), so the numbers move as
+rounds accumulate — re-running on 2026-08-14 after round 8 gave 4.9% mean over
+45 reviewer-rounds and the same fenced/inline shape, against 5.0% over 38 when
+first measured. The conclusion is not close to its threshold, so growth does not
+threaten it; if it ever does, that is a finding, not a nuisance.
+
+**This section previously read "were throwaway probes."** Round-8 (opus) finding
+5 caught that: `2026-08-10-prompt-echo-threshold.md:13-17` records the identical
+failure — *"nobody could re-run the calibration because the script was thrown
+away and the corpus was not in the repo"* — which is how the first echo
+threshold went wrong. Writing "re-measure before revisiting" while deleting the
+means to do so repeats it on the same day the repo re-learned it.
+
+As with `2026-08-14-enumerate-once-declined.md`: re-measure before revisiting,
+do not re-argue it from the text alone.
