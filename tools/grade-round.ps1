@@ -118,6 +118,29 @@ if (-not $changes) {
     $changes = "## First graded round for this topic`n`nNo prior manifest found; grade the tree as it stands."
 }
 
+# --- git log is UNTRUSTED TEXT -------------------------------------------
+# A commit subject that NAMES a template token must not BE one. era runs
+# Invoke-PromptTokenSubstitution over the finished prompt, and its regex skips
+# backticked mentions but has no fence awareness -- workflow.ps1 says so
+# outright, and concludes "the inline-span form is the one that occurs in
+# practice." Round 8 falsified that with this repo's own tooling.
+#
+# 9d78231's subject is "fix: two regexes answered one question about
+# {{PREVIOUS_ROUND}}, and disagreed" -- the commit that fixed the token's
+# double-definition, so of course it names the token. Spliced raw into the
+# prompt, it expanded INSIDE the ``` fence. Measured on round-8-prompt.md:
+# 4 '### Reviewer:' headers where 2 is healthy. The commit list the reviewer is
+# told to "verify against the code" was split in half with ~32 KB of the round-7
+# panel wedged into it, 8421bda was orphaned after a stray ", and disagreed",
+# and every reviewer was billed for a duplicate copy of the whole panel.
+#
+# This is the symmetric half of the era-require rule (era.ps1: read the control
+# plane BEFORE splicing untrusted text): NEUTRALIZE control tokens IN untrusted
+# text before splicing it. Done at the injection site, which is where the
+# untrusted text enters and the only place that covers every downstream reader.
+# The spacing keeps the subject readable while making it un-substitutable.
+$changes = $changes -replace '\{\{([A-Z_]+)\}\}', '{{ $1 }}'
+
 # --- Anything under review must be IN the bundle --------------------------
 # Round 7 closed with "What I could not verify from this bundle", and two of the
 # FOUR commits it was asked to grade were on that list -- c8f4c56 (a fix to this

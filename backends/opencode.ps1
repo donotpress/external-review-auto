@@ -138,10 +138,12 @@ function Resolve-OpencodeStallPlan {
     # to fire cleanly before our own deadline. Floored so an absurdly small
     # budget still yields a positive, sub-timeout threshold rather than 0 or a
     # negative one.
+    # No 75%-of-budget fallback branch here. One was written and round 8
+    # (deepseek-flash) measured it as dead: 'ceilingMs >= TimeoutSec*1000' holds
+    # only for TimeoutSec <= 1, and the dispatcher's floor is the 600s default,
+    # so it could not fire for any real budget. Deleted rather than left as
+    # decoration -- the same arithmetic the tests already do would have caught it.
     $ceilingMs = [Math]::Max(1000L, ([long]$TimeoutSec - 30) * 1000)
-    if ($ceilingMs -ge ([long]$TimeoutSec * 1000)) {
-        $ceilingMs = [long][Math]::Floor($TimeoutSec * 1000 * 0.75)
-    }
     $clamped = $wantedMs -gt $ceilingMs
     $useMs   = if ($clamped) { $ceilingMs } else { $wantedMs }
 
@@ -364,6 +366,33 @@ function Invoke-OpencodeReview {
         } else {
             Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok); TimeoutSec=${TimeoutSec}s."
         }
+
+        # PHASE 1 MUST NOT CONTRADICT THE STALL PLAN. Round-8 (deepseek-flash)
+        # finding 2: the ordering claim above ("stall < TimeoutSec < dispatcher")
+        # omitted a FOURTH, earlier deadline. Phase 1 kills any process with zero
+        # output after $firstTokenSec -- default 120s, variant-blind -- while the
+        # stall plan's whole premise is that a 'max' variant may think silently
+        # for minutes before the first token, and grants it 600s of base appetite
+        # (1770s after this round's clamp). Measured on the real case:
+        #
+        #   stall threshold (max, 624 KB bundle) : 1770s of permitted silence
+        #   Phase-1 default                      :  120s -> kills first
+        #
+        # So on exactly the case the clamp was built for, a model thinking
+        # silently for 121s was killed and labelled "possible limit/popup block"
+        # -- the same mis-attribution the clamp exists to prevent -- and Phase 1
+        # is the one kill path that writes NO forensic snapshot.
+        #
+        # An explicit ERA_OPENCODE_FIRST_TOKEN_SEC still wins: the operator has
+        # said what they want. Otherwise the two deadlines are reconciled, so
+        # the variant-aware number is the one that decides.
+        if (-not $env:ERA_OPENCODE_FIRST_TOKEN_SEC) {
+            $planSilenceSec = [int]($stallThresholdMs / 1000)
+            if ($planSilenceSec -gt $firstTokenSec) {
+                Write-Host "[opencode] First-token deadline raised ${firstTokenSec}s -> ${planSilenceSec}s to match the silence this variant is expected to need (variant=$chosenVariant). Set ERA_OPENCODE_FIRST_TOKEN_SEC to override."
+                $firstTokenSec = $planSilenceSec
+            }
+        }
         $lastSize   = $stdoutSink.Length + $stderrSink.Length
         $lastGrowth = [System.Diagnostics.Stopwatch]::StartNew()
         $deadline   = [System.Diagnostics.Stopwatch]::StartNew()
@@ -410,7 +439,12 @@ function Invoke-OpencodeReview {
                 if (-not $opencodeProc.HasExited) {
                     $null = $opencodeProc.WaitForExit(1000)
                 }
-                throw "opencode: no response within ${firstTokenSec}s — possible limit/popup block. Total captured bytes: 0."
+                # Snapshot like the stall and timeout kills do. Round-8
+                # (deepseek-flash) finding 2: this was the ONE kill path that
+                # produced no forensic artifact, so the failure it reports is
+                # also the failure you can least diagnose.
+                $tailInfo = & $snapshotPartialAndDebug 'firsttoken'
+                throw "opencode: no response within ${firstTokenSec}s — possible limit/popup block. Total captured bytes: 0. $tailInfo"
             }
 
             if ($now -gt $lastSize) {

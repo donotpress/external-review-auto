@@ -74,8 +74,29 @@ function Test-AgenticNarrationCapture {
     # it), so a real review that merely says "I cannot find any issues" (no bundle
     # reference) is NOT flagged. The no-heading gate (consistent with B1) further
     # protects a structured review that discusses this failure mode in prose.
+    # NOTE the object list: bundle|attachment|attached|content, and deliberately
+    # NOT a bare `file`. Round-8 (deepseek-flash) blocker 1 measured what the
+    # generic word cost:
+    #
+    #   "I could not find any issues in this file; the concurrency fix
+    #    looks sound."                                        -> FLAGGED
+    #   "No correctness issues found; the concurrency fix is sound."
+    #                                                         -> not flagged
+    #
+    # The same review twice, and only one survived -- ExitCode=-1, no artifact,
+    # and exit 2 on a solo round that had a usable review in hand. That is the
+    # silent-LOSS class, in the detector family this repo's history says to fear.
+    # The docstring above already claimed this boundary ("a real review that
+    # merely says 'I cannot find any issues' ... is NOT flagged"); `file` in the
+    # alternation is what made the claim false.
+    #
+    # Gating B3 on the prose whitelist instead was considered and rejected: a
+    # genuine refusal often contains review vocabulary ("I cannot access the
+    # bundle, so I cannot report issues") and would slip through. A real refusal
+    # names the BUNDLE or the ATTACHMENT. "file content" is still caught, by
+    # `content` here and by the paste/not-provided branches below.
     $bundleRefusal =
-        ($text -match '(?im)\b(cannot|can.?t|could ?n.?t|unable to|not able to)\b[^.\n]{0,40}\b(review|see|access|read|open|find|locate|retrieve)\b[^.\n]{0,40}\b(bundle|attachment|attached|file|content)\b') -or
+        ($text -match '(?im)\b(cannot|can.?t|could ?n.?t|unable to|not able to)\b[^.\n]{0,40}\b(review|see|access|read|open|find|locate|retrieve)\b[^.\n]{0,40}\b(bundle|attachment|attached|content)\b') -or
         ($text -match '(?im)\bpaste\b[^.\n]{0,40}\b(bundle|content|file)\b') -or
         ($text -match '(?im)\b(bundle|attachment|file content)\b[^.\n]{0,40}\b(not|n.t)\s+(included|attached|provided|present|available)\b')
 

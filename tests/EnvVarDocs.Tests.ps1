@@ -88,6 +88,39 @@ Describe '-Provider does not claim an effect it does not have' -Tag Unit {
         $line | Should -Match '-Model|-Reviewer' -Because 'an honest warning names the working alternative'
     }
 
+    It 'and it is REACHABLE for a bare -Provider, with no -Model' {
+        # SUPERSEDED-IN-PLACE 2026-08-14. Round 8, found independently by opus
+        # (finding 3) and deepseek-flash (finding 3): the assertion above pins
+        # the line's EXISTENCE, and the line was nested inside BOTH `if ($Model)`
+        # and `if ($resolvedModelId)` -- measured brace depth 2 -- so
+        # `-Provider nvidia` alone printed nothing and the test was green.
+        #
+        # That is the exact anti-pattern this repo named one commit earlier, at
+        # AgyModelFlag.Tests.ps1: a test that pins the patch instead of the
+        # outcome cannot fail when the patch lands somewhere unreachable. Caught
+        # here by the panel rather than by the suite, which is the point of the
+        # panel -- and the reason this assertion now exists.
+        #
+        # Reachability is structural, so assert it structurally: the warning must
+        # NOT be nested inside the -Model block.
+        $warn  = $script:Era.IndexOf('WARNING: -Provider')
+        $model = $script:Era.IndexOf('if ($Model) {')
+        $warn  | Should -BeGreaterThan 0
+        $model | Should -BeGreaterThan 0
+        $warn  | Should -BeLessThan $model -Because 'it must fire before, and independently of, model-hint resolution'
+
+        # ...and it must be guarded only by -Provider itself.
+        $guard = $script:Era.LastIndexOf('if ($Provider) {', $warn)
+        $guard | Should -BeGreaterThan 0
+        $between = $script:Era.Substring($guard, $warn - $guard)
+        ([regex]::Matches($between, '\{')).Count - ([regex]::Matches($between, '\}')).Count |
+            Should -Be 1 -Because 'exactly one enclosing block: if ($Provider)'
+    }
+
+    It 'warns exactly once, not twice when -Model is also passed' {
+        ([regex]::Matches($script:Era, 'WARNING: -Provider')).Count | Should -Be 1
+    }
+
     It 'and the claim is true: every adapter still ignores the parameter' {
         # If an adapter ever WIRES it up, this fails and the warning must go.
         foreach ($b in @('agy','claude','opencode','geminiapi','anthropic','openaicompat')) {

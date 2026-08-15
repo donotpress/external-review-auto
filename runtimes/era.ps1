@@ -721,6 +721,24 @@ foreach ($r in $reviewerList) {
     }
 }
 
+# --- -Provider is accepted and INERT -------------------------------------
+# Hoisted OUT of the -Model block. Round 8, found independently by opus
+# (finding 3) and deepseek-flash (finding 3): the honesty warning was nested
+# inside BOTH `if ($Model)` and `if ($resolvedModelId)` -- measured brace depth
+# 2 -- so `-Provider nvidia` on its own, the natural invocation, printed
+# nothing at all. The previous code at least printed a (false) confirmation
+# there; the fix made it silent, which for an operator-facing flag also reads
+# as success. The stated goal was "never confirm something that does nothing";
+# its mirror, "always say when the flag is inert", is the half that was missing.
+#
+# Every adapter declares -OpencodeProvider and ignores it by name (agy.ps1,
+# claude.ps1, opencode.ps1, geminiapi.ps1, anthropic.ps1, openaicompat.ps1);
+# the provider comes from the resolved model id. EnvVarDocs.Tests.ps1 asserts
+# that is still true, so this message cannot rot into a lie in either direction.
+if ($Provider) {
+    Write-Host "[era] WARNING: -Provider '$Provider' is currently INERT. Every adapter ignores it; the provider is derived from the resolved model id. Use a provider-specific -Model hint, or -Reviewer, to choose where a review runs."
+}
+
 # --- Model hint resolution ---
 if ($Model) {
     # Layer-2 two-pass (exact-then-substring) resolution is now in the
@@ -761,7 +779,12 @@ if ($Model) {
         }
         if ($Provider) {
             $providerOverrides[$reviewerList[0]] = $Provider
-            # HONEST, because it is currently inert. Every adapter declares
+            # The WARNING for this now lives outside the -Model block (see the
+            # hoist above); only the override assignment stays here, because
+            # $reviewerList is not resolved earlier. Round 8, opus/deepseek
+            # finding 3: the warning was unreachable without -Model.
+            #
+            # Kept for the record. Every adapter declares
             # -OpencodeProvider and every one of them ignores it by name
             # ("Accepted-and-ignored", "ignored -- provider is in ModelInfo"):
             # agy.ps1:520, claude.ps1:97, opencode.ps1:169, geminiapi.ps1:33,
@@ -770,17 +793,15 @@ if ($Model) {
             # this override reaches the dispatcher, is passed to the adapter,
             # and is dropped there.
             #
-            # This used to print "[era] Provider override: X", which told the
-            # user it had taken effect. Interim round (deepseek-flash) F1: a
-            # user-facing flag that prints a confirmation and does nothing is
-            # the same class as the silent-success failures this skill exists to
-            # prevent, pointed at the operator instead of the reviewer.
+            # It used to print "[era] Provider override: X" here, which told the
+            # user it had taken effect (interim round, deepseek-flash F1). The
+            # replacement warning is NOT printed here any more -- it would fire
+            # twice for `-Model x -Provider y`, and it has to fire for
+            # `-Provider y` alone, which this branch never sees.
             #
             # Kept accepted rather than deleted: removing a shipped flag and the
             # $providerOverrides plumbing changes the dispatcher signature, which
-            # is a larger change than this defect warrants. Saying the truth
-            # costs two lines and can never mislead.
-            Write-Host "[era] WARNING: -Provider '$Provider' is currently INERT. Every adapter ignores it; the provider is derived from the resolved model id. Use a provider-specific -Model hint, or -Reviewer, to choose where a review runs."
+            # is a larger change than this defect warrants.
         }
     } else {
         Write-Host "[era] WARNING: Model hint '$Model' did not resolve to a known model."

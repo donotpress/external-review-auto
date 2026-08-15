@@ -436,3 +436,63 @@ Describe 'the gerund rule is an OPENER rule, not an any-line rule' -Tag Unit {
         Test-AgenticNarrationCapture -Response "Reviewing the code for edge cases.`nWill report shortly." | Should -BeTrue
     }
 }
+
+Describe 'B3 refusal detection must not eat an ordinary prose review' -Tag Unit {
+    # Round-8 (deepseek-flash) BLOCKER 1, confirmed by measurement.
+    #
+    # B3 exists to catch "I cannot review the bundle content, please paste it".
+    # Its docstring states the boundary explicitly:
+    #
+    #   "a real review that merely says 'I cannot find any issues' (no bundle
+    #    reference) is NOT flagged"
+    #
+    # but the alternation included the generic word `file`, so a natural review
+    # sentence naming a file matched it. Measured before the fix:
+    #
+    #   "I could not find any issues in this file; the concurrency fix
+    #    looks sound."                                        -> FLAGGED
+    #   "No correctness issues found; the concurrency fix is sound."
+    #                                                         -> not flagged
+    #
+    # The same review, twice; only one survives. Consequence on a solo dispatch:
+    # ExitCode=-1, no artifact written, and exit 2 on a round that had a usable
+    # review in hand -- the same silent-LOSS class as round 7's gerund blocker,
+    # in the very detector family this history says to fear.
+    #
+    # B3 deliberately runs AFTER B2's prose gate and re-catches the subset with
+    # the refusal shape, so the prose whitelist cannot protect it. Gating B3 on
+    # that whitelist would be worse -- a genuine refusal often says "issues"
+    # ("I cannot access the bundle, so I cannot report issues") and would slip
+    # through. The narrower fix is right: a real refusal names the BUNDLE or the
+    # ATTACHMENT, not an arbitrary file.
+
+    BeforeAll { . (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/_capture-validation.ps1') }
+
+    It 'lets a legitimate review that happens to name a file through' {
+        Test-AgenticNarrationCapture -Response 'I could not find any issues in this file; the concurrency fix looks sound.' |
+            Should -BeFalse
+        Test-AgenticNarrationCapture -Response "I can't find any problems in this file. The retry loop is correct." |
+            Should -BeFalse
+        Test-AgenticNarrationCapture -Response 'Unable to locate any edge cases in the file; the guard fires correctly.' |
+            Should -BeFalse
+    }
+
+    It 'and the phrasing that already worked still works' {
+        Test-AgenticNarrationCapture -Response 'No correctness issues found; the concurrency fix is sound.' |
+            Should -BeFalse
+    }
+
+    It 'still flags a REAL bundle refusal, in every shape the corpus has' {
+        # The true positives B3 exists for. If any of these regress, the fix went
+        # too far and the false-success route reopens.
+        foreach ($r in @(
+            'I cannot review the bundle content because it was not included. Please paste it.',
+            'I am unable to access the attached bundle. Please paste the file content.',
+            'I cannot read the bundle file; please paste the content of the bundle here.',
+            'The bundle was not provided, so I could not review anything.',
+            'I could not access the attachment. Please paste the content.'
+        )) {
+            Test-AgenticNarrationCapture -Response $r | Should -BeTrue -Because "'$r' is a genuine refusal"
+        }
+    }
+}

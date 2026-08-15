@@ -129,3 +129,65 @@ Describe 'the adapter no longer grants itself time the dispatcher will not wait'
         $script:Src | Should -Match '\[opencode\] Stall threshold'
     }
 }
+
+Describe 'Phase 1 must not contradict the stall plan' -Tag Unit {
+    # Round-8 (deepseek-flash) finding 2. ae7594c's ordering claim --
+    # "stall threshold < adapter TimeoutSec < dispatcher TimeoutSec+30" -- left
+    # out a FOURTH, earlier deadline: the Phase-1 first-token watchdog, which
+    # kills any process with zero output after $firstTokenSec (default 120s) and
+    # is entirely variant-blind.
+    #
+    # But the stall plan's premise is that a 'max' variant may think silently for
+    # minutes before its first token, and it grants 600s of base appetite. So on
+    # exactly the case the clamp was built for:
+    #
+    #   stall threshold (max, 624 KB bundle) : 1770s of permitted silence
+    #   Phase-1 default                      :  120s -> kills first
+    #
+    # A model thinking silently for 121s was killed and labelled "possible
+    # limit/popup block" -- the same mis-attribution the clamp exists to prevent
+    # -- and Phase 1 is the one kill path that wrote no forensic snapshot.
+
+    BeforeAll {
+        $script:Src2 = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+    }
+
+    It 'the contradiction is real arithmetic, not a style point' {
+        # Non-vacuity for everything below.
+        $plan = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 624465
+        ($plan.StallThresholdMs / 1000) | Should -BeGreaterThan 120 `
+            -Because 'the plan permits far more silence than the Phase-1 default allows'
+    }
+
+    It 'reconciles the first-token deadline with the plan' {
+        $script:Src2 | Should -Match 'First-token deadline raised'
+        $reconcile = $script:Src2.IndexOf('$firstTokenSec = $planSilenceSec')
+        $useIt     = $script:Src2.IndexOf('$firstTokenDeadline.Elapsed.TotalSeconds -gt $firstTokenSec')
+        $reconcile | Should -BeGreaterThan 0
+        $useIt     | Should -BeGreaterThan $reconcile -Because 'reconciling after the check would not reconcile anything'
+    }
+
+    It 'but an explicit operator override still wins' {
+        $script:Src2 | Should -Match 'if \(-not \$env:ERA_OPENCODE_FIRST_TOKEN_SEC\)' `
+            -Because 'the operator saying 120s means 120s'
+    }
+
+    It 'and the Phase-1 kill now leaves a forensic snapshot like the others' {
+        $branch = [regex]::Match($script:Src2,
+            '(?s)if \(-not \$hasSeenOutput -and \$firstTokenDeadline.*?throw "opencode: no response within').Value
+        $branch | Should -Match 'snapshotPartialAndDebug' `
+            -Because 'the failure you can least diagnose must not also be the one with no artifact'
+    }
+
+    It 'the dead 75%-of-budget branch is gone' {
+        # Measured dead: 'ceilingMs >= TimeoutSec*1000' holds only for
+        # TimeoutSec <= 1, and the dispatcher floor is the 600s default.
+        $script:Src2 | Should -Not -Match '0\.75'
+        # ...and the real budgets still behave.
+        foreach ($to in @(600, 1800)) {
+            $p = Resolve-OpencodeStallPlan -TimeoutSec $to -Variant 'max' -BundleBytes 8MB
+            ($p.StallThresholdMs / 1000) | Should -Be ($to - 30)
+        }
+    }
+}
