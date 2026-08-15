@@ -1216,6 +1216,12 @@ Be terse. If a section is empty, write "(none)".
     # "Cannot convert 'System.Collections.Hashtable' to 'SwitchParameter'".
     # Use $diffResult for the local to preserve the param binding.
     $isFollowUp = $priorRound -ge 1 -and $Diff.IsPresent
+    # Does this round stage out-of-repo subjects? Needed BEFORE the -Diff branch,
+    # because the deletions-only early return below is the very case where a
+    # previous round's staged subjects silently vanish, and it returns before the
+    # ignore patterns are ever built. One definition, in Test-EraStagingInPlay.
+    $stagingInPlay = Test-EraStagingInPlay -IncludeFiles $IncludeFiles -RepoRoot $repoRoot
+
     if ($isFollowUp) {
         Write-Host "[era] Round $round (diff against round $priorRound)..."
         $diffResult = Get-ReviewDiff -ReviewDir $reviewDir -PriorRound $priorRound -CurrentFiles $effectiveInclude -RepoRoot $repoRoot -IgnorePatterns (Get-EraVendorIgnorePatterns)
@@ -1235,6 +1241,12 @@ Be terse. If a section is empty, write "(none)".
             if ($diffResult.Deleted.Count -gt 0) {
                 Write-Host "[era] Only deletions since round $priorRound ($($diffResult.Deleted.Count) path(s)); nothing to review."
                 Write-Host ("[era]   " + (@($diffResult.Deleted) | Select-Object -First 20) -join ', ')
+                # THIS is the case that reads as a mystery: a round whose only
+                # change was a staged out-of-repo subject stops here with
+                # "nothing to review" and no hint that the subject was excluded
+                # rather than actually deleted.
+                $stagedWarning = Get-EraStagedSubjectWarning -DeletedPaths @($diffResult.Deleted) -StagingInPlay $stagingInPlay
+                if ($stagedWarning) { Write-Host $stagedWarning }
             }
             Write-Host "[era] No files changed since round $priorRound. Omit -Diff to force a full re-bundle."
             return
@@ -1375,18 +1387,20 @@ Be terse. If a section is empty, write "(none)".
     # the P6 staged files below (:1089) — which are exactly what the caller asked
     # to review. Detect that case here, using the same test the staging block
     # applies, and ask for the carve-out shape instead.
-    $stagingInPlay = $false
-    if ($IncludeFiles -and $IncludeFiles.Count -gt 0) {
-        foreach ($e in $IncludeFiles) {
-            $entry = "$e"
-            if ($entry -match '[*?\[\]]') { continue }
-            if (-not [System.IO.Path]::IsPathRooted($entry)) { continue }
-            if (-not (Test-EraPathInsideRoot -Path ([System.IO.Path]::GetFullPath($entry)) -Root $repoRoot)) {
-                $stagingInPlay = $true
-                break
-            }
-        }
+    # $stagingInPlay is computed ONCE, above the -Diff branch (see there), because
+    # the early-return path needs the same answer this does. Test-EraStagingInPlay
+    # owns the rule.
+    # A -Diff round that cannot see the subjects a previous round staged should
+    # say so rather than quietly reviewing nothing. $stagingInPlay reads
+    # -IncludeFiles, which a -Diff caller typically does not re-pass, so the
+    # blanket ignore applies and the prior round's staged paths read as Deleted.
+    # Measured (interim round, gemini blocker 2). See Get-EraStagedSubjectWarning
+    # for why auto-enabling the carve-out would be the wrong fix.
+    if ($isFollowUp -and $diffResult) {
+        $stagedWarning = Get-EraStagedSubjectWarning -DeletedPaths @($diffResult.Deleted) -StagingInPlay $stagingInPlay
+        if ($stagedWarning) { Write-Host $stagedWarning }
     }
+
     $artifactIgnore = Get-EraReviewArtifactIgnorePatterns -RepoRoot $repoRoot `
         -TopicSlug $TopicSlug -Round $round -AllowStaging:$stagingInPlay
     # Hoisted so the broad-scope gate below can measure against the SAME ignore

@@ -286,3 +286,100 @@ Describe 'era.ps1 wires the artifact ignore into its repomix config' -Tag Unit {
         $callIdx | Should -BeLessThan $src.IndexOf('"Running repomix..."')
     }
 }
+
+Describe 'a -Diff round that will silently drop staged subjects must say so' -Tag Unit {
+    # Interim-round (gemini) blocker 2, measured and confirmed -- the last open
+    # claim from the panel, settled here.
+    #
+    # P6 staging copies out-of-repo review subjects into
+    # .external-reviews/<slug>/round-N-external/ so repomix can reach them.
+    # $stagingInPlay (era.ps1) is true only when -IncludeFiles holds an ABSOLUTE
+    # path OUTSIDE the repo root, and it reads the ORIGINAL parameter -- not the
+    # diff result. So on `era -Diff` with no -IncludeFiles re-passed:
+    #
+    #   Get-EraReviewArtifactIgnorePatterns (no -AllowStaging)
+    #     -> '.external-reviews/**'                       (blanket, no carve-out)
+    #   Test-EraPathIgnored '.external-reviews/t/round-2-external/subject.ps1'
+    #     -> True   (with -AllowStaging: False)
+    #
+    # Measured. The prior round's staged paths then read as Deleted, and a round
+    # whose only change was the staged subject stops at "only deletions; nothing
+    # to review" -- correct arithmetic, useless outcome, and no clue why.
+    #
+    # NOT fixed by auto-enabling the carve-out: staging genuinely did not run
+    # this round, so there is nothing under round-2-external to carve out for,
+    # and inventing one would re-admit the PRIOR round's stale copies that
+    # ce97175 deliberately excluded. The honest fix is to SAY what is happening
+    # and name the lever, which is what this repo does everywhere else.
+
+    BeforeAll { . (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1') }
+
+    It 'warns when a prior round staged subjects and this one cannot see them' {
+        $w = Get-EraStagedSubjectWarning -DeletedPaths @(
+            '.external-reviews/t/round-1-external/subject.ps1',
+            'src/app.ts'
+        ) -StagingInPlay $false
+        $w | Should -Not -BeNullOrEmpty
+        $w | Should -Match 'staged'
+        $w | Should -Match '-IncludeFiles' -Because 'a warning that does not name the lever is just noise'
+    }
+
+    It 'stays quiet when staging IS in play — the carve-out will cover them' {
+        Get-EraStagedSubjectWarning -DeletedPaths @('.external-reviews/t/round-1-external/subject.ps1') `
+            -StagingInPlay $true | Should -BeNullOrEmpty
+    }
+
+    It 'stays quiet on an ordinary round with no staged paths at all' {
+        Get-EraStagedSubjectWarning -DeletedPaths @('src/app.ts', 'docs/readme.md') `
+            -StagingInPlay $false | Should -BeNullOrEmpty
+        Get-EraStagedSubjectWarning -DeletedPaths @() -StagingInPlay $false | Should -BeNullOrEmpty
+    }
+
+    It 'counts only round-N-external paths, not every era artifact' {
+        # A deleted round-N-prompt.md is era's own output, not a review subject.
+        Get-EraStagedSubjectWarning -DeletedPaths @('.external-reviews/t/round-1-prompt.md') `
+            -StagingInPlay $false | Should -BeNullOrEmpty
+    }
+
+    It 'era.ps1 emits it on the -Diff path' {
+        $era = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+        $era | Should -Match 'Get-EraStagedSubjectWarning'
+    }
+}
+
+Describe 'the staging flag has ONE definition and both -Diff exits use it' -Tag Unit {
+    BeforeAll {
+        $script:R3  = Split-Path $PSScriptRoot -Parent
+        . (Join-Path $script:R3 'workflow.ps1')
+        $script:E3  = Get-Content -Raw (Join-Path $script:R3 'runtimes/era.ps1')
+    }
+
+    It 'era.ps1 computes it once, via the shared rule' {
+        ([regex]::Matches($script:E3, 'Test-EraStagingInPlay -IncludeFiles')).Count | Should -Be 1
+        # ...and no longer carries the inline loop it was extracted from.
+        $script:E3 | Should -Not -Match 'foreach \(\$e in \$IncludeFiles\)'
+    }
+
+    It 'and computes it BEFORE the diff branch, which the early return needs' {
+        $compute = $script:E3.IndexOf('$stagingInPlay = Test-EraStagingInPlay')
+        $branch  = $script:E3.IndexOf('if ($isFollowUp) {')
+        $compute | Should -BeGreaterThan 0
+        $branch  | Should -BeGreaterThan 0
+        $compute | Should -BeLessThan $branch -Because 'the deletions-only early return is the case that needs it'
+    }
+
+    It 'warns on BOTH -Diff exits: the early return and the normal path' {
+        ([regex]::Matches($script:E3, 'Get-EraStagedSubjectWarning -DeletedPaths')).Count |
+            Should -Be 2 -Because 'a deletions-only round returns before the normal warning site'
+    }
+
+    It 'the shared rule agrees with what era used to compute inline' {
+        $root = 'C:/repo'
+        Test-EraStagingInPlay -IncludeFiles @('C:/elsewhere/spec.md') -RepoRoot $root | Should -BeTrue
+        Test-EraStagingInPlay -IncludeFiles @('C:/repo/src/a.ps1')    -RepoRoot $root | Should -BeFalse
+        Test-EraStagingInPlay -IncludeFiles @('src/a.ps1')            -RepoRoot $root | Should -BeFalse
+        Test-EraStagingInPlay -IncludeFiles @('**/*.md')              -RepoRoot $root | Should -BeFalse
+        Test-EraStagingInPlay -IncludeFiles @()                       -RepoRoot $root | Should -BeFalse
+        Test-EraStagingInPlay -IncludeFiles $null                     -RepoRoot $root | Should -BeFalse
+    }
+}

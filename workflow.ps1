@@ -253,6 +253,95 @@ function Test-EraIncludeEntryEscapesRoot {
     return -not $targetFull.StartsWith($rootFull, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Test-EraStagingInPlay {
+    <#
+    .SYNOPSIS
+        Does this round stage out-of-repo review subjects? True when
+        -IncludeFiles names an ABSOLUTE path OUTSIDE the repo root.
+
+    .DESCRIPTION
+        Extracted from era.ps1 so ONE definition answers it. It is now consulted
+        twice -- once by the -Diff early-return path, to warn that a previous
+        round's staged subjects are about to be excluded, and once by the ignore
+        patterns, to decide whether to cut the round-N-external carve-out. Two
+        inline copies of this loop is exactly the shape that produced the
+        {{PREVIOUS_ROUND}} blocker.
+
+        Wildcards are skipped: a glob is not a staging instruction, and
+        Test-EraIncludeEntryEscapesRoot owns the question of whether one escapes.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][AllowNull()][string[]]$IncludeFiles,
+        [Parameter(Mandatory)][string]$RepoRoot
+    )
+    foreach ($e in @($IncludeFiles)) {
+        $entry = "$e"
+        if (-not $entry) { continue }
+        if ($entry -match '[*?\[\]]') { continue }
+        if (-not [System.IO.Path]::IsPathRooted($entry)) { continue }
+        if (-not (Test-EraPathInsideRoot -Path ([System.IO.Path]::GetFullPath($entry)) -Root $RepoRoot)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Get-EraStagedSubjectWarning {
+    <#
+    .SYNOPSIS
+        Warning text when a -Diff round is about to exclude the out-of-repo
+        review subjects a previous round staged. $null when it is not.
+
+    .DESCRIPTION
+        Interim-round (gemini) blocker 2, measured:
+
+          Get-EraReviewArtifactIgnorePatterns without -AllowStaging
+            -> '.external-reviews/**'                     (blanket, no carve-out)
+          Test-EraPathIgnored '.external-reviews/t/round-2-external/subject.ps1'
+            -> $true    (with -AllowStaging: $false)
+
+        P6 staging copies out-of-repo subjects under
+        .external-reviews/<slug>/round-N-external/ so repomix can reach them.
+        era's $stagingInPlay is true only when -IncludeFiles holds an ABSOLUTE
+        path OUTSIDE the repo root, and it reads the ORIGINAL parameter -- not
+        the diff result. So `era -Diff` without re-passing that path gets the
+        blanket ignore, the prior round's staged paths read as Deleted, and a
+        round whose only change was the staged subject stops at "only deletions;
+        nothing to review". Correct arithmetic, useless outcome, no clue why.
+
+        NOT fixed by auto-enabling the carve-out. Staging genuinely did not run
+        this round, so there is nothing under the CURRENT round-N-external to
+        carve out for, and inventing one would re-admit the PRIOR round's stale
+        copies that were deliberately excluded. The subject also may have
+        changed on disk since, and era would be bundling a stale snapshot while
+        implying it is current.
+
+        So: say what is happening and name the lever.
+
+    .PARAMETER DeletedPaths
+        $diffResult.Deleted -- repo-relative paths the walk no longer sees.
+
+    .PARAMETER StagingInPlay
+        era's $stagingInPlay for THIS round.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][string[]]$DeletedPaths = @(),
+        [bool]$StagingInPlay
+    )
+    if ($StagingInPlay) { return $null }
+    # round-N-external ONLY. A deleted round-N-prompt.md is era's own output,
+    # not a review subject, and warning about it would be noise.
+    $staged = @($DeletedPaths | Where-Object { ($_ -replace '\\', '/') -match '/round-\d+-external/' })
+    if ($staged.Count -eq 0) { return $null }
+    $sample = (@($staged | Select-Object -First 3) -join ', ')
+    return ("[era] WARNING: $($staged.Count) staged out-of-repo review subject(s) from a previous round " +
+            "are excluded from this -Diff round ($sample). Staging only runs when -IncludeFiles names the " +
+            "original absolute path, and this round did not, so repomix cannot see them. Re-pass " +
+            "-IncludeFiles with those paths to review them again, or omit -Diff for a full re-bundle.")
+}
+
 function Test-EraOwnReviewArtifact {
     <#
     .SYNOPSIS
