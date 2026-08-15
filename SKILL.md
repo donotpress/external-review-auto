@@ -168,7 +168,7 @@ runs, era enumerates what the default globs actually resolve to and prints it:
 
 ```
 [era] BROAD BUNDLE — no -IncludeFiles was given, so the repo-wide default globs apply.
-[era]   repo root : C:\Users\Joshua\Servers
+[era]   repo root : C:\Users\you\Projects
 [era]   files     : >5000
 [era]   size      : > 1277.4 MB (approx, pre-bundle)
 [era]   gitignore : NOT honoured (useGitignore=false) — ignored files are bundled too

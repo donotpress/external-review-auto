@@ -83,7 +83,7 @@ Describe 'Test-EraPathInsideRoot' -Tag Unit {
     }
 
     It 'treats a sibling that differs only after the root name as outside' {
-        Test-EraPathInsideRoot -Path 'C:\Users\Joshua2\x.md' -Root 'C:\Users\Joshua' | Should -BeFalse
+        Test-EraPathInsideRoot -Path 'C:\Users\dev2\x.md' -Root 'C:\Users\dev' | Should -BeFalse
     }
 
     It 'ignores a trailing separator on the root' {

@@ -32,8 +32,8 @@ boundary. With repo root `C:\a\era-p6`, the sibling
 `C:\a\era-p6-ext\outside.md` tests as *inside* the repo and is relativized to
 `-ext/outside.md`, which then fails `Test-Path` with a confusing "paths not
 found". Observed directly while probing P6. Seven sites share the idiom; the
-`$HOME` mirror at `era.ps1:1231` has the same shape (`C:\Users\Joshua2` vs
-`C:\Users\Joshua`).
+`$HOME` mirror at `era.ps1:1231` has the same shape (`C:\Users\dev2` vs
+`C:\Users\dev`).
 
 The guard **fails closed** — a false "inside" classification produces a path
 that does not exist under the root, so repomix bundles nothing and the file is
