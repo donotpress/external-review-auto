@@ -40,7 +40,11 @@
 param(
     [switch]$DryRun,
     [string]$Topic = 'era-grade',
-    [string]$Reviewer,
+    # [string[]], matching era.ps1. As [string] the .EXAMPLE above bound only
+    # when launched as `pwsh tools/grade-round.ps1 ...`; dot-invoked from inside
+    # a session the comma makes an ARRAY and it threw a transformation error.
+    # era.ps1 takes [string[]] and splits on ',' itself, so both styles work.
+    [string[]]$Reviewer,
     [string[]]$IncludeFiles
 )
 

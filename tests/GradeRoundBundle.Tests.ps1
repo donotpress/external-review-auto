@@ -32,6 +32,24 @@ Describe 'the grading bundle covers the commits under review' -Tag Unit {
         (Get-Command $script:Tool).Parameters.Keys | Should -Contain 'IncludeFiles'
     }
 
+    It 'declares -Reviewer exactly as era.ps1 does, so a panel binds either way' {
+        # This file narrowed era's [string[]] to [string]. A bare comma list is
+        # ONE string when the script is launched as `pwsh tools/grade-round.ps1
+        # -Reviewer a,b` but an ARRAY when it is dot-invoked from inside a
+        # PowerShell session -- which is how anyone iterating in a shell calls
+        # it, and how the .EXAMPLE in this very file reads. Measured: it threw
+        #   "Cannot process argument transformation on parameter 'Reviewer'.
+        #    Cannot convert value to type System.String."
+        # era.ps1 takes [string[]] AND splits on ',' itself, so matching its
+        # declaration makes both invocation styles work.
+        #
+        # Second parameter-binding defect in this file: c8f4c56 was positional
+        # array splatting. It is 170 lines long and dispatches money.
+        $tool = (Get-Command $script:Tool).Parameters['Reviewer'].ParameterType
+        $era  = (Get-Command (Join-Path $script:Root 'runtimes/era.ps1')).Parameters['Reviewer'].ParameterType
+        $tool | Should -Be $era -Because 'a wrapper that narrows the type it forwards breaks its own documented example'
+    }
+
     It 'unions the curated list with everything touched since the last graded round' {
         # The invariant: the bundle is DERIVED from the range being graded, not
         # a constant someone has to remember to update.
