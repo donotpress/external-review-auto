@@ -89,6 +89,13 @@ function $fn {
 
     switch (`$ModelInfo.behavior) {
         'throw'    { throw 'fake adapter exploded: ' + `$ModelInfo.preset }
+        'slowthrow' { Start-Sleep -Seconds 2; throw 'fake adapter exploded after working: ' + `$ModelInfo.preset }
+        'bigthrow' {
+            # An adapter whose exception carries its whole agentic transcript.
+            # opencode does exactly this: round-7's deepseek-flash threw a
+            # 47,301-char message and it landed verbatim in the metadata.
+            throw ('fake adapter exploded: ' + `$ModelInfo.preset + ' :: ' + ('TRANSCRIPT-LINE ' * 4000) + ' :: TAIL-MARKER-AT-THE-END')
+        }
         'noise'    { Write-Output 'stray debug output from a dot-sourced module'; Write-Output 42 }
         'nostruct' { Write-Output 'a bare string and nothing structured'; return }
         'trailing' {
@@ -267,6 +274,71 @@ Describe 'Invoke-ReviewerDispatch — an adapter that misbehaves cannot kill the
             ($res['boom'].Warnings -join ' ') | Should -Match 'Adapter exception'
             # ...and it must not take the healthy reviewer down with it.
             $res['fine'].ExitCode | Should -Be 0
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    # Both of the following come from round 7's deepseek-flash, which failed
+    # after doing real work -- it had read the bundle, run git, dot-sourced
+    # workflow.ps1 and executed Test-EraPathIgnored probes -- and the record it
+    # left was actively misleading:
+    #
+    #   wall_clock_sec   0        for a reviewer that ran for minutes
+    #   error            47,301 chars, the entire agentic transcript
+    #   metadata file    109,979 bytes, vs 4,219 for round 6 -- 26x
+    #
+    # One Error field was 43% of the round's provenance record, and the same
+    # 47 KB was stored THREE times (Error, Warnings, Stderr).
+
+    It 'records the time an adapter actually spent before throwing, not zero' {
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                slow = @{ backend = 'fake'; behavior = 'slowthrow' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('slow')
+            $res['slow'].ExitCode | Should -Be -1
+            $res['slow'].WallClockSec | Should -BeGreaterThan 1 `
+                -Because 'a reviewer that burned two seconds must not report zero; cost and latency accounting read this'
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'bounds a huge adapter exception instead of inlining it into the round record' {
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                big = @{ backend = 'fake'; behavior = 'bigthrow' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('big')
+            $r = $res['big']
+            $r.ExitCode | Should -Be -1
+            # Still identifiable...
+            $r.Error | Should -Match 'fake adapter exploded'
+            # ...but bounded. The raw message here is >64,000 chars.
+            $r.Error.Length | Should -BeLessThan 2000 `
+                -Because 'the round manifest is a provenance record, not a transcript store'
+            ($r.Warnings -join ' ').Length | Should -BeLessThan 2000
+            "$($r.Stderr)".Length | Should -BeLessThan 2000 `
+                -Because 'storing the same transcript a third time is how one failure became 43% of the file'
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'keeps the WHOLE exception on disk, including its tail, and says where' {
+        # Truncating without preserving would be worse than the bloat: the TAIL
+        # is where the failure is. Diagnosing round 7 needed the last 1,800
+        # chars, not the first.
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                big = @{ backend = 'fake'; behavior = 'bigthrow' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('big')
+            $logs = @(Get-ChildItem -LiteralPath (Join-Path $d 'review') -Filter '*-error.log' -File -ErrorAction SilentlyContinue)
+            $logs.Count | Should -BeGreaterThan 0 -Because 'the full text must survive somewhere'
+            $body = Get-Content -Raw -LiteralPath $logs[0].FullName
+            $body.Length | Should -BeGreaterThan 20000 -Because 'the log is the UNtruncated copy'
+            $body | Should -Match 'TAIL-MARKER-AT-THE-END' -Because 'the tail is the diagnostic half'
+            # And the record must point at it, or nobody will find it.
+            ($res['big'].Warnings -join ' ') | Should -Match '-error\.log'
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
     }
 

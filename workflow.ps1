@@ -1611,6 +1611,12 @@ function Invoke-ReviewerDispatch {
         } else { $null }
         $job = Start-ThreadJob -Name "review-$r" -ThrottleLimit 4 -ScriptBlock {
             param($adapterPath, $bp, $pp, $rp, $mi, $to, $fnName, $agyHint, $modelOverride, $opencodeProvider, $resolvedAgyModel, $pidFile)
+            # Started here, not inside the try: on the exception path the adapter
+            # returns no result to take a duration from, and this used to be
+            # hardcoded WallClockSec = 0. Round-7's deepseek-flash ran for
+            # minutes -- it read the bundle, ran git, dot-sourced workflow.ps1
+            # and executed detector probes -- and recorded 0 seconds.
+            $jobSw = [System.Diagnostics.Stopwatch]::StartNew()
             try {
                 . $adapterPath
                 $commonArgs = @{
@@ -1667,6 +1673,36 @@ function Invoke-ReviewerDispatch {
                 # Bug 2 fix: never let the adapter's exception silently kill the ThreadJob --
                 # the dispatcher synthesizes empty metadata in that case. Always return a
                 # structured hashtable so downstream metadata + UI see the real failure.
+                # AN EXCEPTION IS NOT A TRANSCRIPT STORE. This used to put the
+                # entire exception message into Error, again into Warnings, and
+                # a third time into Stderr. An agentic adapter throws its whole
+                # session: round-7's deepseek-flash produced a 47,301-char
+                # message, which made ONE Error field 43% of the round's
+                # metadata and grew the file from 4,219 bytes (round 6) to
+                # 109,979 -- 26x -- for a single failed reviewer.
+                #
+                # Truncating alone would be worse than the bloat, because the
+                # TAIL is the diagnostic half: diagnosing round 7 needed the
+                # LAST 1,800 chars, not the first. So the whole thing goes to
+                # disk next to the response, the record keeps a bounded head+tail
+                # excerpt, and the warning names the file.
+                $exMsg  = "$($_.Exception.Message)"
+                $exFull = "$_`n`n--- script stack trace ---`n$($_.ScriptStackTrace)"
+                $logPath = $null
+                try {
+                    $logPath = if ($rp -match '-response\.md$') { $rp -replace '-response\.md$', '-error.log' }
+                               else { "$rp.error.log" }
+                    Set-Content -LiteralPath $logPath -Value $exFull -Encoding utf8 -ErrorAction Stop
+                } catch { $logPath = $null }
+
+                $exShort = $exMsg
+                if ($exMsg.Length -gt 800) {
+                    $where = if ($logPath) { "full text: $logPath" } else { 'full text could not be written to disk' }
+                    $exShort = $exMsg.Substring(0, 400) +
+                        " … [truncated: $($exMsg.Length) chars; $where] … " +
+                        $exMsg.Substring($exMsg.Length - 300)
+                }
+                $warn = "Adapter exception: $exShort"
                 return @{
                     Preset            = $mi.preset
                     ExitCode          = -1
@@ -1674,10 +1710,10 @@ function Invoke-ReviewerDispatch {
                     CaptureMethod     = 'error'
                     InputTokens       = $null
                     OutputTokens      = 0
-                    WallClockSec      = 0
-                    Warnings          = @("Adapter exception: $($_.Exception.Message)")
-                    Error             = $_.Exception.Message
-                    Stderr            = "$_"
+                    WallClockSec      = [math]::Round($jobSw.Elapsed.TotalSeconds, 1)
+                    Warnings          = @($warn)
+                    Error             = $exShort
+                    Stderr            = $exShort
                     TruncationWarning = $null
                 }
             }
