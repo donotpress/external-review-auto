@@ -976,7 +976,21 @@ function Write-ReviewManifest {
         [string[]]$IgnorePatterns = @(),
         # HEAD sha / branch / dirty list at dispatch time, from
         # era.ps1's Get-EraGitState. Null outside a git work tree.
-        $GitState
+        $GitState,
+        # WHICH REVIEWERS THIS ROUND ASKED FOR.
+        #
+        # The manifest is the round's provenance record, and it recorded git
+        # state, sources, files and hashes but NOT this -- so "was reviewer X
+        # dispatched?" was not answerable from the artifacts at all. On
+        # 2026-08-26 that produced a wrong claim in a published release note:
+        # a round had been invoked with an explicit short -Reviewer list, the
+        # missing reviewer was read months-later as evidence of a silent panel
+        # degradation, and there was nothing on disk to check it against.
+        #
+        # REQUESTED, not approved and not successful: the cost prompt can drop
+        # reviewers and dispatch can lose them, and both of those are already
+        # visible in round-N-metadata.json. What was missing is the intent.
+        [string[]]$ReviewersRequested = @()
     )
     $ignoreSets = Get-EraIgnoreSets -IgnorePatterns $IgnorePatterns
     $arr = New-Object System.Collections.ArrayList
@@ -994,10 +1008,11 @@ function Write-ReviewManifest {
         })
     }
     $manifest = @{
-        round          = $Round
-        topic_slug     = $TopicSlug
-        timestamp      = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        previous_round = $PreviousRound
+        round               = $Round
+        topic_slug          = $TopicSlug
+        timestamp           = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+        previous_round      = $PreviousRound
+        reviewers_requested = @($ReviewersRequested)
         files          = $arr.ToArray()
     }
     # Anchor the round to a COMMIT. Without this there is no way, after the

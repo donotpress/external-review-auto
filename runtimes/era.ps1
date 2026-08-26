@@ -587,6 +587,10 @@ Please assess the spec for the following, in priority order. **Be specific** —
 
 Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
 
+**Mark any finding you cannot verify from the bundle alone.** You are reading code, not running it, so a claim about runtime behaviour, timing, OS/platform semantics, or a third-party library's behaviour is a HYPOTHESIS however confident it feels. Prefix each such finding with `[UNVERIFIED]` and name the one command or measurement that would settle it.
+
+Findings about structure -- a branch that cannot be reached, a guard applied to one path and not its sibling, a test that asserts a conclusion instead of replaying the mechanism, a value that can never satisfy its own threshold -- are verifiable from the bundle. Do not tag those.
+
 ## Output format
 
 ``````
@@ -911,6 +915,10 @@ All source files are fully included in the attached bundle. Review ONLY what is 
 
 Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
 
+**Mark any finding you cannot verify from the bundle alone.** You are reading code, not running it, so a claim about runtime behaviour, timing, OS/platform semantics, or a third-party library's behaviour is a HYPOTHESIS however confident it feels. Prefix each such finding with `[UNVERIFIED]` and name the one command or measurement that would settle it.
+
+Findings about structure -- a branch that cannot be reached, a guard applied to one path and not its sibling, a test that asserts a conclusion instead of replaying the mechanism, a value that can never satisfy its own threshold -- are verifiable from the bundle. Do not tag those.
+
 ## Output format
 
 ```
@@ -941,6 +949,10 @@ You are reviewing the attached codebase bundle. Provide structured feedback.
 All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
+**Mark any finding you cannot verify from the bundle alone.** You are reading code, not running it, so a claim about runtime behaviour, timing, OS/platform semantics, or a third-party library's behaviour is a HYPOTHESIS however confident it feels. Prefix each such finding with `[UNVERIFIED]` and name the one command or measurement that would settle it.
+
+Findings about structure -- a branch that cannot be reached, a guard applied to one path and not its sibling, a test that asserts a conclusion instead of replaying the mechanism, a value that can never satisfy its own threshold -- are verifiable from the bundle. Do not tag those.
 
 ## Output format
 
@@ -1287,6 +1299,10 @@ Only changed files are attached below.
 3. Any remaining issues.
 
 Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
+
+**Mark any finding you cannot verify from the bundle alone.** You are reading code, not running it, so a claim about runtime behaviour, timing, OS/platform semantics, or a third-party library's behaviour is a HYPOTHESIS however confident it feels. Prefix each such finding with `[UNVERIFIED]` and name the one command or measurement that would settle it.
+
+Findings about structure -- a branch that cannot be reached, a guard applied to one path and not its sibling, a test that asserts a conclusion instead of replaying the mechanism, a value that can never satisfy its own threshold -- are verifiable from the bundle. Do not tag those.
 
 ## Output format
 
@@ -1697,7 +1713,7 @@ Be terse. If a section is empty, write "(none)".
 
     $approvedList = Invoke-CostPrompt -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
 
-    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns
+    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns -ReviewersRequested $reviewerList
 
     Write-Host "Round $round. Reviewer(s): $($approvedList -join ', ')."
 
@@ -1959,6 +1975,24 @@ Be terse. If a section is empty, write "(none)".
         foreach ($line in $voidReport.Lines) { Write-Host $line }
         Write-Host "Artifacts kept in $reviewDir for diagnosis."
         exit 2
+    }
+    elseif ($voidReport.UsableCount -lt @($reviewerList).Count) {
+        # A PARTIAL PANEL IS STILL A DEGRADED PANEL, AND IT USED TO BE SILENT.
+        #
+        # `IsVoid` only covers "every reviewer failed". A 4-model panel that
+        # returns 3 exited 0 and printed nothing about the 4th, so the caller
+        # read a degraded round as a healthy one -- and the whole argument for a
+        # panel is that one member failing is survivable BECAUSE you still know
+        # it happened. Same failure shape as the void round this sits next to,
+        # one notch less severe.
+        #
+        # Exit code stays 0 on purpose: the round IS usable, and turning a
+        # survivable degradation into a failure would make callers retry (and
+        # re-spend) over a reviewer that is simply down. `Lines` already carries
+        # a per-reviewer reason -- it was only ever printed on the void path.
+        Write-Host ("[era] WARNING: only {0} of {1} requested reviewer(s) produced a usable review." -f $voidReport.UsableCount, @($reviewerList).Count)
+        foreach ($line in $voidReport.Lines) { Write-Host $line }
+        Write-Host "The round is usable, but it is a smaller panel than you asked for."
     }
 
     $firstResult = @($results.Values) | Select-Object -First 1
