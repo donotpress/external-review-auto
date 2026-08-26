@@ -36,7 +36,21 @@
 
 # Last-resort default. Only used if the config file is missing or unreadable, so
 # /era can never end up with no reviewer at all.
-$script:EraShippedPanel = @('gemini', 'opus', 'deepseek-flash')
+$script:EraShippedPanel = @('gemini', 'opus', 'deepseek-flash', 'muse-spark')
+# 2026-08-22: 3 -> 4. The 4th seat buys redundancy: on the factor-conditioned-sharpe round
+# `deepseek-flash` errored and the panel silently degraded to two.
+#
+# 2026-08-26: that seat moved from `ox-alpha` to `muse-spark`
+# (opencode-go/muse-spark-1.2-contributor, display name exactly 'Muse Spark 1.2 Contributor')
+# at the operator's request. Worth recording that the ORIGINAL argument for a 4th reviewer was
+# that ox-alpha is FREE, and muse-spark is not — $0.10/$0.20 per Mtok, ~$0.01 on a 100k-token
+# round. Cheaper than deepseek-flash and immaterial next to opus, so the seat is still
+# effectively free in practice, but the justification is now redundancy alone. `ox-alpha`
+# stays in the registry and is selectable by name.
+#
+# Kept in lockstep with config/defaults.json ON PURPOSE — this file's own header records
+# that the two layers carrying different defaults is how a bare /era once dispatched a
+# reviewer neither layer claimed.
 
 function Get-EraDefaultsPath {
     param([Parameter(Mandatory)][string]$SkillRoot)

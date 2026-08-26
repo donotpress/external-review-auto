@@ -62,7 +62,7 @@ agy all resolve the same default regardless of shell, environment or working
 directory.
 
 ```json
-{ "reviewer": ["gemini", "opus", "deepseek-flash"] }
+{ "reviewer": ["gemini", "opus", "deepseek-flash", "muse-spark"] }
 ```
 
 Precedence, highest first: explicit `-Reviewer` -> `$env:ERA_DEFAULT_REVIEWER`
@@ -71,13 +71,19 @@ fallback panel that is never empty.
 
 Change it with `/era set default <names>` (accepts a panel), or edit the file.
 
-> **Default reviewers (a 3-model panel, run simultaneously):** a bare `/era` with no
-> `-Reviewer` dispatches **`gemini,opus,deepseek-flash`** — Gemini 3.6 Flash (agy),
-> Claude Opus 5 (claude CLI), DeepSeek V4 Flash (New) (opencode-go). Cross-vendor
-> on purpose: in round 11 one reviewer reviewed the wrong subject entirely while
-> another found a real shipped regression, so a single reviewer is a single point of
-> failure whichever one you pick. Cost is dominated by Opus (~$15/$75 per M vs ~$0.3
-> and ~$0.14) — pass `-Reviewer gemini` for a cheap single run.
+> **Default reviewers (a 4-model panel, run simultaneously):** a bare `/era` with no
+> `-Reviewer` dispatches **`gemini,opus,deepseek-flash,muse-spark`** — Gemini 3.6
+> Flash (agy), Claude Opus 5 (claude CLI), DeepSeek V4 Flash (New) (opencode-go) and
+> Muse Spark 1.2 Contributor (opencode-go). Cross-vendor on purpose: in round 11 one
+> reviewer reviewed the wrong subject entirely while another found a real shipped
+> regression, so a single reviewer is a single point of failure whichever one you
+> pick. Cost is dominated by Opus (~$5/$25 per M vs ~$0.3, ~$0.14 and ~$0.10) — pass
+> `-Reviewer gemini` for a cheap single run.
+>
+> The 4th seat was `ox-alpha` from 2026-08-22 until 2026-08-26, when opencode stopped
+> offering that model entirely — a bare `/era` was then dispatching a reviewer that
+> could not run, and the panel degraded 4 -> 3 with nothing surfaced to the caller.
+> A registry `retired` flag and a test now keep a dead model out of the default panel.
 > **The single-reviewer fallback still adapts to what's installed:** if
 > agy isn't available, `/era` auto-selects the first usable backend by preference
 > (`gemini-pro-low` → `sonnet` → `deepseek` → `gemini-api`) instead of erroring, and
@@ -211,7 +217,7 @@ pwsh "<skill-root>/runtimes/resolve.ps1" "<user input>"
 | `deepseek` (bare, no variant) | `{"Reviewer":"deepseek-flash"}` — **DeepSeek V4 Flash (New)** is the family default (2026-08-03) |
 | `deepseek pro` / `deepseek v4 pro` | `{"Reviewer":"deepseek"}` — the `deepseek` preset is `opencode-go/deepseek-v4-pro` |
 | `console-bugs use opus` | `{"Reviewer":"opus","TopicSlug":"console-bugs"}` |
-| (bare / empty) | `{"Reviewer":"gemini,opus,deepseek-flash"}` (the default panel) |
+| (bare / empty) | `{"Reviewer":"gemini,opus,deepseek-flash,muse-spark"}` (the default panel) |
 | unmatched/ambiguous | `{"error":"unresolved","input":"<raw>"}` |
 
 Parse the JSON, then forward the keys as `era.ps1` flags (`-Reviewer`, `-Model`, `-TopicSlug`).

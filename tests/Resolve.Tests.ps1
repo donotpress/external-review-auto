@@ -9,6 +9,26 @@ BeforeAll {
     $script:RegPath     = Join-Path $script:SkillRoot 'backends/_registry.json'
     $script:Registry    = Get-Content -Raw $script:RegPath | ConvertFrom-Json
 
+    # THE DEFAULT PANEL IS READ FROM CONFIG, NOT HARDCODED HERE.
+    #
+    # Thirteen assertions used to spell out 'gemini,opus,deepseek-flash'. The
+    # panel became four models on 2026-08-22 (ox-alpha) and nobody updated them,
+    # so the suite sat red against the working tree while passing against HEAD —
+    # which is exactly how the drift stayed invisible. Found 2026-08-26 while
+    # swapping the 4th seat to muse-spark; measured at 14 failures with ox-alpha
+    # too, so it was never about which model holds the seat.
+    #
+    # Deriving it from config/defaults.json is not tautological: what these tests
+    # assert is that resolve.ps1 CONSULTS THE CONFIG, and it could regress to the
+    # shipped panel in _era-defaults.ps1, to $env:ERA_DEFAULT_REVIEWER, or to a
+    # literal of its own. Which models belong in the panel is a separate
+    # question, checked by RegistryCapabilities.Tests.ps1 ('the default panel
+    # names presets that exist in the registry').
+    $script:DefaultPanel = (
+        (Get-Content -Raw (Join-Path $script:SkillRoot 'config/defaults.json') |
+            ConvertFrom-Json).reviewer
+    ) -join ','
+
     # Invoke resolve.ps1 via a positional arg and parse its stdout as JSON.
     # The contract is: stdout is ONLY the JSON object (nothing else).
     # Hermetic against a machine-set $env:ERA_DEFAULT_REVIEWER: the env var is
@@ -101,7 +121,7 @@ Describe 'resolve.ps1 Layer-1 pattern resolution' {
         # stdin read on $PSBoundParameters.ContainsKey('InputText') (False only
         # when the arg is omitted), so an explicit '' never touches stdin.
         $r = script:Invoke-Resolve ''
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
         $r.TopicSlug | Should -BeNullOrEmpty
     }
 
@@ -210,7 +230,7 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
     It 'a topic-slug-only input -> -TopicSlug <slug>, default reviewer' {
         $r = script:Invoke-Resolve 'my-cool-feature'
         $r.TopicSlug | Should -BeExactly 'my-cool-feature'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     It '<slug> use opus -> -TopicSlug <slug> -Reviewer opus' {
@@ -257,7 +277,7 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
     }
 
     It 'bare input uses the shipped default panel when the env var is unset' {
-        (script:Invoke-Resolve '').Reviewer | Should -BeExactly 'gemini,opus,deepseek-flash'
+        (script:Invoke-Resolve '').Reviewer | Should -BeExactly $script:DefaultPanel
     }
     # v1.12 INVERTED this. config/defaults.json now outranks the env var.
     # Rationale: the file is EXPLICIT (written by `/era set default`); the env var
@@ -269,12 +289,12 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
     # one reviewer. Explicit beats ambient.
     It 'a stale $env:ERA_DEFAULT_REVIEWER does NOT override config/defaults.json' {
         (script:Invoke-Resolve '' -EnvDefault 'gemini-pro-high').Reviewer |
-            Should -BeExactly 'gemini,opus,deepseek-flash'
+            Should -BeExactly $script:DefaultPanel
     }
     It 'a topic-slug-only input also ignores a stale $env:ERA_DEFAULT_REVIEWER' {
         $r = script:Invoke-Resolve 'my-feature' -EnvDefault 'gemini-pro-high'
         $r.TopicSlug | Should -BeExactly 'my-feature'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     # --- Regression (Fix #1): a topic slug whose first word merely CONTAINS a
@@ -285,35 +305,35 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
         $r = script:Invoke-Resolve 'improvement-plan'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'improvement-plan'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     It "topic slug 'proxy-config' (contains 'pro') -> TopicSlug + default reviewer, NOT unresolved" {
         $r = script:Invoke-Resolve 'proxy-config'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'proxy-config'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     It "topic slug 'approve-button-spec' (contains 'pro') -> TopicSlug + default reviewer, NOT unresolved" {
         $r = script:Invoke-Resolve 'approve-button-spec'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'approve-button-spec'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     It "topic slug 'api-gateway-spec' (contains 'api') -> TopicSlug + default reviewer, NOT unresolved" {
         $r = script:Invoke-Resolve 'api-gateway-spec'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'api-gateway-spec'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     It "topic slug 'geminify-the-thing' (contains 'gemini') -> TopicSlug + default reviewer, NOT unresolved" {
         $r = script:Invoke-Resolve 'geminify-the-thing'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'geminify-the-thing'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 
     # Guard: exact reviewer keywords still resolve as reviewer specs (no regression).
@@ -329,7 +349,7 @@ Describe 'resolve.ps1 topic-slug vs reviewer disambiguation' {
         $r = script:Invoke-Resolve 'fix the login bug'
         $r.error     | Should -BeNullOrEmpty
         $r.TopicSlug | Should -BeExactly 'fix-the-login-bug'
-        $r.Reviewer  | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer  | Should -BeExactly $script:DefaultPanel
     }
 }
 
@@ -338,7 +358,7 @@ Describe 'resolve.ps1 unmatched input' {
     It 'a slug followed by an unknown model after use -> topic slug (tail has no reviewer keyword)' {
         $r = script:Invoke-Resolve 'some-slug use wat-is-this-model'
         $r.TopicSlug | Should -BeExactly 'some-slug-use-wat-is-this-model'
-        $r.Reviewer | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer | Should -BeExactly $script:DefaultPanel
     }
 }
 
@@ -377,7 +397,7 @@ Describe 'resolve.ps1 stdin input' {
             else { Remove-Item Env:\ERA_DEFAULT_REVIEWER -ErrorAction SilentlyContinue }
         }
         $r = $raw.Trim() | ConvertFrom-Json
-        $r.Reviewer | Should -BeExactly 'gemini,opus,deepseek-flash'
+        $r.Reviewer | Should -BeExactly $script:DefaultPanel
     }
 }
 

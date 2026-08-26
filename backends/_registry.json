@@ -23,7 +23,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy with Gemini 3.1 Pro (High) \u2014 highest context window."
+    "notes": "agy with Gemini 3.1 Pro (High) — highest context window."
   },
   "gemini-pro-low": {
     "backend": "agy",
@@ -36,7 +36,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy with Gemini 3.1 Pro (Low) \u2014 budget option."
+    "notes": "agy with Gemini 3.1 Pro (Low) — budget option."
   },
   "gemini-api": {
     "backend": "geminiapi",
@@ -611,6 +611,21 @@
         "variants": [],
         "display": "Qwen3.7 Max",
         "model_id": "opencode-go/qwen3.7-max"
+      },
+      "muse-spark-1.2-contributor": {
+        "model_id": "opencode-go/muse-spark-1.2-contributor",
+        "display": "Muse Spark 1.2 Contributor",
+        "variants": [
+          "max"
+        ],
+        "note": "\u2b50 SAME RULE AS ox-alpha-free BELOW: the `variants` list is what sets the stall threshold, and without an entry here era resolves variant='default' (120s stall base) and kills a reasoning model mid-think having captured only its banner. muse-spark is reasoning-capable with a 1,048,576-token context, so it will absolutely think longer than 120s on a real bundle. `--variant max` verified accepted 2026-08-26 by running `opencode run -m opencode-go/muse-spark-1.2-contributor --variant max` directly, which printed its `> build \u00b7 muse-spark-1.2-contributor` banner and then the expected answer. Added at the same time as the preset, because a preset without this entry is a reviewer that cannot review."
+      },
+      "ox-alpha-free": {
+        "model_id": "opencode-go/ox-alpha-free",
+        "variants": [
+          "max"
+        ],
+        "note": "⭐ THE `variants` LIST IS WHAT SETS THE STALL THRESHOLD, AND WITHOUT IT THIS MODEL CANNOT BE REVIEWED WITH. Measured 2026-08-22: ox-alpha prints its `> build · ox-alpha-free` banner (38 bytes) and then thinks SILENTLY for minutes — observed real review runs of 1m20s and 7m41s. With no map entry era resolves variant='default', whose stall base is 120s, so it was killed at 130s wall having emitted only the banner. Two smoke tests failed that way before the cause was found. `--variant max` is accepted by the model (verified directly) and raises the stall base to 600s. ⛔ The model itself was never the problem: `opencode run` direct answers in 20-23s, both with and without `-f` attach."
       }
     }
   },
@@ -638,7 +653,21 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "opencode run -m opencode-go/deepseek-v4-flash. models.dev display name is 'DeepSeek V4 Flash (New)' \u2014 the 2026-07-31 build, NOT the 2026-04-24 one. 1M context, 384k max output, reasoning-capable. Verified 2026-08-02."
+    "notes": "opencode run -m opencode-go/deepseek-v4-flash. models.dev display name is 'DeepSeek V4 Flash (New)' — the 2026-07-31 build, NOT the 2026-04-24 one. 1M context, 384k max output, reasoning-capable. Verified 2026-08-02."
+  },
+  "ox-alpha": {
+    "backend": "opencode",
+    "model_id": "opencode-go/ox-alpha-free",
+    "opencode_provider": "opencode-go",
+    "opencode_model_family": "ox-alpha",
+    "pricing": {
+      "input_per_m": 0.0,
+      "output_per_m": 0.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "retired": true,
+    "notes": "\u26d4 RETIRED 2026-08-26 \u2014 OPENCODE NO LONGER OFFERS THIS MODEL. `opencode models` does not list ox-alpha at all any more, so every dispatch to it returns nothing. Corroborated from a live 4-reviewer panel the same day: rounds 1-3 each produced an ox-alpha response, round 4 produced none, and the panel silently degraded 4 -> 3 with no error surfaced to the caller \u2014 the exact failure the note below was added to protect against, arriving from the other direction. Replaced in the default panel by `muse-spark`. Kept rather than deleted so the history stays legible and an explicit `-Reviewer ox-alpha` still resolves and fails loudly instead of resolving to nothing. ORIGINAL NOTE: opencode run -m opencode-go/ox-alpha-free. models.dev display name 'Ox Alpha Free (Unlimited)'. FREE tier, so it carries no cost ceiling and is safe to add to the default panel. Model id confirmed 2026-08-22 from `opencode models`. Added to the default panel the same day, taking it 3 -> 4 reviewers, after a round in which deepseek-flash ERRORED and the panel silently degraded to 2 (reference_era_tooling_defects_2026_08_09): a 4th free reviewer buys redundancy against exactly that."
   },
   "opus-48": {
     "backend": "claude",
@@ -651,5 +680,18 @@
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "Previous panel member (Opus 4.8). Kept so a regression can be A/B'd against Opus 5."
+  },
+  "muse-spark": {
+    "backend": "opencode",
+    "model_id": "opencode-go/muse-spark-1.2-contributor",
+    "opencode_provider": "opencode-go",
+    "opencode_model_family": "muse",
+    "pricing": {
+      "input_per_m": 0.1,
+      "output_per_m": 0.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "opencode run -m opencode-go/muse-spark-1.2-contributor. models.dev display name is exactly 'Muse Spark 1.2 Contributor'. Verified 2026-08-26 from `opencode models --verbose`: status active, 1,048,576 context / 131,072 max output, reasoning + attachment + toolcall, cost $0.10/$0.20 per Mtok (cache read $0.002). Took ox-alpha's seat in the default panel the same day at the operator's request. NOTE it is NOT free, unlike ox-alpha whose whole justification for the 4th seat was zero marginal cost — but at ~$0.01 per 100k-token round it is cheaper than deepseek-flash and immaterial next to opus. There is also an `opencode/muse-spark-1.2-contributor-free` (display 'Muse Spark 1.2 Free', family 'muse-free') on the zen v1 endpoint; it is a DIFFERENT model and not the one named."
   }
 }

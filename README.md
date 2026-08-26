@@ -171,7 +171,7 @@ To **pin a personal default**, just say so in your TUI — one preset or a panel
 ```
 /era set default to gemini pro high
 /era default opus
-/era set default gemini,opus,deepseek-flash
+/era set default gemini,opus,deepseek-flash,muse-spark
 ```
 
 This writes `config/defaults.json` inside the skill (v1.12 — previously an

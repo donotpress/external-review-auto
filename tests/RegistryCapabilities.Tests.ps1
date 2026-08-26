@@ -106,6 +106,56 @@ Describe 'The default panel pins current model IDs' -Tag Unit {
         }
     }
 
+    It 'the default panel contains no RETIRED preset' {
+        # 2026-08-26: `ox-alpha` disappeared from `opencode models` entirely, and
+        # it was sitting in the default panel. Every bare /era then dispatched a
+        # reviewer that could not run — measured on this box's own artifacts,
+        # rounds 1-3 returned an ox-alpha response and round 4 returned none,
+        # with the panel silently degrading 4 -> 3 and no error reaching the
+        # caller.
+        #
+        # Existing-in-the-registry is NOT the same as still-being-offered, which
+        # is why the check above did not catch it. Anything marked `retired`
+        # stays selectable by name (so it fails loudly) but must never be a
+        # default.
+        $defaults = Get-Content -Raw (Join-Path $script:SkillRoot 'config/defaults.json') | ConvertFrom-Json
+        foreach ($preset in $defaults.reviewer) {
+            [bool]$script:Registry.$preset.retired | Should -BeFalse -Because "$preset is retired"
+        }
+    }
+
+    It 'every opencode preset has a _opencode_model_map entry' {
+        # THE STALL-THRESHOLD TRAP, generalised. `_opencode_model_map` is what
+        # sets the stall budget: with no entry, era resolves variant='default'
+        # (120s base) and kills a reasoning model mid-think having captured only
+        # its banner. ox-alpha lost two smoke tests to exactly this before the
+        # cause was found, and the fix was recorded only in a note on one entry —
+        # so the next opencode preset added would have repeated it. Now it fails
+        # the build instead.
+        $map = $script:Registry._opencode_model_map
+        foreach ($prop in $script:Registry.PSObject.Properties) {
+            $preset = $prop.Value
+            if ($prop.Name.StartsWith('_')) { continue }
+            if ($preset.backend -ne 'opencode') { continue }
+            if ($preset.retired) { continue }
+            $providerEntry = $map.($preset.opencode_provider)
+            $providerEntry | Should -Not -BeNullOrEmpty -Because "$($prop.Name) names an unmapped provider"
+            # Asserts the ENTRY EXISTS, not that `variants` is non-empty: an empty
+            # list is legitimate for a model that has no variants, and several
+            # minimax entries are exactly that. A MISSING entry is what actually
+            # caused the ox-alpha stall deaths. (Whether minimax's empty list is
+            # right for a reasoning-heavy model is a separate, unverified
+            # question — flagged here rather than silently exempted.)
+            $matched = @($providerEntry.PSObject.Properties.Value |
+                Where-Object { $_.model_id -eq $preset.model_id })
+            $matched.Count | Should -BeGreaterThan 0 -Because (
+                "$($prop.Name) ($($preset.model_id)) has NO _opencode_model_map entry at all, " +
+                "so era cannot discover its variants and dispatches it at the 120s default " +
+                "stall budget"
+            )
+        }
+    }
+
     It 'no shipped doc still advertises the panel as Opus 4.8' {
         # The registry was already on Opus 5 while three doc lines said 4.8 —
         # the drift was in the prose, not the config.

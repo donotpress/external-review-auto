@@ -2,7 +2,8 @@
   "reviewer": [
     "gemini",
     "opus",
-    "deepseek-flash"
+    "deepseek-flash",
+    "muse-spark"
   ],
-  "note": "Default reviewer(s) for a bare /era. A list is dispatched simultaneously as a panel. Edit via `/era set default <names>` or by hand."
+  "note": "Default reviewer(s) for a bare /era. A list is dispatched simultaneously as a panel. 4-model panel since 2026-08-22. The 4th seat was `ox-alpha` (free); on 2026-08-26 the operator swapped it for `muse-spark` (opencode-go/muse-spark-1.2-contributor, display name exactly 'Muse Spark 1.2 Contributor'). That seat is no longer free — $0.10/$0.20 per Mtok, ~$0.01 on a 100k-token round — cheaper than deepseek-flash and immaterial next to opus, but the original \"costs nothing\" argument for a 4th reviewer no longer applies; the redundancy argument still does. `ox-alpha` remains selectable by name. MUST stay in lockstep with runtimes/_era-defaults.ps1 $EraShippedPanel. Edit via `/era set default <names>` or by hand."
 }
