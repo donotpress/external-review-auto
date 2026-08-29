@@ -164,6 +164,13 @@ function Invoke-OpencodeReview {
         [Parameter(Mandatory)][string]$ResponsePath,
         [Parameter(Mandatory)][hashtable]$ModelInfo,
         [int]$TimeoutSec = 600,
+        # Bounded retries for `database is locked` ONLY. The run mutex below
+        # serialises era's own opencode seats, but it cannot see an opencode the
+        # operator has open interactively, and that one holds the same database.
+        # A lock failure dies at startup in about a second having consumed no
+        # tokens, so retrying it is nearly free -- unlike every other failure
+        # here, which is why this is scoped to that one stderr signature.
+        [int]$LockRetries = 2,
         [string]$AgyModelHint,
         [string]$ModelOverride,
         # Accepted-and-ignored: the dispatcher passes -OpencodeProvider to every
@@ -329,6 +336,41 @@ function Invoke-OpencodeReview {
     $stderrCopyTask = $null
     $opencodeProc = $null
 
+    # --- SERIALISE opencode runs across the whole machine ------------------
+    # opencode keeps a single SQLite database (~/.local/share/opencode/opencode.db
+    # -- 8 GB with a 97 MB WAL on this host). Two `opencode run` processes racing
+    # to open it fail fast with `Error: Unexpected error\n\ndatabase is locked`,
+    # exit 1, and produce no response file.
+    #
+    # The DEFAULT era panel does exactly that: deepseek-flash and muse-spark are
+    # both opencode-backed and are dispatched as parallel ThreadJobs in one
+    # process. That cost a reviewer in three consecutive rounds (3, 4, 5) --
+    # always with two opencode seats in flight, never otherwise.
+    #
+    # A named mutex is the smallest fix that actually prevents it. Isolating the
+    # data directory per child would preserve parallelism, but opencode has no
+    # data-dir override and its auth lives in that same directory, so a private
+    # dir means an unauthenticated reviewer.
+    #
+    # Cost: the opencode seats run sequentially. On the round-5 panel that is
+    # additive wall clock on two of four reviewers, against losing one outright.
+    # Precedent: the variant-state mutex above.
+    $runMutex = $null
+    $runMutexHeld = $false
+    $lockWaitMs = 15 * 60 * 1000
+    try {
+        $runMutex = [System.Threading.Mutex]::new($false, 'Global\era-opencode-run-mutex')
+        try { $runMutexHeld = $runMutex.WaitOne($lockWaitMs) }
+        catch [System.Threading.AbandonedMutexException] { $runMutexHeld = $true }
+        if (-not $runMutexHeld) {
+            # Degrade to the old behaviour rather than drop the reviewer: a
+            # possible collision beats a guaranteed no-show.
+            Write-Host "[opencode] WARNING: waited $([int]($lockWaitMs/1000))s for the opencode run lock and did not get it; starting anyway (may hit 'database is locked')."
+        }
+    } catch {
+        Write-Host "[opencode] WARNING: could not create the run mutex ($($_.Exception.Message)); starting unserialised."
+    }
+
     try {
         $opencodeProc = [System.Diagnostics.Process]::Start($psi)
         # Publish the child PID before any blocking wait: once this thread is
@@ -481,9 +523,24 @@ function Invoke-OpencodeReview {
         Remove-Item -LiteralPath $stdFile -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $errFile -ErrorAction SilentlyContinue
         $sw.Stop()
+
+        # Released only after the child is reaped, so the next opencode seat
+        # never overlaps this one's database handle.
+        if ($runMutex) {
+            if ($runMutexHeld) { try { $runMutex.ReleaseMutex() } catch {} }
+            try { $runMutex.Dispose() } catch {}
+        }
     }
 
     if ($exitCode -ne 0 -or -not $clean) {
+        if ($LockRetries -gt 0 -and $stderr -match '(?i)database is locked') {
+            $backoffSec = 10 * (3 - $LockRetries)   # 10s, then 20s
+            Write-Host "[opencode] 'database is locked' (another opencode holds ~/.local/share/opencode/opencode.db). Retrying in ${backoffSec}s, $LockRetries left."
+            Start-Sleep -Seconds $backoffSec
+            $retryArgs = @{} + $PSBoundParameters
+            $retryArgs['LockRetries'] = $LockRetries - 1
+            return Invoke-OpencodeReview @retryArgs
+        }
         throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr"
     }
 
