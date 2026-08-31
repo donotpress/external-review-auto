@@ -126,6 +126,11 @@ Describe 'the Read-tool path is retired' -Tag Unit {
         # The next person to hit this must find the measurement without git
         # archaeology — the same standard the rest of this adapter is held to.
         $script:Src | Should -Match 'chunk-read|CHUNK-READ'
-        $script:Src | Should -Match '13,433|13433'
+        # Including the COUNTER-example. The path is unreliable, not uniformly
+        # fatal -- muse-spark returned a real review on the same 2.4 MB bundle
+        # deepseek-flash failed on -- and a comment that hides that is arguing
+        # for the fix rather than recording what was measured.
+        $script:Src | Should -Match 'muse-spark'
+        $script:Src | Should -Match 'SUCCEEDED'
     }
 }

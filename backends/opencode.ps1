@@ -235,11 +235,24 @@ function Invoke-OpencodeReview {
     # It starts fine. It then CHUNK-READS the bundle 822 lines at a time and
     # wanders into arbitrary shell commands -- listing era's own artifact
     # directory and reading era's config and prompt files. That is an unbounded
-    # agentic exploration with no relationship to the review it was asked for,
-    # and on every bundle over the cap it burns the whole budget and returns
-    # nothing. Correlation is total: 74,740 / 79,294 / 2,396,233-byte bundles all
-    # took this path and all failed; the 13,433-byte bundle took the attach path
-    # and returned a 7,957-byte review.
+    # agentic exploration with no bound on how long it runs.
+    #
+    # IT IS UNRELIABLE, NOT UNIFORMLY FATAL -- and the difference is the model,
+    # not the size:
+    #
+    #   deepseek-flash  74,740 B    stalled, 600s, nothing
+    #   deepseek-flash  79,294 B    stalled, 600s, nothing
+    #   deepseek-flash  2,396,233 B failed
+    #   muse-spark      2,396,233 B SUCCEEDED -- a 7,628-byte review with real
+    #                               file:line citations across the bundle
+    #
+    # So a per-model allowlist is conceivable. It is not what this does, for two
+    # reasons: the one success is n=1, and the failure costs 600s of wall clock
+    # plus the full input spend and returns nothing, while the refusal costs a
+    # second. Selective reading is also a DIFFERENT review -- the model chooses
+    # what it looks at -- which is not what a caller asking for a review of a
+    # curated bundle asked for. ERA_OPENCODE_READ_TOOL=1 remains for the operator
+    # who wants to take that bet deliberately.
     #
     # A path that hangs for 600s and returns nothing is worse than a refusal, and
     # era's caller-side preflight (Get-EraBundleDeliveryPlan) now refuses this

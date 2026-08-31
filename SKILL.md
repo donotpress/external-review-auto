@@ -443,8 +443,13 @@ so it never even ran.
 the model to `Read` the bundle itself. Forensic evidence showed the model chunk-reading
 the bundle 822 lines at a time and then wandering into unrelated shell commands —
 listing era's own artifact directory and reading its config and prompt files — until the
-budget ran out. It never returned a review. A path that hangs for 600s and returns
-nothing is worse than a refusal, so it now refuses. Every stall artifact recorded before
+budget ran out. It is **unreliable rather than uniformly fatal**, and the variable is the
+model, not the size: `deepseek-flash` lost the seat on 74,740 / 79,294 / 2,396,233-byte
+bundles, while `muse-spark` returned a well-grounded 7,628-byte review on that same
+2.4 MB bundle. It still defaults to refusing, because the failure costs 600s and the full
+input spend while the refusal costs a second, and because selective reading is a
+*different* review — the model picks what it looks at. `ERA_OPENCODE_READ_TOOL=1` is
+there for taking that bet deliberately. Every stall artifact recorded before
 2026-08-31 is empty or cut at a 4,096-byte boundary because the snapshot read the capture
 files without flushing their write buffers; that is fixed, so new artifacts are real.
 
