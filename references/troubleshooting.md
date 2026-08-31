@@ -240,11 +240,12 @@ canaries at 25/50/75% depth: both default opencode seats covered 109,066 / 314,7
 
 **It is nevertheless intermittent, and the cause is not known.** The same seat lost
 rounds at 74,740 and 79,294 bytes — sizes the probes clear comfortably — so it is
-neither size nor model. The leading untested hypothesis is **concurrency**: interactive
-`opencode -c` sessions were live during the failing dispatches and none were during the
-probes, and era's run mutex serialises its own seats but cannot see yours.
+neither size nor model. Concurrency was the leading hypothesis; it was tested on
+2026-08-31 (10 trials under a live `opencode serve` plus 22 external `opencode run`
+contenders vs 10 with none) and produced **0 stalls in both arms**, so it is now the
+least-supported explanation rather than the first thing to check.
 
-**Fix:** close interactive opencode sessions and re-dispatch. If it persists, capture
+**Fix:** re-dispatch — the failures observed so far have not recurred on a retry. If it persists, capture
 the (now real) stall artifact and check whether the model is chunk-reading or wandering
 into unrelated shell commands. `ERA_OPENCODE_READ_TOOL=0` forces attach as a diagnostic
 — you will get a review of the first 50 KiB, and it warns.

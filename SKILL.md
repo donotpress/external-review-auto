@@ -493,10 +493,14 @@ avoid a failure the stall detector and timeout already bound — the wrong trade
 
 **It is still intermittent, and that is unexplained.** `deepseek-flash` lost seats at
 74,740 B and 79,294 B — sizes these probes clear comfortably — so it is neither size nor
-model. The leading untested hypothesis is **concurrency**: interactive `opencode -c`
-sessions were live during the failing dispatches and none were during the probes, and
-era's run mutex serialises its own seats but cannot see an operator's session. If it
-stalls again, check that first — and the snapshot will now actually hold the evidence.
+model. **Concurrency was the leading hypothesis and it has now been tested and ruled
+out**: 10 trials with an `opencode serve` holding the database plus 22 external
+`opencode run` contenders produced **0 stalls**, exactly as 10 trials with no other
+opencode process did, and `database is locked` never appeared. The cause is genuinely
+unknown, with concurrency now the least-supported explanation. Caveat: those trials
+finish in ~13 s while the historical failures burned 600 s, so the failing regime was
+not reproduced. If it stalls again the snapshot will now hold real evidence — which is
+what was missing every previous time.
 
 Full method, both ceilings, and the wrong turn in the middle:
 `docs/assessments/2026-08-31-bundle-delivery-limits.md`.

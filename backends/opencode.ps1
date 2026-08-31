@@ -232,12 +232,33 @@ function Invoke-OpencodeReview {
     #   muse-spark      2,396,233 B  SUCCEEDED - a 7,628-byte grounded review
     #
     # Not size (109 KB works, 74 KB failed) and not model (both models pass every
-    # probe here; both appear in the failure list). The untested hypothesis with
-    # the most support is CONCURRENCY: three interactive `opencode -c` sessions
-    # were live during the failing dispatches and none were during these probes.
-    # The run mutex below serialises era's OWN seats but cannot see an operator's
-    # interactive session. If this stalls again, that is the first thing to check,
-    # and the snapshot will now actually contain the evidence.
+    # probe here; both appear in the failure list).
+    #
+    # CONCURRENCY WAS THE LEADING HYPOTHESIS. IT WAS TESTED, AND IT DID NOT HOLD.
+    # 2026-08-31, controlled A/B against this adapter directly (no repomix, no
+    # round machinery), one fixed 65,196-byte bundle and one fixed prompt, 10
+    # trials per arm, deepseek-flash:
+    #
+    #   arm A  no other opencode process       0 stalls / 10   mean 14.5s, max 28.3s
+    #   arm B  `opencode serve` holding the     0 stalls / 10   mean 13.0s, max 22.5s
+    #          database + 22 external
+    #          `opencode run` contenders
+    #
+    # `database is locked` never appeared in either arm, and arm B was marginally
+    # FASTER. The mid-bundle canary came back in every trial that produced text.
+    # So the run mutex's blind spot -- an operator's own opencode session -- is not
+    # what killed those rounds, and this comment no longer gets to claim it is.
+    #
+    # WHAT THAT DOES AND DOES NOT SETTLE. It does not reproduce the failing
+    # regime: these trials finish in ~13s while the historical failures burned the
+    # full 600s, so whatever they were doing, this is not it. Ten trials with zero
+    # events bounds the per-arm stall rate at roughly 26% (rule of three), so a
+    # rarer mechanism would not have shown up. The cause of the 74,740 B and
+    # 79,294 B stalls remains genuinely unknown -- with concurrency now the
+    # least-supported explanation rather than the most.
+    #
+    # The next stall will leave a real artifact (the flush above), which is the
+    # thing that was missing every previous time this was investigated.
     #
     # Refusing outright was the wrong trade: it removes the only way to review
     # anything over 50 KiB on an opencode seat, to avoid a failure that the stall

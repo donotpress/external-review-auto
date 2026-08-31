@@ -103,10 +103,37 @@ repomix's count cannot see.
 
 The Read-tool path is **intermittent, and the cause is unexplained.**
 `deepseek-flash` lost rounds at 74,740 B and 79,294 B — sizes the probes above
-clear comfortably — so it is neither size nor model. The leading untested
-hypothesis is **concurrency**: three interactive `opencode -c` sessions were live
-during the failing dispatches and none were during the probes, and era's run mutex
-serialises its own seats but cannot see an operator's session.
+clear comfortably — so it is neither size nor model.
+
+### The concurrency hypothesis was tested, and it failed
+
+Two independent reviewers proposed the same experiment, so it was run: one fixed
+65,196-byte bundle, one fixed prompt, the adapter called directly (no repomix, no
+round machinery), 10 trials per arm.
+
+| arm | condition | stalls | mean wall | max wall |
+|---|---|---|---|---|
+| A | no other opencode process | **0 / 10** | 14.5 s | 28.3 s |
+| B | `opencode serve` holding the DB + 22 external `opencode run` contenders | **0 / 10** | 13.0 s | 22.5 s |
+
+`database is locked` never appeared in either arm, and arm B was marginally
+*faster*. The mid-bundle canary came back in every trial that produced text. So
+the run mutex's known blind spot — an operator's own session — is **not** what
+killed those rounds.
+
+**What this does not settle.** The trials finish in ~13 s while the historical
+failures burned the full 600 s, so this does not reproduce the failing regime.
+Ten trials with zero events bounds the per-arm stall rate at roughly 26% (rule of
+three), so a rarer mechanism would not have appeared. The cause remains unknown —
+with concurrency now the *least*-supported explanation rather than the leading
+one.
+
+**Incidental:** half the trials in each arm were rejected as
+`agentic-narration-capture`. Inspecting the raw text, the rejected responses
+contain no narration at all — they are correct, canary-verified answers of 280
+characters, against accepted ones of 301 and 324. The detector's length floor is
+doing the rejecting and the error code is naming the wrong cause. The floor is
+working as designed on a deliberately-tiny answer; the *label* misattributes it.
 
 This is recorded in `backends/opencode.ps1` and pinned by a test, so the source
 carries the failures and not only the passes. With the flush fixed, the next stall
