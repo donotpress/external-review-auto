@@ -1711,8 +1711,8 @@ Be terse. If a section is empty, write "(none)".
     # reasons that are the same defect: a bundle bigger than the seat's delivery
     # channel. opus's bundle is INLINED via stdin and 2,396,233 bytes came back
     # "Prompt is too long"; opencode ATTACHES via -f and silently truncates at
-    # 51,200 bytes, above which era used to switch to a Read-tool path that hangs
-    # for the full timeout (now retired — see backends/opencode.ps1).
+    # 51,200 bytes, above which the model is told to read the bundle from disk
+    # instead (verified to 668,389 bytes; see backends/opencode.ps1).
     #
     # The only scale gate that existed measured PRE-BUNDLE SOURCE bytes against a
     # 10 MB ceiling — ~200x looser than the tightest channel era dispatches to —

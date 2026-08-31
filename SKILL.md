@@ -455,7 +455,8 @@ independent reasons of one shape — a bundle bigger than the channel:
   (90% of it was one 2,151 KB ledger file; at 73 KB the same seat delivered a
   17.3 KB review.)
 - 2026-08-25 and 2026-08-31, 79,294- and 74,740-byte bundles to `deepseek-flash`:
-  600s timeout, nothing returned, because both took the now-retired Read-tool path.
+  600s timeout, nothing returned. Both took the over-the-cap Read-tool path, which is
+  intermittent for reasons still unexplained (see below) — not the size.
   At 13,433 bytes the same seat, same prompt, returned a 7,957-byte review.
 
 The only pre-existing scale gate measured *pre-bundle source* bytes against a 10 MB
@@ -494,6 +495,9 @@ sessions were live during the failing dispatches and none were during the probes
 era's run mutex serialises its own seats but cannot see an operator's session. If it
 stalls again, check that first — and the snapshot will now actually hold the evidence.
 
+Full method, both ceilings, and the wrong turn in the middle:
+`docs/assessments/2026-08-31-bundle-delivery-limits.md`.
+
 The round summary now names each seat's delivery mode (`via=attach`, `via=stdin`, …),
 and `round-N-metadata.json` records `delivery_mode` per reviewer plus `bundle_bytes`.
 
@@ -503,7 +507,7 @@ and `round-N-metadata.json` records `delivery_mode` per reviewer plus `bundle_by
 |---|---|---|
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
 | `ERA_DEFAULT_REVIEWER` | *(unset)* | OPTIONAL per-session override of the default reviewer(s). The persistent default lives in **`config/defaults.json`**, not here — an env var is per-process and inherited, so a value set at Windows User scope leaves already-running shells on the OLD one, and PowerShell / WSL / opencode / agy each read a different store. Set this only for a one-off. |
-| `ERA_OPENCODE_READ_TOOL` | (unset) | Diagnostics escape hatch for opencode bundle delivery. **Normal behaviour: attach via `-f`, and REFUSE above 51,200 bytes.** opencode silently TRUNCATES an attached file at exactly 51200 bytes — measured 2026-08-03, a 474 KB bundle reached the model as its first 10.7% while still producing a well-formed (and near-worthless) review. Above the cap era used to auto-switch to a Read-tool prompt; **that path was RETIRED 2026-08-31** because it hangs for the whole timeout and returns nothing (see *Bundle delivery limits* below). Set `1` to re-enable it for diagnosis (expect to lose the seat), `0` to force attach anyway (expect a truncated review). Both warn. |
+| `ERA_OPENCODE_READ_TOOL` | (auto) | Forces opencode's bundle delivery mode. **Auto by default: attach via `-f` at or under 51,200 bytes, Read tool above it** (opencode silently TRUNCATES an attached file at exactly 51200 bytes — measured 2026-08-03, a 474 KB bundle reached the model as its first 10.7% while still producing a well-formed and near-worthless review). Set `1` to force the Read tool below the cap, or to push past the 1,048,576-byte read ceiling; set `0` to force attach above the cap (diagnostics only — you get a truncated review, and it warns). See *Bundle delivery limits*. |
 | `ERA_BUNDLE_FORCE` | (unset) | Set to `1` to dispatch reviewers whose delivery channel demonstrably cannot carry the bundle — the env-var equivalent of `-ForceBundleSize`. **`-Force` deliberately does NOT do this**; it only skips the cost prompt, and `-ForceBroadScope` only arms on the repo-wide path. See *Bundle delivery limits*. |
 | `ERA_USE_HTTP_OPENCODE` | (unset) | Set to `1` to route the `deepseek`/`minimax` reviewer aliases over **direct HTTP** (the `*-http` presets) instead of the opencode TUI. Keys auto-source from opencode `auth.json`. Default off. |
 | `ERA_AGY_FALLBACK` | (auto) | v1.10: when an **agy** reviewer fails to capture even after its retry, era auto-falls-back to a non-agy reviewer so the round still yields a review. Set to a preset (e.g. `gemini-api`) to pin the fallback, or `off`/`0` to disable. Triggers only on an actual agy failure — healthy runs are unaffected. |

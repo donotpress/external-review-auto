@@ -121,7 +121,7 @@ this state at all.
 
 **Background:** Earlier versions selected the opencode model/variant by **swapping** `~/.local/state/opencode/model.json` (prepend `recent[0]`, set the `variant` map) under a `Global\era-opencode-state-mutex`, writing a `model.json.era-backup` for crash recovery. That serialized concurrent opencode startups and risked restore races.
 
-**Now:** opencode is **stateless** by default. The model is selected with `-m`, the variant with `--variant`, and the bundle is attached with `-f` — probe-verified that `opencode run -m` does not mutate `model.json`. No swap, no mutex, no `.era-backup`; concurrent opencode dispatches run in parallel. The optional `ERA_OPENCODE_VARIANT_STATE=1` insurance writes the variant entry and restores it **byte-identical** under a brief `era-opencode-variant-mutex`.
+**Now:** opencode is **stateless** by default. The model is selected with `-m`, the variant with `--variant`, and the bundle is attached with `-f` (at or under 51,200 bytes; above that the model reads it from disk) — probe-verified that `opencode run -m` does not mutate `model.json`. No swap, no mutex, no `.era-backup`; concurrent opencode dispatches run in parallel. The optional `ERA_OPENCODE_VARIANT_STATE=1` insurance writes the variant entry and restores it **byte-identical** under a brief `era-opencode-variant-mutex`.
 
 **Migration:** the `model.json.era-backup` recovery block in era.ps1 is retained for one release to restore a pre-upgrade orphaned backup; delete a stale one manually if you find it.
 
@@ -133,7 +133,7 @@ this state at all.
 
 **Cause:** the model emitted a tool-intent narration or a "I can't read the bundle" refusal instead of a review. The shared `Test-AgenticNarrationCapture` detector flags it so it fails honestly rather than being recorded as a successful review.
 
-**Fix:** re-dispatch (the failure is usually transient). The default `-f` attach mode makes this rare; if it persists, check `opencode` auth/provider for the model.
+**Fix:** re-dispatch (the failure is usually transient). The `-f` attach mode used for bundles under 51,200 bytes makes this rare; if it persists, check `opencode` auth/provider for the model.
 
 ---
 
@@ -179,3 +179,72 @@ An `accessToken` of **0 characters** or a past `refreshTokenExpiresAt` confirms 
 One failure did print `Ignoring 1 permissions.allow entry … this workspace has not been trusted`, but
 that message says it is *ignoring* an entry, not aborting — and the flag was already `false` across
 all 115 successes. A dispatch later succeeded with it still `false`. It is a co-occurring warning.
+
+---
+
+## "Refusing this round: N of M requested reviewer(s) cannot receive a …-byte bundle" (exit 1)
+
+**Cause:** the bundle is larger than a selected reviewer's delivery channel can carry.
+Each backend receives the bundle differently and each way has a different ceiling — see
+SKILL.md → *Bundle delivery limits*. The message names every doomed seat, its channel,
+its limit and where that limit comes from.
+
+**This is a preflight refusal, not a failed round.** Exit **1** means nothing was
+dispatched and nothing was spent; re-running after curating is free. (Exit **2** is a
+void round that already cost money — never conflate them.)
+
+**Fix, in order of preference:**
+1. **Curate** — `-IncludeFiles` down to what the review actually needs. Bundle size is
+   almost always dominated by one or two large files; check `round-N-manifest.json`.
+2. **Drop the seat** — `-Reviewer` without the reviewer that cannot carry it. `agy`
+   (`gemini`) reads from disk and has no channel limit, so it always survives.
+3. **Force it** — `-ForceBundleSize` (or `ERA_BUNDLE_FORCE=1`) dispatches anyway and
+   warns per seat. Note `-Force` does **not** do this; it only skips the cost prompt.
+
+---
+
+## `claude` returns "Prompt is too long"
+
+**Cause:** the `claude` adapter pipes the bundle into `claude --print` as the prompt, so
+the bundle must fit the CLI's context window. That window is **appreciably smaller than
+the model's 1M API window** — measured 2026-08-31, the CLI accepted 600,000 repomix
+tokens and rejected 630,000.
+
+**Fix:** curate below ~550,000 tokens (era's ceiling, which leaves headroom for the
+CLI's own system prompt). The preflight now catches this before dispatch, so seeing this
+message from a normal round means the ceiling needs re-measuring — likely after a CLI
+upgrade.
+
+**Re-measuring after a CLI upgrade:** bisect with a **tail canary**. Pipe slices of a
+real bundle to `claude --print`, each with a unique marker appended at the very end, and
+ask only for the marker back. Echoing it proves the *tail* reached the model; a bare
+"OK" only proves the request was accepted, and `--autocompact` defaults to on. Rejection
+happens *before* inference (~6 s, unbilled), so only the first accepted probe costs
+anything. Update `max_bundle_tokens` in `backends/_registry.json`.
+
+---
+
+## An opencode seat stalls on a bundle over 50 KiB
+
+**First: the forensics used to lie.** Before 2026-08-31 every artifact under
+`%TEMP%\opencode-stall-debug` was 0 bytes even when the process was producing output —
+the snapshot read the capture files without flushing their write buffers, and
+`FileStream.Length` counts buffered bytes the file does not yet have. If you are looking
+at an artifact older than that fix, **its emptiness is not evidence.** New artifacts are
+real.
+
+**What the path does:** above 51,200 bytes the model reads the bundle from disk with its
+own Read tool, because attaching truncates silently at exactly 50 KiB. Verified with
+canaries at 25/50/75% depth: both default opencode seats covered 109,066 / 314,720 /
+668,389-byte bundles in full (57 s / 85 s / 256 s).
+
+**It is nevertheless intermittent, and the cause is not known.** The same seat lost
+rounds at 74,740 and 79,294 bytes — sizes the probes clear comfortably — so it is
+neither size nor model. The leading untested hypothesis is **concurrency**: interactive
+`opencode -c` sessions were live during the failing dispatches and none were during the
+probes, and era's run mutex serialises its own seats but cannot see yours.
+
+**Fix:** close interactive opencode sessions and re-dispatch. If it persists, capture
+the (now real) stall artifact and check whether the model is chunk-reading or wandering
+into unrelated shell commands. `ERA_OPENCODE_READ_TOOL=0` forces attach as a diagnostic
+— you will get a review of the first 50 KiB, and it warns.

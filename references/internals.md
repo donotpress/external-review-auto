@@ -29,8 +29,10 @@ All three CLI adapters (`agy.ps1`, `claude.ps1`, `opencode.ps1`) implement the s
      agentic-loop captures via prompt-hardening + the detector + retry, NOT `--sandbox`.
 5. **Opencode-specific (stateless):** `opencode run -m <id>` selects the model
    directly (probe-verified: it overrides `recent[0]` and does **not** mutate the
-   user's `model.json`), and the bundle is **attached via `-f <file>`** rather than
-   read by an agentic tool call. So the adapter passes `-m <model> --variant <v>` on
+   user's `model.json`). The bundle is **attached via `-f <file>` at or under 51,200
+   bytes** and **read from disk by the model above that** — attaching truncates
+   silently at exactly 50 KiB, and the read path is verified to 668,389 bytes with
+   mid-bundle canaries; past 1,048,576 the adapter refuses. So the adapter passes `-m <model> --variant <v>` on
    the CLI and touches no state — no `state.json` swap, no `recent[]` manipulation,
    no startup mutex. Concurrent opencode dispatches run in parallel. The shared
    `Test-AgenticNarrationCapture` detector still backstops any non-review capture.
@@ -40,6 +42,52 @@ All three CLI adapters (`agy.ps1`, `claude.ps1`, `opencode.ps1`) implement the s
      `era-opencode-variant-mutex`. Off by default → fully stateless.
 
 ---
+
+
+## Bundle-delivery preflight
+
+`Get-EraBundleDeliveryPlan` (workflow.ps1) answers one question before dispatch:
+**can each selected seat physically receive this bundle?** It is pure — no I/O, no
+dispatch — so it is cheap to call before the cost prompt and trivial to test.
+
+`Get-EraBackendDelivery -Backend <b> -BundleBytes <n>` returns
+`@{ Mode; LimitBytes; LimitTokens; Basis }`:
+
+| Backend | Mode | Ceiling | Basis |
+|---|---|---|---|
+| `opencode` (≤51,200 B) | `attach` | 51,200 bytes | Measured — silent truncation at exactly 50 KiB |
+| `opencode` (>51,200 B) | `read-tool` | 1,048,576 bytes | Verified to 668,389 B with canaries at 25/50/75% depth |
+| `claude` | `stdin` | 550,000 tokens | Measured — the CLI accepts 600,000 and rejects 630,000 |
+| `anthropic` | `inline-api` | 750,000 tokens | Derived from the 1M API window; unmeasured |
+| `agy` | `disk-read` | none | The channel imposes none |
+| `geminiapi`, `openaicompat` | `inline-api` | unknown | Reported, **never refused** |
+
+A `$null` limit means "not bounded by this channel, or not measured", and such a seat
+is always `Ok` — **inventing a ceiling is how you refuse a round that would have
+worked**. A preset overrides either limit with `max_bundle_bytes` / `max_bundle_tokens`
+in `backends/_registry.json`, so a newly measured number is data, not a code change.
+
+`era.ps1` runs the plan **before** `Get-EraCostReport` and `Invoke-CostPrompt`, so a
+refusal is `Stop-EraWithError` → **exit 1**: nothing dispatched, nothing spent, free to
+re-run after curating. That is deliberately distinct from a void round's exit 2, which
+already cost money. `-ForceBundleSize` / `ERA_BUNDLE_FORCE=1` overrides, warning per
+doomed seat. It is separate from `-Force` (cost consent, passed by the normative
+dispatch line) and from `-ForceBroadScope` (arms only on the repo-wide path) — all
+three failing rounds were curated `-IncludeFiles` rounds, so neither existing switch
+was even loaded.
+
+`Get-EraDeliveryModeMap` flattens the plan to `preset -> mode` for
+`Get-EraVoidRoundReport` (the `via=` field) and `Write-ReviewMetadata`
+(`delivery_mode` per reviewer, plus a top-level `bundle_bytes`).
+
+`Get-EraFailureCategory` labels each failed seat `not-delivered`, `answered-badly`,
+`no-artifact` or `unknown`. The distinction already existed structurally — an honest
+capture failure sets a coded `$r.Error` (`response-contract`,
+`agentic-narration-capture`, `prompt-echo`) while a stall or crash surfaces as a
+free-text exception — and `Get-EraRecoverableFailures` keys on it, but the summary
+printed only the raw reason string. "Nothing was reviewed" and "the bundle was
+reviewed and the answer was rejected" are opposite facts; conflating them is how a
+degraded panel reads as a real one.
 
 ## Variant resolution (opencode adapter)
 
@@ -99,7 +147,7 @@ external-review-auto/
 └── backends/
     ├── agy.ps1                 ← agy CLI adapter (Run-ID transcript capture + retry)
     ├── claude.ps1              ← Claude CLI adapter (stdin pipe → stdout)
-    ├── opencode.ps1            ← opencode adapter (`-f` attach, stateless)
+    ├── opencode.ps1            ← opencode adapter (`-f` attach ≤50 KiB, Read tool above, stateless)
     ├── _capture-validation.ps1 ← shared non-review detector (agy + opencode)
     ├── geminiapi.ps1           ← Direct Gemini REST API (no CLI)
     ├── anthropic.ps1           ← Direct Anthropic REST API (no CLI)
