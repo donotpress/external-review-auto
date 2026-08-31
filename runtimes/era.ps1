@@ -80,6 +80,15 @@ param(
     # non-interactively — which is how the 72,378-file run happened.
     # ERA_BROAD_FORCE=1 is the env equivalent for CI.
     [switch]$ForceBroadScope,
+    # -ForceBundleSize: dispatch a bundle that a selected reviewer's delivery
+    # channel demonstrably cannot carry. SEPARATE from -Force and from
+    # -ForceBroadScope for the same reason both of those are separate from each
+    # other: -Force is cost consent and the skill's normative dispatch line
+    # passes it on every call, and -ForceBroadScope only ever arms on the
+    # repo-wide path — all three of the rounds this gate exists to catch were
+    # curated -IncludeFiles rounds, so neither existing switch was even loaded.
+    # ERA_BUNDLE_FORCE=1 is the env equivalent for CI.
+    [switch]$ForceBundleSize,
     # -AllowDirtyTree: dispatch even though the working tree has uncommitted
     # changes. Deliberately SEPARATE from -Force for the same reason as
     # -ForceBroadScope: -Force means "skip the COST prompt" and the skill's own
@@ -1694,6 +1703,56 @@ Be terse. If a section is empty, write "(none)".
 
     $bundleBytes = if (Test-Path -LiteralPath $bundlePath) { (Get-Item -LiteralPath $bundlePath).Length } else { 0 }
 
+    # --- Per-backend delivery preflight (2026-08-31) -------------------------
+    # $bundleBytes was computed here and then never read. The one thing era knew
+    # about the artifact it was about to upload, it threw away.
+    #
+    # Three consecutive 4-seat panels delivered 2 seats, for two independent
+    # reasons that are the same defect: a bundle bigger than the seat's delivery
+    # channel. opus's bundle is INLINED via stdin and 2,396,233 bytes came back
+    # "Prompt is too long"; opencode ATTACHES via -f and silently truncates at
+    # 51,200 bytes, above which era used to switch to a Read-tool path that hangs
+    # for the full timeout (now retired — see backends/opencode.ps1).
+    #
+    # The only scale gate that existed measured PRE-BUNDLE SOURCE bytes against a
+    # 10 MB ceiling — ~200x looser than the tightest channel era dispatches to —
+    # and armed only when no -IncludeFiles was passed. All three failing rounds
+    # were curated rounds, so it never even ran.
+    #
+    # Runs BEFORE the cost report and the cost prompt: a refusal here has spent
+    # nothing, and exit 1 (Stop-EraWithError) is era's documented "preflight
+    # refusal, re-runnable for free" code, as against exit 2 for a void round
+    # that already cost money.
+    $deliveryPlan = Get-EraBundleDeliveryPlan -ReviewerList $reviewerList `
+        -Registry $registryHash -BundleBytes ([long]$bundleBytes) -BundleTokens $tokenCount
+    foreach ($line in $deliveryPlan.Lines) { Write-Host $line }
+    if ($deliveryPlan.OverCount -gt 0) {
+        $doomed = @($deliveryPlan.Seats | Where-Object { -not $_.Ok })
+        $bundleForce = $ForceBundleSize.IsPresent -or ($env:ERA_BUNDLE_FORCE -eq '1')
+        $detail = ($doomed | ForEach-Object { "$($_.Preset) ($($_.Backend), $($_.Mode)): $($_.Reason) — $($_.Basis)" }) -join "; "
+        if ($bundleForce) {
+            # Loud, per seat, and it still says the seat is expected to fail —
+            # so a degraded panel that follows reads as the predicted outcome it
+            # is, rather than as bad luck.
+            Write-Host "[era] WARNING: $($doomed.Count) of $(@($reviewerList).Count) reviewer(s) CANNOT receive this bundle, and -ForceBundleSize/ERA_BUNDLE_FORCE=1 is dispatching them anyway."
+            foreach ($d in $doomed) {
+                Write-Host "[era]   $($d.Preset): $($d.Reason). $($d.Basis). Expect this seat to fail or to review only part of the bundle."
+            }
+        }
+        else {
+            $tightest = if ($null -ne $deliveryPlan.TightestBytes) { "$('{0:N0}' -f [long]$deliveryPlan.TightestBytes) bytes" } else { 'n/a' }
+            Stop-EraWithError ("Refusing this round: $($doomed.Count) of $(@($reviewerList).Count) requested reviewer(s) cannot receive a " +
+                "$('{0:N0}' -f $bundleBytes)-byte / $('{0:N0}' -f $tokenCount)-token bundle. $detail. " +
+                "The tightest byte limit across the selected panel is $tightest. " +
+                "Curate the bundle with -IncludeFiles, drop the seats that cannot carry it, or pass -ForceBundleSize " +
+                "(or ERA_BUNDLE_FORCE=1) to dispatch them anyway. Nothing was dispatched and nothing was spent — " +
+                "-Force does NOT bypass this, it only skips the cost prompt.")
+        }
+    }
+    # preset -> delivery mode, carried into the round summary and the metadata so
+    # a future reader can tell WHY a seat failed without reading backend source.
+    $deliveryModes = Get-EraDeliveryModeMap -Plan $deliveryPlan
+
     $perReviewerCosts = @{}
     $perReviewerCaps = @{}
     foreach ($r in $reviewerList) {
@@ -1947,7 +2006,7 @@ Be terse. If a section is empty, write "(none)".
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
         -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
         -CostWarnings $costReport.Warnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
-        -TopicRoundCount $topicRoundCount
+        -TopicRoundCount $topicRoundCount -DeliveryModes $deliveryModes -BundleBytes ([long]$bundleBytes)
 
     # --- Void-round gate (2026-08-10) ----------------------------------------
     # A round could burn the whole budget, write artifacts, and still exit 0
@@ -1969,7 +2028,7 @@ Be terse. If a section is empty, write "(none)".
     # $runSucceeded is deliberately left unset so the finally block keeps the
     # repomix config as a receipt for the failed run.
     $voidReport = Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
-        -Results $results -RequestedCount @($reviewerList).Count
+        -Results $results -RequestedCount @($reviewerList).Count -DeliveryModes $deliveryModes
     if ($voidReport.IsVoid) {
         Write-Host "[era] ERROR: round $round produced no usable review."
         foreach ($line in $voidReport.Lines) { Write-Host $line }

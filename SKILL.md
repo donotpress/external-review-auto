@@ -323,6 +323,7 @@ When round N's response contains critical issues:
 | `--diff` | `-Diff` | Round 2+: only bundle changed files (opt-in) |
 | `--auto-detect` | `-AutoDetect` | Derive include list from `git status` + `HEAD~1` (human use) |
 | `--spec-review <path>` | `-SpecReview <path>` | One-flag spec review: auto-fills template + bundles spec |
+| `--force-bundle-size` | `-ForceBundleSize` | Dispatch reviewers whose delivery channel cannot carry the bundle. Without it era refuses (exit 1, nothing spent). See *Bundle delivery limits*. **`-Force` does not do this.** |
 
 ### LLM-driven file selection
 
@@ -402,13 +403,62 @@ pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -SpecReview docs/my-
 
 Set `$env:ERA_FORCE=1` to skip the cost confirmation prompt.
 
+### Bundle delivery limits
+
+Every reviewer gets the bundle through a different channel, and **each channel has a
+different ceiling**. Before dispatch, era measures the bundle it actually built and
+checks it against each selected seat:
+
+| Backend | Channel | Ceiling | Basis |
+|---|---|---|---|
+| `opencode` | `attach` (`-f`) | **51,200 bytes** | Measured. opencode silently truncates an attached file at exactly 50 KiB. |
+| `claude` | `stdin` (inlined as the prompt) | **150,000 tokens** | Derived from the 200k-token context window, reserving ~25% for prompt + output. |
+| `anthropic` | `inline-api` | 150,000 tokens | Same derivation. |
+| `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
+| `geminiapi`, `openaicompat` | `inline-api` | not measured | Reported as unknown and never refused — inventing a ceiling would refuse rounds that work. |
+
+A seat over its ceiling makes era **refuse the round with exit 1** — nothing dispatched,
+nothing spent, safe to re-run after curating. Pass `-ForceBundleSize` (or
+`ERA_BUNDLE_FORCE=1`) to dispatch the doomed seats anyway; era then warns per seat and
+tells you what to expect. A preset may override its ceiling with `max_bundle_bytes` /
+`max_bundle_tokens` in `backends/_registry.json`, so a newly measured number is data
+rather than a code change.
+
+**Why this gate exists.** Three consecutive 4-seat panels delivered 2 seats, for two
+independent reasons of one shape — a bundle bigger than the channel:
+
+- 2026-08-30, a 2,396,233-byte bundle to `opus`: *"Prompt is too long"*, exit 1.
+  (90% of it was one 2,151 KB ledger file; at 73 KB the same seat delivered a
+  17.3 KB review.)
+- 2026-08-25 and 2026-08-31, 79,294- and 74,740-byte bundles to `deepseek-flash`:
+  600s timeout, nothing returned, because both took the now-retired Read-tool path.
+  At 13,433 bytes the same seat, same prompt, returned a 7,957-byte review.
+
+The only pre-existing scale gate measured *pre-bundle source* bytes against a 10 MB
+ceiling — roughly 200x looser than the tightest channel era dispatches to — and armed
+only when no `-IncludeFiles` was passed. All three failing rounds were curated rounds,
+so it never even ran.
+
+**The retired Read-tool path.** Above the attach cap, the opencode adapter used to tell
+the model to `Read` the bundle itself. Forensic evidence showed the model chunk-reading
+the bundle 822 lines at a time and then wandering into unrelated shell commands —
+listing era's own artifact directory and reading its config and prompt files — until the
+budget ran out. It never returned a review. A path that hangs for 600s and returns
+nothing is worse than a refusal, so it now refuses. Every stall artifact recorded before
+2026-08-31 is empty or cut at a 4,096-byte boundary because the snapshot read the capture
+files without flushing their write buffers; that is fixed, so new artifacts are real.
+
+The round summary now names each seat's delivery mode (`via=attach`, `via=stdin`, …),
+and `round-N-metadata.json` records `delivery_mode` per reviewer plus `bundle_bytes`.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
 | `ERA_DEFAULT_REVIEWER` | *(unset)* | OPTIONAL per-session override of the default reviewer(s). The persistent default lives in **`config/defaults.json`**, not here — an env var is per-process and inherited, so a value set at Windows User scope leaves already-running shells on the OLD one, and PowerShell / WSL / opencode / agy each read a different store. Set this only for a one-off. |
-| `ERA_OPENCODE_READ_TOOL` | (auto) | Bundle delivery for opencode reviewers. **Auto by default:** bundles over **50 KiB** use the Read tool, smaller ones are attached via `-f`. opencode silently TRUNCATES an attached file at exactly 51200 bytes — measured 2026-08-03, a 474 KB bundle reached the model as its first 10.7% while still producing a well-formed (and near-worthless) review. Set `1` to force the Read tool, `0` to force attach (diagnostics only — you will get a truncated review, and it warns). |
+| `ERA_OPENCODE_READ_TOOL` | (unset) | Diagnostics escape hatch for opencode bundle delivery. **Normal behaviour: attach via `-f`, and REFUSE above 51,200 bytes.** opencode silently TRUNCATES an attached file at exactly 51200 bytes — measured 2026-08-03, a 474 KB bundle reached the model as its first 10.7% while still producing a well-formed (and near-worthless) review. Above the cap era used to auto-switch to a Read-tool prompt; **that path was RETIRED 2026-08-31** because it hangs for the whole timeout and returns nothing (see *Bundle delivery limits* below). Set `1` to re-enable it for diagnosis (expect to lose the seat), `0` to force attach anyway (expect a truncated review). Both warn. |
+| `ERA_BUNDLE_FORCE` | (unset) | Set to `1` to dispatch reviewers whose delivery channel demonstrably cannot carry the bundle — the env-var equivalent of `-ForceBundleSize`. **`-Force` deliberately does NOT do this**; it only skips the cost prompt, and `-ForceBroadScope` only arms on the repo-wide path. See *Bundle delivery limits*. |
 | `ERA_USE_HTTP_OPENCODE` | (unset) | Set to `1` to route the `deepseek`/`minimax` reviewer aliases over **direct HTTP** (the `*-http` presets) instead of the opencode TUI. Keys auto-source from opencode `auth.json`. Default off. |
 | `ERA_AGY_FALLBACK` | (auto) | v1.10: when an **agy** reviewer fails to capture even after its retry, era auto-falls-back to a non-agy reviewer so the round still yields a review. Set to a preset (e.g. `gemini-api`) to pin the fallback, or `off`/`0` to disable. Triggers only on an actual agy failure — healthy runs are unaffected. |
 | `ERA_DEFAULT_GLOBS` | (broad ~40-extension set) | Comma-separated repomix globs for auto-detected bundles when `-IncludeFiles` is not passed. Example: `'**/*.rs,**/*.toml,**/*.md'` |

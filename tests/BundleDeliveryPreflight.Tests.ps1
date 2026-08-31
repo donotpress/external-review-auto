@@ -1,0 +1,200 @@
+<#
+  Per-backend bundle-delivery preflight.
+
+  WHY THIS EXISTS. Three consecutive 4-seat panels delivered 2 seats, for two
+  independent reasons with one shape: the bundle was bigger than the seat's
+  delivery channel could carry, and nothing checked before dispatch.
+
+    2026-08-30  opus (claude, stdin)  2,396,233-byte bundle -> "Prompt is too long"
+    2026-08-31  deepseek-flash        74,740-byte bundle    -> 600s timeout, nothing
+    2026-08-25  deepseek-flash        79,294-byte bundle    -> 600s timeout, nothing
+    2026-08-31  deepseek-flash        13,433-byte bundle    -> 7,957-byte review OK
+
+  The only pre-existing scale gate measured PRE-BUNDLE SOURCE bytes against a
+  10 MB ceiling (~200x looser than the tightest channel era dispatches to) and
+  armed only on the repo-wide path. All three failing rounds were curated
+  -IncludeFiles rounds, so it never even ran.
+
+  These are pure-function tests: Get-EraBundleDeliveryPlan does no I/O.
+#>
+
+BeforeAll {
+    $script:SkillRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $script:SkillRoot 'workflow.ps1')
+
+    $script:Reg = @{
+        'opus'           = @{ backend = 'claude';       model_id = 'claude-opus-5' }
+        'deepseek-flash' = @{ backend = 'opencode';     model_id = 'opencode-go/deepseek-v4-flash' }
+        'muse-spark'     = @{ backend = 'opencode';     model_id = 'opencode-go/muse-spark-1.2-contributor' }
+        'gemini'         = @{ backend = 'agy';          model_id = 'gemini-3.6-flash-high' }
+        'deepseek-api'   = @{ backend = 'openaicompat'; model_id = 'deepseek-chat' }
+        'opus-api'       = @{ backend = 'anthropic';    model_id = 'claude-opus-5' }
+    }
+}
+
+Describe 'Get-EraBackendDelivery' -Tag Unit {
+
+    It 'reports the measured 50 KiB attach cap for opencode' {
+        $d = Get-EraBackendDelivery -Backend 'opencode'
+        $d.Mode       | Should -Be 'attach'
+        $d.LimitBytes | Should -Be 51200
+    }
+
+    It 'bounds claude by tokens, because the bundle is inlined as the prompt' {
+        $d = Get-EraBackendDelivery -Backend 'claude'
+        $d.Mode        | Should -Be 'stdin'
+        $d.LimitTokens | Should -BeGreaterThan 0
+        # A byte cap would be the wrong unit here: the failure is a context
+        # overflow, and 2.4 MB of XML is not 2.4 MB of context.
+        $d.LimitBytes  | Should -BeNullOrEmpty
+    }
+
+    It 'imposes no channel limit on agy, which opens the file from disk' {
+        $d = Get-EraBackendDelivery -Backend 'agy'
+        $d.Mode        | Should -Be 'disk-read'
+        $d.LimitBytes  | Should -BeNullOrEmpty
+        $d.LimitTokens | Should -BeNullOrEmpty
+    }
+
+    It 'says "unknown" rather than guessing for an unmeasured provider' {
+        # Inventing a ceiling is how you refuse a round that would have worked.
+        $d = Get-EraBackendDelivery -Backend 'openaicompat'
+        $d.Mode        | Should -Be 'inline-api'
+        $d.LimitBytes  | Should -BeNullOrEmpty
+        $d.LimitTokens | Should -BeNullOrEmpty
+        $d.Basis       | Should -Match 'not been measured'
+    }
+
+    It 'lets a registry entry override the derived limit' {
+        # So a newly measured ceiling is DATA, not a code change.
+        $d = Get-EraBackendDelivery -Backend 'opencode' -ModelInfo @{ max_bundle_bytes = 4096 }
+        $d.LimitBytes | Should -Be 4096
+        $d.Basis      | Should -Match 'registry'
+    }
+}
+
+Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
+
+    It 'passes the 13,433-byte bundle that really worked' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+            -BundleBytes 13433 -BundleTokens 3400
+        $p.OverCount | Should -Be 0
+        $p.Seats[0].Ok | Should -BeTrue
+    }
+
+    It 'catches the 74,740-byte bundle that really stalled' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+            -BundleBytes 74740 -BundleTokens 19000
+        $p.OverCount     | Should -Be 1
+        $p.Seats[0].Ok   | Should -BeFalse
+        $p.Seats[0].Reason | Should -Match '51,200'
+    }
+
+    It 'catches the 2,396,233-byte bundle that really overflowed opus' {
+        # ~600k tokens on a 200k-token model.
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus') -Registry $script:Reg `
+            -BundleBytes 2396233 -BundleTokens 599058
+        $p.OverCount   | Should -Be 1
+        $p.Seats[0].Ok | Should -BeFalse
+        $p.Seats[0].Reason | Should -Match 'tokens'
+    }
+
+    It 'would have caught the real 4-seat panel: 2 doomed of 4' {
+        # The exact 2026-08-30 round. opus and both opencode seats cannot carry
+        # it; agy reads from disk and is fine. This is the round the gate exists
+        # to have refused.
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','gemini','deepseek-flash','muse-spark') `
+            -Registry $script:Reg -BundleBytes 2396233 -BundleTokens 599058
+        $p.OverCount | Should -Be 3
+        ($p.Seats | Where-Object { $_.Preset -eq 'gemini' }).Ok | Should -BeTrue
+    }
+
+    It 'reports the tightest byte limit across the selected panel' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','gemini','deepseek-flash') `
+            -Registry $script:Reg -BundleBytes 1000 -BundleTokens 250
+        $p.TightestBytes | Should -Be 51200
+    }
+
+    It 'never refuses a seat whose channel has no measured limit' {
+        # An unmeasured ceiling must not become a refusal.
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('gemini','deepseek-api') -Registry $script:Reg `
+            -BundleBytes 50000000 -BundleTokens 12000000
+        $p.OverCount | Should -Be 0
+    }
+
+    It 'survives a preset that is not in the registry' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('does-not-exist') -Registry $script:Reg `
+            -BundleBytes 999999 -BundleTokens 250000
+        $p.Seats[0].Backend | Should -Be 'unknown'
+        $p.Seats[0].Ok      | Should -BeTrue
+    }
+
+    It 'names each seat, its channel and its verdict in the printed notice' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','deepseek-flash') -Registry $script:Reg `
+            -BundleBytes 74740 -BundleTokens 19000
+        $text = $p.Lines -join "`n"
+        $text | Should -Match 'deepseek-flash.*attach'
+        $text | Should -Match 'CANNOT FIT'
+        $text | Should -Match 'opus.*stdin'
+    }
+
+    It 'catches a follow-up round pushed over the cap by carried-forward review text' {
+        # ERA_PREVIOUS_ROUND_MAX_CHARS is 80,000 chars, and the substituted
+        # previous round goes into the prompt, which repomix embeds in the
+        # bundle. So a round-2 opencode seat can cross the 51,200-byte attach cap
+        # with ZERO change to the source files. The gate measures the built
+        # bundle rather than the sources, which is the only layer that sees this.
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+            -BundleBytes 84000 -BundleTokens 21000
+        $p.OverCount | Should -Be 1
+    }
+}
+
+Describe 'Get-EraDeliveryModeMap' -Tag Unit {
+
+    It 'flattens the plan to preset -> mode for the summary and the metadata' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','gemini','deepseek-flash') `
+            -Registry $script:Reg -BundleBytes 1000 -BundleTokens 250
+        $m = Get-EraDeliveryModeMap -Plan $p
+        $m['opus']           | Should -Be 'stdin'
+        $m['gemini']         | Should -Be 'disk-read'
+        $m['deepseek-flash'] | Should -Be 'attach'
+    }
+
+    It 'returns an empty map for a null plan rather than throwing' {
+        (Get-EraDeliveryModeMap -Plan $null).Count | Should -Be 0
+    }
+}
+
+Describe 'era.ps1 arms the preflight' -Tag Unit {
+
+    BeforeAll { $script:EraSrc = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1') }
+
+    It 'runs the plan against the ACTUAL bundle, not the pre-bundle sources' {
+        $script:EraSrc | Should -Match 'Get-EraBundleDeliveryPlan -ReviewerList \$reviewerList'
+        $script:EraSrc | Should -Match '-BundleBytes \(\[long\]\$bundleBytes\)'
+    }
+
+    It 'refuses with exit 1 (nothing spent), not exit 2 (round already paid for)' {
+        $script:EraSrc | Should -Match 'Stop-EraWithError \("Refusing this round'
+    }
+
+    It 'gates the override behind its own switch, not -Force' {
+        # -Force is cost consent and the skill's normative dispatch line passes it
+        # on every call; folding them together leaves the gate inert for the only
+        # caller the skill documents.
+        $script:EraSrc | Should -Match '\[switch\]\$ForceBundleSize'
+        $script:EraSrc | Should -Match '\$ForceBundleSize\.IsPresent -or \(\$env:ERA_BUNDLE_FORCE -eq .1.\)'
+    }
+
+    It 'runs before the cost prompt, so a refusal costs nothing' {
+        $planIdx = $script:EraSrc.IndexOf('Get-EraBundleDeliveryPlan -ReviewerList')
+        $costIdx = $script:EraSrc.IndexOf('$approvedList = Invoke-CostPrompt')
+        $planIdx | Should -BeGreaterThan 0
+        $costIdx | Should -BeGreaterThan $planIdx
+    }
+
+    It 'still warns per doomed seat when the override is used' {
+        $script:EraSrc | Should -Match 'Expect this seat to fail or to review only part of the bundle'
+    }
+}

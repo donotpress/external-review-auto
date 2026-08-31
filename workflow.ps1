@@ -2298,6 +2298,42 @@ function Get-EraRecoverableFailures {
     return @($out)
 }
 
+function Get-EraFailureCategory {
+    <#
+    .SYNOPSIS
+        One word for WHY a seat failed: 'not-delivered', 'answered-badly',
+        'no-artifact', or 'unknown'.
+
+    .DESCRIPTION
+        The two are already distinguished STRUCTURALLY — an honest capture
+        failure sets a coded $r.Error ('response-contract',
+        'agentic-narration-capture', 'prompt-echo') while a stall, timeout or
+        crash surfaces as a free-text exception message — and that distinction is
+        what Get-EraRecoverableFailures keys on. But the round summary printed
+        only the raw reason string, so the reader had to know the codes to tell
+        "this reviewer never saw the bundle" from "this reviewer read it and
+        answered off-contract". Those are opposite facts:
+
+          not-delivered   nothing was reviewed. The panel is smaller than it looks
+                          and the seat's silence carries NO information.
+          answered-badly  the bundle WAS reviewed; the answer was rejected. The
+                          seat's failure is about the answer, not the delivery.
+
+        Conflating them is how a degraded panel reads as a real one, so the
+        summary now says which.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$Result, [bool]$HasArtifact = $false)
+    if (-not $Result) { return 'not-delivered' }
+    # Deliberate capture-failure codes: the call completed and what came back was
+    # not a review. Same list Get-EraRecoverableFailures uses — keep them in step.
+    $answered = @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+    if ($Result.Error -and $answered -contains $Result.Error) { return 'answered-badly' }
+    if ($Result.ExitCode -eq 0 -and -not $HasArtifact) { return 'no-artifact' }
+    if ($Result.Error -or $Result.RetryReason) { return 'not-delivered' }
+    return 'unknown'
+}
+
 function Get-EraVoidRoundReport {
     <#
     .SYNOPSIS
@@ -2328,7 +2364,15 @@ function Get-EraVoidRoundReport {
         [Parameter(Mandatory)][string]$ReviewDir,
         [Parameter(Mandatory)][int]$Round,
         [Parameter(Mandatory)][hashtable]$Results,
-        [int]$RequestedCount = 0
+        [int]$RequestedCount = 0,
+        # preset -> 'attach' | 'stdin' | 'inline-api' | 'disk-read'. How the
+        # bundle physically reached this seat. A failed seat's delivery channel
+        # is the first thing you need in order to read its failure, and it used
+        # to be discoverable only by reading backend source: 'attach' means the
+        # bundle was capped at 50 KiB, 'stdin' means it was inlined into the
+        # prompt and could overflow the context, 'disk-read' means the model
+        # opened the file itself. Optional — an omitted map just prints nothing.
+        [hashtable]$DeliveryModes = @{}
     )
     $lines = [System.Collections.Generic.List[string]]::new()
 
@@ -2364,7 +2408,9 @@ function Get-EraVoidRoundReport {
                   else { 'response present but not accepted' }
         if ($r.TruncationWarning) { $detail += '; truncated' }
         $exitStr = if ($null -ne $r.ExitCode) { $r.ExitCode } else { 'n/a' }
-        $lines.Add(("  {0}  exit={1}  {2}; {3}" -f $preset.PadRight($pad), $exitStr, $why, $detail))
+        $via = if ($DeliveryModes.ContainsKey($preset)) { "  via=$($DeliveryModes[$preset])" } else { '' }
+        $cat = Get-EraFailureCategory -Result $r -HasArtifact ([bool]$hasArtifact)
+        $lines.Add(("  {0}  exit={1}{2}  [{3}]  {4}; {5}" -f $preset.PadRight($pad), $exitStr, $via, $cat, $why, $detail))
     }
     return @{ IsVoid = ($usable -eq 0); UsableCount = $usable; Lines = @($lines) }
 }
@@ -2390,7 +2436,15 @@ function Write-ReviewMetadata {
         [string[]]$CostWarnings = @(),
         [string[]]$IncludeFilesList = @(),
         [int]$BundleFileCount = 0,
-        [int]$TopicRoundCount = 0
+        [int]$TopicRoundCount = 0,
+        # preset -> delivery mode, from Get-EraBundleDeliveryPlan. Recorded per
+        # reviewer so a post-mortem can answer "how did the bundle reach this
+        # seat" from the round's own telemetry instead of from backend source.
+        [hashtable]$DeliveryModes = @{},
+        # Size of the bundle actually shipped. bundle_tokens was recorded and
+        # bundle BYTES were not, which is the unit two of the four channels are
+        # actually limited in.
+        [long]$BundleBytes = 0
     )
     $reviewerEntries = foreach ($preset in $Results.Keys) {
         $r = $Results[$preset]
@@ -2467,6 +2521,7 @@ function Write-ReviewMetadata {
                 wall_clock_sec = $r.WallClockSec
                 response_chars = if ($r.Response) { $r.Response.Length } else { 0 }
                 bundle_tokens = $BundleTokens
+                delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })
                 est_output_tokens = $r.OutputTokens
                 est_cost_input_usd = $estIn
                 est_cost_output_usd = $estOut
@@ -2513,6 +2568,7 @@ function Write-ReviewMetadata {
                 wall_clock_sec = if ($null -ne $r.WallClockSec) { $r.WallClockSec } else { 0 }
                 response_chars = $respLen
                 bundle_tokens = $BundleTokens
+                delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })
                 est_output_tokens = if ($null -ne $r.OutputTokens) { $r.OutputTokens } else { 0 }
                 est_cost_input_usd = $finalInputCost
                 est_cost_output_usd = 0
@@ -2533,6 +2589,7 @@ function Write-ReviewMetadata {
         topic_round_count = $TopicRoundCount
         include_files = @($IncludeFilesList)
         bundle_file_count = $BundleFileCount
+        bundle_bytes = $BundleBytes
         convergence_warnings = @($ConvergenceWarnings)
         cost_warnings = @($CostWarnings)
         reviewers = @($reviewerEntries)
@@ -3304,4 +3361,176 @@ function Test-ConvergenceDivergence {
     }
 
     return $warnings
+}
+
+# --- Per-backend bundle-delivery preflight (2026-08-31) ---------------------
+# Three consecutive 4-seat panels delivered 2 seats. Both causes were the same
+# shape: the bundle was larger than the reviewer's delivery channel could carry,
+# and NOTHING checked that before dispatch.
+#
+#   claude   : the bundle is INLINED via stdin. At 2,396,233 bytes the CLI
+#              answered "Prompt is too long" and exited 1.
+#   opencode : the bundle is ATTACHED via -f, and opencode silently truncates an
+#              attached file at exactly 50 KiB. Above that era used to switch to
+#              an agentic Read-tool prompt, which hangs (see backends/opencode.ps1).
+#
+# era's only pre-dispatch scale gate was the BROAD-bundle ceiling, which is
+# (a) 10 MB — ~200x looser than the tightest backend it dispatches to, (b) a
+# measure of PRE-BUNDLE SOURCE bytes rather than the bundle itself, and (c) only
+# armed when no -IncludeFiles was passed. All three failing rounds were curated
+# -IncludeFiles rounds, so the gate was not even loaded, let alone fired.
+#
+# This is the missing check: the ACTUAL bundle, against the ACTUAL limit of each
+# seat's ACTUAL delivery channel.
+
+function Get-EraBackendDelivery {
+    <#
+    .SYNOPSIS
+        How does this backend physically get the bundle to the model, and what is
+        the largest bundle that channel can carry?
+
+        Returns @{ Mode; LimitBytes; LimitTokens; Basis } — a $null limit means
+        "not bounded by this channel, or not measured"; those are reported but
+        never refused, because inventing a ceiling is how you refuse a round that
+        would have worked.
+
+    .DESCRIPTION
+        Modes:
+          attach     opencode `-f`: the file is read by the CLI into the message.
+          stdin      claude `--print`: the bytes are piped in as the prompt.
+          inline-api the REST adapters: the bytes go in the request body.
+          disk-read  agy: the model opens the file itself with its own tools.
+
+        A preset may override either limit via `max_bundle_bytes` /
+        `max_bundle_tokens` in backends/_registry.json, so a newly measured
+        ceiling is DATA, not a code change.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Backend,
+        [hashtable]$ModelInfo = @{}
+    )
+    $d = switch ($Backend) {
+        'opencode' {
+            @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null
+               # MEASURED, twice. 2026-08-03: DeepSeek V4 Flash reported its input
+               # ending at line 1169 of a 9,234-line bundle; `head -1169` of that
+               # file is 51,191 bytes and line 1170 crosses 51,200. 2026-08-31: a
+               # 13,433-byte bundle returned a 7,957-byte review while a
+               # 73,000-byte bundle on the same seat, same prompt, stalled out.
+               Basis = 'opencode silently truncates an attached file at exactly 50 KiB (measured 2026-08-03, re-confirmed 2026-08-31)' }
+        }
+        'claude' {
+            # NOT measured — DERIVED, and labelled as such. The only two real data
+            # points are a success at ~73 KB and "Prompt is too long" at 2.4 MB, so
+            # the true ceiling is somewhere in between and this is a deliberately
+            # conservative reading of the model's context window (200k tokens for
+            # claude-opus-5), reserving ~25% for the prompt and the answer.
+            @{ Mode = 'stdin'; LimitBytes = $null; LimitTokens = 150000
+               Basis = 'bundle is piped into `claude --print` as the prompt, so it must fit the context window (derived: 200k-token window less ~25% for prompt + output)' }
+        }
+        'anthropic' {
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = 150000
+               Basis = 'bundle is placed in the Messages API request body (derived: 200k-token window less ~25% for prompt + output)' }
+        }
+        'agy' {
+            @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null
+               Basis = 'agy opens the bundle from disk with its own tools; the channel imposes no size limit' }
+        }
+        default {
+            # geminiapi / openaicompat and anything added later. The bytes go in a
+            # request body, so a limit EXISTS — it is simply provider-specific and
+            # unmeasured here. Say "unknown" rather than guess.
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null
+               Basis = 'bundle is placed in the API request body; this provider''s context limit has not been measured' }
+        }
+    }
+    # Registry overrides win: a measured number beats a derived one.
+    if ($ModelInfo) {
+        if ($ModelInfo.max_bundle_bytes)  { $d.LimitBytes  = [long]$ModelInfo.max_bundle_bytes;  $d.Basis = "registry max_bundle_bytes" }
+        if ($ModelInfo.max_bundle_tokens) { $d.LimitTokens = [int]$ModelInfo.max_bundle_tokens; $d.Basis = "registry max_bundle_tokens" }
+    }
+    return $d
+}
+
+function Get-EraBundleDeliveryPlan {
+    <#
+    .SYNOPSIS
+        For each selected reviewer: how the bundle reaches it, and whether this
+        bundle can possibly fit. Returns
+        @{ Seats = @(...); OverCount; TightestBytes; Lines }.
+
+    .DESCRIPTION
+        Pure — no I/O, no dispatch — so it is cheap to call before the cost prompt
+        and trivial to test. Each seat is
+        @{ Preset; Backend; Mode; LimitBytes; LimitTokens; Ok; Reason; Basis }.
+
+        `Ok = $false` means THIS SEAT CANNOT SUCCEED, not "might be slow". A seat
+        whose channel has no measured limit is always Ok — an unmeasured ceiling
+        must not become a refusal.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string[]]$ReviewerList,
+        [Parameter(Mandatory)][hashtable]$Registry,
+        [Parameter(Mandatory)][long]$BundleBytes,
+        [int]$BundleTokens = 0
+    )
+    $seats = foreach ($r in $ReviewerList) {
+        $info = $Registry[$r]
+        $backend = if ($info) { "$($info.backend)" } else { 'unknown' }
+        $infoHash = @{}
+        if ($info) { foreach ($k in @('max_bundle_bytes','max_bundle_tokens')) { if ($info.$k) { $infoHash[$k] = $info.$k } } }
+        $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash
+
+        $ok = $true
+        $reason = $null
+        if ($null -ne $d.LimitBytes -and $BundleBytes -gt [long]$d.LimitBytes) {
+            $ok = $false
+            $reason = "bundle is $('{0:N0}' -f $BundleBytes) bytes; the $($d.Mode) channel carries at most $('{0:N0}' -f [long]$d.LimitBytes)"
+        }
+        elseif ($null -ne $d.LimitTokens -and $BundleTokens -gt [int]$d.LimitTokens) {
+            $ok = $false
+            $reason = "bundle is $('{0:N0}' -f $BundleTokens) tokens; the $($d.Mode) channel carries at most $('{0:N0}' -f [int]$d.LimitTokens)"
+        }
+        [pscustomobject]@{
+            Preset = $r; Backend = $backend; Mode = $d.Mode
+            LimitBytes = $d.LimitBytes; LimitTokens = $d.LimitTokens
+            Ok = $ok; Reason = $reason; Basis = $d.Basis
+        }
+    }
+    $seats = @($seats)
+    $overs = @($seats | Where-Object { -not $_.Ok })
+    $byteLimits = @($seats | Where-Object { $null -ne $_.LimitBytes } | ForEach-Object { [long]$_.LimitBytes })
+    $tightest = if ($byteLimits.Count) { ($byteLimits | Measure-Object -Minimum).Minimum } else { $null }
+
+    $pad = ((@($seats.Preset) | Measure-Object -Property Length -Maximum).Maximum)
+    if (-not $pad) { $pad = 12 }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add("[era] Bundle delivery — $('{0:N0}' -f $BundleBytes) bytes / $('{0:N0}' -f $BundleTokens) tokens:")
+    foreach ($s in $seats) {
+        $limitText = if ($null -ne $s.LimitBytes)       { "limit $('{0:N0}' -f [long]$s.LimitBytes) bytes" }
+                     elseif ($null -ne $s.LimitTokens)  { "limit $('{0:N0}' -f [int]$s.LimitTokens) tokens" }
+                     else                               { 'no measured limit' }
+        $verdict = if ($s.Ok) { 'fits' } else { 'CANNOT FIT' }
+        $lines.Add(("[era]   {0}  via {1,-10} {2,-28} {3}" -f $s.Preset.PadRight($pad), $s.Mode, $limitText, $verdict))
+    }
+    return @{
+        Seats = $seats; OverCount = $overs.Count; TightestBytes = $tightest
+        Lines = @($lines)
+    }
+}
+
+function Get-EraDeliveryModeMap {
+    <#
+    .SYNOPSIS
+        Flatten a delivery plan to preset -> mode, for the round summary and the
+        round metadata. A seat's delivery mode is the first thing you need to
+        know when it fails, and it used to be readable only from backend source.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$Plan)
+    $map = @{}
+    if ($Plan -and $Plan.Seats) { foreach ($s in $Plan.Seats) { $map[$s.Preset] = $s.Mode } }
+    return $map
 }

@@ -5,8 +5,10 @@
 .DESCRIPTION
     - Bundle is ATTACHED via `-f` (the model receives the file content directly in
       its message context; no agentic Read-tool call to refuse / narrate / truncate
-      — the false-success root cause). ERA_OPENCODE_READ_TOOL=1 reverts to the old
-      Read-tool prompt.
+      — the false-success root cause). opencode truncates an attached file at
+      51,200 bytes, so a larger bundle is REFUSED here rather than routed to the
+      Read-tool prompt, which was retired 2026-08-31 for hanging out the full
+      timeout. ERA_OPENCODE_READ_TOOL=1 still re-enables it for diagnosis.
     - Model + variant are selected purely via the `-m` / `--variant` CLI flags.
       Probe-verified (2026-06-04): `opencode run -m <id>` overrides recent[0] and
       does NOT mutate ~/.local/state/opencode/model.json. The old state.json swap +
@@ -182,7 +184,7 @@ function Invoke-OpencodeReview {
         # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
         [string]$PidFile
     )
-    # Bundle access: ATTACH via `-f` for small bundles, READ TOOL for large ones.
+    # Bundle access: ATTACH via `-f`, and REFUSE above the attach cap.
     #
     # opencode TRUNCATES an attached file at exactly 50 KiB (51200 bytes), silently.
     # Measured 2026-08-03 against two real runs: DeepSeek V4 Flash reported its input
@@ -197,22 +199,64 @@ function Invoke-OpencodeReview {
     # near-worthless. In one observed run the model worked around it by chunk-reading
     # anyway, which is why that attempt took 566s.
     #
-    # So: over the cap, tell the model to Read the file itself (it can chunk). Under
-    # the cap, attach - it is faster and needs no tool calls. ERA_OPENCODE_READ_TOOL=1
-    # still forces read-tool mode; set it to 0/false to force ATTACH even for a large
-    # bundle (diagnostics only - you will get a truncated review).
+    # So the cap is real and it is HARD. Under it, attach - fast, no tool calls.
+    # Over it era refuses (see the retirement note below); ERA_OPENCODE_READ_TOOL=1
+    # re-enables the retired Read-tool path and 0/false forces attach anyway - both
+    # diagnostics only, and both documented as lossy.
     $OPENCODE_ATTACH_LIMIT_BYTES = 51200
     $forceReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
     $forceAttach = $env:ERA_OPENCODE_READ_TOOL -and ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false')
     $bundleBytes = 0
     try { $bundleBytes = (Get-Item -LiteralPath $BundlePath).Length } catch { $bundleBytes = 0 }
     $overAttachLimit = $bundleBytes -gt $OPENCODE_ATTACH_LIMIT_BYTES
-    $useReadTool = $forceReadTool -or ($overAttachLimit -and -not $forceAttach)
+    $useReadTool = $forceReadTool
+
+    # RETIRED 2026-08-31: over the cap, this used to switch to the Read-tool
+    # prompt AUTOMATICALLY. It now refuses instead, in about a second, having
+    # spent nothing. Read-tool mode survives only behind an explicit
+    # ERA_OPENCODE_READ_TOOL=1.
+    #
+    # WHY. The Read-tool path was believed to "never start" -- every artifact in
+    # %TEMP%\opencode-stall-debug is 0 bytes while the error line reports a
+    # non-zero `total bytes`. That contradiction was a BUG IN THE SNAPSHOT, not
+    # evidence: $stdoutSink.Length counts bytes still sitting in the FileStream
+    # write buffer, and the snapshot copied the file WITHOUT FLUSHING (fixed
+    # below). Reproduced 2026-08-31: 218 bytes written -> sink.Length=218,
+    # on-disk length=0.
+    #
+    # The one artifact that did survive (4,096 bytes -- exactly one buffer flush,
+    # 2026-08-25, a 79,294-byte bundle) shows what actually happens:
+    #
+    #     -> Read .external-reviews/<slug>/round-1-bundle.xml
+    #     -> Read .external-reviews/<slug>/round-1-bundle.xml [offset=822]
+    #     $  Get-ChildItem -LiteralPath "...\<slug>" -Force | Select-Object ...
+    #     $  Get-Content -LiteralPath "...\round-1-config.json"; ... round-1-prompt.md
+    #
+    # It starts fine. It then CHUNK-READS the bundle 822 lines at a time and
+    # wanders into arbitrary shell commands -- listing era's own artifact
+    # directory and reading era's config and prompt files. That is an unbounded
+    # agentic exploration with no relationship to the review it was asked for,
+    # and on every bundle over the cap it burns the whole budget and returns
+    # nothing. Correlation is total: 74,740 / 79,294 / 2,396,233-byte bundles all
+    # took this path and all failed; the 13,433-byte bundle took the attach path
+    # and returned a 7,957-byte review.
+    #
+    # A path that hangs for 600s and returns nothing is worse than a refusal, and
+    # era's caller-side preflight (Get-EraBundleDeliveryPlan) now refuses this
+    # before a single seat is dispatched. This is the adapter's own backstop for
+    # a direct call that bypassed it.
     if ($overAttachLimit -and $forceAttach) {
         Write-Host "[opencode] WARNING: bundle is $bundleBytes bytes but ERA_OPENCODE_READ_TOOL=0 forces attach - opencode will TRUNCATE at $OPENCODE_ATTACH_LIMIT_BYTES bytes; the review covers only the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))%."
     }
+    elseif ($overAttachLimit -and $useReadTool) {
+        Write-Host "[opencode] WARNING: bundle is $bundleBytes bytes and ERA_OPENCODE_READ_TOOL=1 forces the RETIRED Read-tool path. Measured behaviour: the model chunk-reads the bundle and runs unrelated shell commands until the timeout, returning nothing. Expect to lose this seat."
+    }
     elseif ($overAttachLimit) {
-        Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
+        throw ("opencode cannot review this bundle: it is $bundleBytes bytes and opencode silently truncates an attached file at $OPENCODE_ATTACH_LIMIT_BYTES bytes " +
+               "(the reviewer would see the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))% and report on that as if it were the whole thing). " +
+               "The Read-tool path that used to be taken here was retired on 2026-08-31 because it hangs for the full timeout and returns nothing. " +
+               "Curate the bundle to $OPENCODE_ATTACH_LIMIT_BYTES bytes or fewer with -IncludeFiles, or send this round to a reviewer whose channel can carry it (agy reads from disk). " +
+               "Nothing was dispatched and nothing was spent.")
     }
     $prompt = if ($useReadTool) {
         "Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. Output your structured review."
@@ -449,6 +493,21 @@ function Invoke-OpencodeReview {
         # killed stuck process still leaves a forensic clue.
         $snapshotPartialAndDebug = {
             param([string]$prefix)
+            # FLUSH FIRST (2026-08-31). CopyToAsync writes through a buffered
+            # FileStream, and FileStream.Length counts bytes still IN that buffer
+            # while Get-Content/Copy-Item see only what reached disk. So every
+            # snapshot under 4 KB came back EMPTY while the error line beside it
+            # reported a non-zero `total bytes` -- and that contradiction was read
+            # as "the process produced nothing", which sent the diagnosis after a
+            # startup failure that was never happening.
+            #
+            # Reproduced exactly: 218 bytes copied in -> sink.Length = 218,
+            # on-disk length = 0, and after Flush() -> 218. Same 218 as the
+            # 2026-08-31 timeout log. Every artifact in opencode-stall-debug
+            # predating this line is empty or cut at a 4,096-byte boundary for
+            # this reason, not because opencode was silent.
+            try { $stdoutSink.Flush() } catch {}
+            try { $stderrSink.Flush() } catch {}
             $partialOut = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
             $partialErr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
             $cleanOut   = if ($partialOut) { $partialOut -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", '' } else { '' }
