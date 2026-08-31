@@ -202,6 +202,99 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
     }
 }
 
+Describe 'the plan agrees with what the adapter will actually do' -Tag Unit {
+
+    AfterEach { Remove-Item Env:\ERA_OPENCODE_READ_TOOL -ErrorAction SilentlyContinue }
+
+    It 'predicts attach when ERA_OPENCODE_READ_TOOL=0 forces it over the cap' {
+        # THE SILENT-TRUNCATION HOLE. The adapter honours the env var and attaches,
+        # so the model sees the first 50 KiB; the plan used to decide from size
+        # alone and reported read-tool / limit 1,048,576 / fits, and the metadata
+        # recorded delivery_mode='read-tool'. A well-formed review of 17% of the
+        # bundle, with content_ok=true and every new safeguard blind to it.
+        $env:ERA_OPENCODE_READ_TOOL = '0'
+        $d = Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 300000 `
+                -ForcedOpencodeMode 'attach'
+        $d.Mode       | Should -Be 'attach'
+        $d.LimitBytes | Should -Be 51200
+
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+                -BundleBytes 300000 -BundleTokens 82000
+        $p.Seats[0].Mode | Should -Be 'attach'
+        $p.OverCount     | Should -Be 1 -Because 'a forced attach over the cap cannot deliver the bundle'
+    }
+
+    It 'predicts read-tool when ERA_OPENCODE_READ_TOOL=1 forces it under the cap' {
+        $env:ERA_OPENCODE_READ_TOOL = '1'
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+                -BundleBytes 10000 -BundleTokens 2700
+        $p.Seats[0].Mode | Should -Be 'read-tool'
+    }
+
+    It 'uses size alone when the env var is unset' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+                -BundleBytes 300000 -BundleTokens 82000
+        $p.Seats[0].Mode | Should -Be 'read-tool'
+        $p.OverCount     | Should -Be 0
+    }
+
+    It 'the adapter and the plan carry the SAME built-in constants' {
+        # Two implementations of one rule. Editing either copy alone used to keep
+        # both suites green; if the adapter's ceiling drops below the plan's, the
+        # gate passes a bundle the adapter throws on -- a free preflight refusal
+        # upgraded into a billed void round.
+        $adapter = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/opencode.ps1')
+        $attach = [regex]::Match($adapter, '\$OPENCODE_ATTACH_LIMIT_BYTES\s*=\s*(\d+)').Groups[1].Value
+        $read   = [regex]::Match($adapter, '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*(\d+)').Groups[1].Value
+        $attach | Should -Not -BeNullOrEmpty
+        $read   | Should -Not -BeNullOrEmpty
+
+        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 1).LimitBytes      | Should -Be ([long]$attach)
+        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 100000).LimitBytes | Should -Be ([long]$read)
+    }
+}
+
+Describe 'an unmeasured channel is never refused' -Tag Unit {
+
+    It 'does not enforce a ceiling on anthropic' {
+        # It carried 750,000 "derived from a 1M window less ~25%" -- the identical
+        # derivation this release documents as having been ~4x wrong for the claude
+        # CLI, and a direct violation of this function's own stated policy. An
+        # invented number that can refuse is worse than no number.
+        $d = Get-EraBackendDelivery -Backend 'anthropic'
+        $d.LimitTokens | Should -BeNullOrEmpty
+        $d.LimitBytes  | Should -BeNullOrEmpty
+        $d.Basis       | Should -Match 'not been measured'
+
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus-api') -Registry $script:Reg `
+                -BundleBytes 50000000 -BundleTokens 12000000
+        $p.OverCount | Should -Be 0
+    }
+}
+
+Describe 'era.ps1 closes the paths that bypassed the gate' -Tag Unit {
+
+    BeforeAll { $script:EraSrc2 = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1') }
+
+    It 'delivery-checks the agy fallback before re-dispatching' {
+        # The fallback was priced and contract-checked but never delivery-checked,
+        # and it fires only when EVERY seat failed -- plausibly BECAUSE of delivery.
+        # The response to a delivery failure was one more unchecked upload.
+        $script:EraSrc2 | Should -Match '\$fbPlan = Get-EraBundleDeliveryPlan -ReviewerList @\(\$fallbackPreset\)'
+        $planIdx = $script:EraSrc2.IndexOf('$fbPlan = Get-EraBundleDeliveryPlan')
+        $dispIdx = $script:EraSrc2.IndexOf('$fbResults = Invoke-ReviewerDispatch')
+        $planIdx | Should -BeGreaterThan 0
+        $dispIdx | Should -BeGreaterThan $planIdx
+    }
+
+    It 'fails CLOSED when repomix token parsing misses' {
+        # $tokenCount = 0 passed every token ceiling, disarming the gate for exactly
+        # the bundle it was built to catch.
+        $script:EraSrc2 | Should -Match '\$tokenCount -le 0 -and \$bundleBytesForEstimate -gt 0'
+        $script:EraSrc2 | Should -Match 'could not parse a token count from repomix'
+    }
+}
+
 Describe 'Get-EraDeliveryModeMap' -Tag Unit {
 
     It 'flattens the plan to preset -> mode for the summary and the metadata' {

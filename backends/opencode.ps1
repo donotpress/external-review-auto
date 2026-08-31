@@ -244,11 +244,25 @@ function Invoke-OpencodeReview {
     # detector and timeout already bound. Over the cap we read; far over it - past
     # anything measured - we refuse, because an unbounded agentic read on a bundle
     # nobody has ever successfully reviewed is a bet, not a default.
+    # These two are the adapter's copy of what Get-EraBackendDelivery predicts. They
+    # MUST honour the same registry override, or raising a ceiling in
+    # backends/_registry.json makes the plan say "fits" and this throw after the
+    # round is already paid for on the other seats -- a free preflight refusal
+    # upgraded into a billed void round (2026-08-31 panel, muse-spark finding 1).
+    # OpencodeConstantParity.Tests.ps1 pins the built-in values against the plan's.
     $OPENCODE_ATTACH_LIMIT_BYTES = 51200
     # Ceiling for the read-tool path. 668,389 bytes is verified end-to-end above;
     # muse-spark has separately carried 2,396,233. 1 MB sits between "measured" and
     # "known to have worked once", which is the honest place for a default.
     $OPENCODE_READ_TOOL_MAX_BYTES = 1048576
+    foreach ($ovr in @(@{ Key='max_bundle_bytes'; Var='READ' })) {
+        $raw = $ModelInfo[$ovr.Key]
+        if ($null -ne $raw -and "$raw" -ne '') {
+            $parsed = [long]0
+            if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) { $OPENCODE_READ_TOOL_MAX_BYTES = $parsed }
+            else { Write-Host "[opencode] WARNING: registry max_bundle_bytes='$raw' is not a non-negative number; keeping $OPENCODE_READ_TOOL_MAX_BYTES." }
+        }
+    }
     $forceReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
     $forceAttach = $env:ERA_OPENCODE_READ_TOOL -and ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false')
     $bundleBytes = 0
@@ -263,17 +277,10 @@ function Invoke-OpencodeReview {
         throw ("opencode cannot review this bundle: it is $bundleBytes bytes. Attaching truncates at $OPENCODE_ATTACH_LIMIT_BYTES bytes " +
                "(the reviewer would see the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))% and report on it as if it were the whole thing), and the Read-tool path " +
                "is only verified to $OPENCODE_READ_TOOL_MAX_BYTES bytes. Curate with -IncludeFiles, or send this round to a reviewer whose channel can carry it " +
-               "(agy reads from disk). Set ERA_OPENCODE_READ_TOOL=1 to try the read anyway. Nothing was dispatched and nothing was spent.")
+               "(agy reads from disk). To try the read anyway you need BOTH -ForceBundleSize (or ERA_BUNDLE_FORCE=1) to get past era's preflight AND ERA_OPENCODE_READ_TOOL=1 to get past this one. Nothing was dispatched and nothing was spent.")
     }
     elseif ($overAttachLimit) {
         Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
-    }
-    elseif ($overAttachLimit) {
-        throw ("opencode cannot review this bundle: it is $bundleBytes bytes and opencode silently truncates an attached file at $OPENCODE_ATTACH_LIMIT_BYTES bytes " +
-               "(the reviewer would see the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))% and report on that as if it were the whole thing). " +
-               "The Read-tool path that used to be taken here was retired on 2026-08-31 because it hangs for the full timeout and returns nothing. " +
-               "Curate the bundle to $OPENCODE_ATTACH_LIMIT_BYTES bytes or fewer with -IncludeFiles, or send this round to a reviewer whose channel can carry it (agy reads from disk). " +
-               "Nothing was dispatched and nothing was spent.")
     }
     $prompt = if ($useReadTool) {
         "Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. Output your structured review."
@@ -523,8 +530,21 @@ function Invoke-OpencodeReview {
             # 2026-08-31 timeout log. Every artifact in opencode-stall-debug
             # predating this line is empty or cut at a 4,096-byte boundary for
             # this reason, not because opencode was silent.
-            try { $stdoutSink.Flush() } catch {}
-            try { $stderrSink.Flush() } catch {}
+            # Quiesce the async copies BEFORE flushing. Flush() pushes the
+            # FileStream's own buffer to the OS; it does not drain bytes still
+            # sitting in the CopyToAsync pipeline started above, so a snapshot
+            # taken while the child is still draining can be short -- the same
+            # class as the bug this whole block exists to fix, just bounded.
+            # A bounded wait, never an unbounded one: the child has already been
+            # killed by every caller of this block.
+            try { $null = $stdoutCopyTask.Wait(500) } catch {}
+            try { $null = $stderrCopyTask.Wait(500) } catch {}
+            # A FAILED flush must not be silent. A swallowed exception here
+            # reproduces the exact signature that was misread as "the process
+            # produced nothing" -- an empty artifact beside a non-zero byte count
+            # -- and leaves the next reader the same broken instrument.
+            try { $stdoutSink.Flush() } catch { Write-Host "[opencode] WARNING: could not flush the stdout capture before snapshotting ($($_.Exception.Message)); the artifact below may be short." }
+            try { $stderrSink.Flush() } catch { Write-Host "[opencode] WARNING: could not flush the stderr capture before snapshotting ($($_.Exception.Message)); the artifact below may be short." }
             $partialOut = (Get-Content -Raw -LiteralPath $stdFile -ErrorAction SilentlyContinue)
             $partialErr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
             $cleanOut   = if ($partialOut) { $partialOut -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", '' } else { '' }

@@ -113,10 +113,30 @@ function Get-EraVendorIgnorePatterns {
         repomix (measured 1.12.0 -- 'node_modules/**' still bundles
         packages/p/node_modules/d/a.md). Only node_modules changes real output;
         the other two are spelled alike so sibling patterns behave alike.
+
+        The browser-profile patterns must live HERE and cannot live in a repo's
+        own .repomixignore (measured 2026-08-31 against repomix 1.12.0, on
+        ebay-quantity-monitor with headful Chrome running). Two distinct reasons:
+
+          1. A live Chrome profile holds directories the owning process LOCKS --
+             e.g. <profile>/CertificateRevocation/<n> -- and repomix aborts the
+             whole run on them: 'PermissionError: Permission denied while
+             scanning directory'. Exit 1, nothing dispatched.
+          2. .repomixignore CANNOT prevent that. repomix feeds it to globby as
+             ignoreFiles ('**/.repomixignore', fileSearch.js
+             getIgnoreFilePatterns), and globby must GLOB for that file before it
+             can read it -- so the locked directory is walked while looking for
+             the very file that would have excluded it. Only 'ignore'
+             (customPatterns, i.e. this list) prunes traversal. A repo that added
+             .repomixignore to fix this crash kept crashing.
+
+        They are also a privacy control: a profile dir carries live session
+        cookies and auth tokens, and era uploads its bundle to a third party.
     #>
     [CmdletBinding()]
     param()
-    return @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db')
+    return @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db',
+             '**/puppeteer_user_data/**', '**/chrome_user_data/**', '**/chrome-profile/**')
 }
 
 function Get-EraIgnoreSets {
@@ -3413,11 +3433,25 @@ function Get-EraBackendDelivery {
         # 51,200 bytes it attaches, above that it reads the file with its own Read
         # tool. Reporting 'attach' for a read-tool round would make the summary lie
         # about the thing it exists to explain.
-        [long]$BundleBytes = 0
+        [long]$BundleBytes = 0,
+        # ERA_OPENCODE_READ_TOOL, resolved to 'attach' | 'read-tool' | $null.
+        # WITHOUT THIS the plan decided mode from size alone while the adapter
+        # honoured the env var, so ERA_OPENCODE_READ_TOOL=0 on a 300 KB bundle gave:
+        # plan says read-tool / limit 1,048,576 / FITS, summary prints
+        # via=read-tool, metadata records delivery_mode='read-tool' -- while the
+        # model actually saw the first 50 KiB and returned a well-formed review of
+        # 17% of the bundle. That is the exact silent-truncation failure the cap
+        # exists to prevent, reachable through a documented escape hatch and
+        # invisible to every new safeguard. All four seats of the 2026-08-31 panel
+        # flagged it independently.
+        [string]$ForcedOpencodeMode
     )
     $d = switch ($Backend) {
         'opencode' {
-            if ($BundleBytes -gt 51200) {
+            $ocReadTool = if ($ForcedOpencodeMode -eq 'read-tool') { $true }
+                          elseif ($ForcedOpencodeMode -eq 'attach') { $false }
+                          else { $BundleBytes -gt 51200 }
+            if ($ocReadTool) {
                 @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null
                    # Verified end-to-end 2026-08-31 with canaries planted at 25/50/75%
                    # depth and reported back before the review, on both default
@@ -3466,12 +3500,16 @@ function Get-EraBackendDelivery {
                Basis = 'bundle is piped into `claude --print` as the prompt; measured 2026-08-31, the CLI accepts 600,000 and rejects 630,000 repomix tokens (550,000 keeps headroom for CLI overhead repomix cannot count)' }
         }
         'anthropic' {
-            # The API window is 1M for claude-opus-5, appreciably more than the CLI
-            # gets. DERIVED, not measured: this host has no ANTHROPIC_API_KEY (the
-            # operator is on a Claude Code subscription and does not want per-token
-            # API billing), so no round has ever run through this adapter to measure.
-            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = 750000
-               Basis = 'bundle is placed in the Messages API request body (derived: claude-opus-5 has a 1M-token window; 750,000 reserves ~25% for prompt + output). UNMEASURED - no API key on this host' }
+            # NO ENFORCEABLE LIMIT, deliberately. This carried 750,000 tokens
+            # "derived from a 1M window less ~25%" -- the identical derivation this
+            # same release documents as having been ~4x wrong for the claude CLI,
+            # and a direct violation of this function's own stated policy that an
+            # unmeasured channel reports unknown and is NEVER refused. The claude
+            # bisection is the evidence that the CLI/API relationship is not
+            # derivable, so an invented number here is both unfalsifiable and live.
+            # It stays $null until somebody measures it the way claude was measured.
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null
+               Basis = 'bundle is placed in the Messages API request body; this adapter''s real ceiling has not been measured (no API key on this host), so it is not enforced' }
         }
         'agy' {
             @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null
@@ -3486,9 +3524,23 @@ function Get-EraBackendDelivery {
         }
     }
     # Registry overrides win: a measured number beats a derived one.
+    # Registry overrides win: a measured number beats a derived one.
+    # `if ($ModelInfo.max_bundle_bytes)` was wrong twice over -- 0 is FALSY, so a
+    # deliberate "this channel can carry nothing" was silently ignored, and a
+    # non-numeric value threw a raw cast error instead of era's clean preflight
+    # shape (the same lesson ERA_BROAD_MAX_FILES already learned). Parse, don't cast.
     if ($ModelInfo) {
-        if ($ModelInfo.max_bundle_bytes)  { $d.LimitBytes  = [long]$ModelInfo.max_bundle_bytes;  $d.Basis = "registry max_bundle_bytes" }
-        if ($ModelInfo.max_bundle_tokens) { $d.LimitTokens = [int]$ModelInfo.max_bundle_tokens; $d.Basis = "registry max_bundle_tokens" }
+        foreach ($spec in @(@{ Key='max_bundle_bytes'; Field='LimitBytes' }, @{ Key='max_bundle_tokens'; Field='LimitTokens' })) {
+            $raw = $ModelInfo[$spec.Key]
+            if ($null -eq $raw -or "$raw" -eq '') { continue }
+            $parsed = [long]0
+            if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) {
+                $d[$spec.Field] = $parsed
+                $d.Basis = "registry $($spec.Key)"
+            } else {
+                Write-Host "[era] WARNING: registry $($spec.Key)='$raw' is not a non-negative number; keeping the built-in limit."
+            }
+        }
     }
     return $d
 }
@@ -3516,12 +3568,18 @@ function Get-EraBundleDeliveryPlan {
         [Parameter(Mandatory)][long]$BundleBytes,
         [int]$BundleTokens = 0
     )
+    # Resolve the opencode delivery override ONCE, here, so every seat's predicted
+    # mode matches what the adapter will actually do.
+    $forcedOc = $null
+    if ($env:ERA_OPENCODE_READ_TOOL) {
+        $forcedOc = if ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false') { 'attach' } else { 'read-tool' }
+    }
     $seats = foreach ($r in $ReviewerList) {
         $info = $Registry[$r]
         $backend = if ($info) { "$($info.backend)" } else { 'unknown' }
         $infoHash = @{}
-        if ($info) { foreach ($k in @('max_bundle_bytes','max_bundle_tokens')) { if ($info.$k) { $infoHash[$k] = $info.$k } } }
-        $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash -BundleBytes $BundleBytes
+        if ($info) { foreach ($k in @('max_bundle_bytes','max_bundle_tokens')) { if ($null -ne $info.$k) { $infoHash[$k] = $info.$k } } }
+        $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash -BundleBytes $BundleBytes -ForcedOpencodeMode $forcedOc
 
         $ok = $true
         $reason = $null

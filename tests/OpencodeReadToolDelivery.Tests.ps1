@@ -40,17 +40,37 @@ Describe 'the stall snapshot tells the truth' -Tag Unit {
         # THE REGRESSION GUARD. Without this the forensics are empty and the next
         # person to debug a stall is sent after a startup failure that is not
         # happening.
-        $script:Src | Should -Match '\$snapshotPartialAndDebug = \{[\s\S]{0,2000}?\$stdoutSink\.Flush\(\)'
-        $script:Src | Should -Match '\$snapshotPartialAndDebug = \{[\s\S]{0,2000}?\$stderrSink\.Flush\(\)'
+        $script:Src | Should -Match '\$snapshotPartialAndDebug = \{[\s\S]{0,4000}?\$stdoutSink\.Flush\(\)'
+        $script:Src | Should -Match '\$snapshotPartialAndDebug = \{[\s\S]{0,4000}?\$stderrSink\.Flush\(\)'
     }
 
     It 'flushes BEFORE the Get-Content that builds the tail' {
-        $block   = [regex]::Match($script:Src, '\$snapshotPartialAndDebug = \{[\s\S]{0,3000}?\n        \}').Value
+        $block   = [regex]::Match($script:Src, '\$snapshotPartialAndDebug = \{[\s\S]{0,6000}?\n        \}').Value
         $block   | Should -Not -BeNullOrEmpty
         $flushAt = $block.IndexOf('$stdoutSink.Flush()')
         $readAt  = $block.IndexOf('$partialOut = (Get-Content')
         $flushAt | Should -BeGreaterThan -1
         $readAt  | Should -BeGreaterThan $flushAt
+    }
+
+    It 'quiesces the async copy before flushing, and does not swallow a flush failure' {
+        # Flush() pushes the FileStream's own buffer to the OS; it does not drain
+        # bytes still in the CopyToAsync pipeline, so a snapshot taken mid-drain
+        # can be short -- the same class as the bug this block exists to fix.
+        # And a silently-swallowed flush failure reproduces the exact signature
+        # (empty artifact, non-zero byte count) that was misread as "the process
+        # produced nothing" and used to retire a working path.
+        $block = [regex]::Match($script:Src, '\$snapshotPartialAndDebug = \{[\s\S]{0,6000}?\n        \}').Value
+        $block | Should -Not -BeNullOrEmpty
+        $block | Should -Match '\$stdoutCopyTask\.Wait\('
+        $block | Should -Match '\$stderrCopyTask\.Wait\('
+        $waitAt  = $block.IndexOf('$stdoutCopyTask.Wait(')
+        $flushAt = $block.IndexOf('$stdoutSink.Flush()')
+        $waitAt  | Should -BeGreaterThan -1
+        $flushAt | Should -BeGreaterThan $waitAt
+        # catch{} with no body is the silent form.
+        $block | Should -Not -Match 'try \{ \$stdoutSink\.Flush\(\) \} catch \{\}'
+        $block | Should -Match 'could not flush the stdout capture'
     }
 
     It 'demonstrates the bug it fixes: FileStream.Length counts unflushed bytes' {

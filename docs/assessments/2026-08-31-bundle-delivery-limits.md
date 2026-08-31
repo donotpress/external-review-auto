@@ -116,8 +116,21 @@ will leave a real artifact.
 
 - Limits are per-backend and live in `backends/_registry.json` as
   `max_bundle_bytes` / `max_bundle_tokens`, so a re-measurement is data.
-- An unmeasured channel (`geminiapi`, `openaicompat`) reports "unknown" and is
-  **never refused** — inventing a ceiling refuses rounds that would have worked.
+  **This claim was false when first published.** `era.ps1` projects the registry
+  into `$registryHash` field by field and did not copy those two keys, so the
+  override branch could never fire on a real dispatch. The unit test passed
+  `-ModelInfo` straight to the pure function and therefore proved the function
+  worked while saying nothing about the wiring. Found by all four seats of the
+  2026-08-31 review panel; fixed in v2.3.1 with an end-to-end test that runs the
+  real `era.ps1` against a real edited registry, and a negative control
+  confirming that test fails against the pre-fix code.
+  The lesson is the same one this document already records one section earlier:
+  **a measurement taken through the layer you are not testing proves nothing.**
+- An unmeasured channel (`geminiapi`, `openaicompat`, and since v2.3.1
+  `anthropic`) reports "unknown" and is **never refused** — inventing a ceiling
+  refuses rounds that would have worked. v2.3 violated its own policy here:
+  `anthropic` carried an enforceable 750,000 derived as "a 1M window less ~25%",
+  the identical derivation this document calls ~4x wrong for the claude CLI.
 - Refusal is `exit 1`: nothing dispatched, nothing spent, free to re-run. Distinct
   from a void round's `exit 2`, which already cost money.
 - The round summary names each seat's delivery mode and failure category, and

@@ -707,6 +707,17 @@ $registry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach
         api_key_env = $_.Value.api_key_env
         api_key_header = $_.Value.api_key_header
         max_tokens = $_.Value.max_tokens
+        # Delivery ceilings. These were MISSING, which made the documented
+        # "a re-measurement is data, not a code change" contract dead on every
+        # real dispatch: Get-EraBundleDeliveryPlan reads them off THIS hashtable,
+        # so the override branch could never fire. The unit test passed
+        # -ModelInfo straight to the pure function and never exercised this
+        # layer, so it proved the function worked and said nothing about the
+        # wiring. Same bug, same literal, one field-set later than the REST
+        # comment directly above -- which exists because of the identical
+        # omission. Found by all four seats of the 2026-08-31 panel.
+        max_bundle_bytes = $_.Value.max_bundle_bytes
+        max_bundle_tokens = $_.Value.max_bundle_tokens
         pricing = @{ input_per_m = $_.Value.pricing.input_per_m; output_per_m = $_.Value.pricing.output_per_m }
         supports_file_read = $_.Value.supports_file_read
         supports_streaming = $_.Value.supports_streaming
@@ -1676,11 +1687,24 @@ Be terse. If a section is empty, write "(none)".
     }
 
     $tokenCount = 0
+    $bundleBytesForEstimate = 0
+    try { if (Test-Path -LiteralPath $bundlePath) { $bundleBytesForEstimate = (Get-Item -LiteralPath $bundlePath).Length } } catch {}
     $repomixText = $repomixResult
     if ($repomixText -match 'Total Tokens:\s*([0-9,]+)') {
         $tokenCount = [int]($matches[1] -replace ',', '')
     } elseif ($repomixText -match '([0-9,]+)\s*tokens') {
         $tokenCount = [int]($matches[1] -replace ',', '')
+    }
+    # FAIL CLOSED, not open. $tokenCount starts at 0 and is set only if one of the
+    # two regexes matches repomix's stdout. It is the ONLY thing bounding the
+    # token-limited seats (claude has LimitBytes=$null), so a repomix output-format
+    # change silently disarms the gate for exactly the bundle it was built to
+    # catch -- the 711,253-token round that returned "Prompt is too long".
+    # Estimated from bytes so the gate still bites; 3.369 B/token is measured on a
+    # real repomix XML bundle (2,396,233 B / 711,253 tok).
+    if ($tokenCount -le 0 -and $bundleBytesForEstimate -gt 0) {
+        $tokenCount = [int][Math]::Ceiling($bundleBytesForEstimate / 3.369)
+        Write-Host "[era] WARNING: could not parse a token count from repomix output; estimating $tokenCount tokens from $bundleBytesForEstimate bundle bytes (3.369 B/token, measured). Cost estimates and the delivery gate use this figure."
     }
     Write-Host "Bundle ready. Tokens: $tokenCount"
 
@@ -1726,9 +1750,11 @@ Be terse. If a section is empty, write "(none)".
     $deliveryPlan = Get-EraBundleDeliveryPlan -ReviewerList $reviewerList `
         -Registry $registryHash -BundleBytes ([long]$bundleBytes) -BundleTokens $tokenCount
     foreach ($line in $deliveryPlan.Lines) { Write-Host $line }
+    # Defined unconditionally: the agy-fallback delivery check below also reads it,
+    # and an undefined variable there would silently mean "not forced".
+    $bundleForce = $ForceBundleSize.IsPresent -or ($env:ERA_BUNDLE_FORCE -eq '1')
     if ($deliveryPlan.OverCount -gt 0) {
         $doomed = @($deliveryPlan.Seats | Where-Object { -not $_.Ok })
-        $bundleForce = $ForceBundleSize.IsPresent -or ($env:ERA_BUNDLE_FORCE -eq '1')
         $detail = ($doomed | ForEach-Object { "$($_.Preset) ($($_.Backend), $($_.Mode)): $($_.Reason) — $($_.Basis)" }) -join "; "
         if ($bundleForce) {
             # Loud, per seat, and it still says the seat is expected to fail —
@@ -1949,6 +1975,22 @@ Be terse. If a section is empty, write "(none)".
                     "$_ ($e)"
                 }) -join ', '
                 Write-Host "[era] no usable review from $why -> falling back to '$fallbackPreset'."
+                # DELIVERY-CHECK THE FALLBACK (2026-08-31 panel, opus finding 2).
+                # The plan ran once, over $reviewerList, before the cost prompt.
+                # This re-dispatch was priced and contract-checked but never
+                # delivery-checked -- and it fires only when EVERY seat failed,
+                # plausibly BECAUSE of delivery, so the response to a delivery
+                # failure was one more unchecked full-bundle upload to a channel
+                # nobody had measured this bundle against.
+                $fbPlan = Get-EraBundleDeliveryPlan -ReviewerList @($fallbackPreset) `
+                    -Registry $registryHash -BundleBytes ([long]$bundleBytes) -BundleTokens $tokenCount
+                if ($fbPlan.OverCount -gt 0 -and -not $bundleForce) {
+                    $fbWhy = @($fbPlan.Seats | Where-Object { -not $_.Ok } | ForEach-Object { $_.Reason }) -join '; '
+                    Write-Host "[era] SKIPPING the fallback: '$fallbackPreset' cannot receive this bundle either ($fbWhy). Re-sending it would spend again on a seat that cannot succeed. Curate the bundle, or pass -ForceBundleSize to try anyway."
+                    $fallbackPreset = $null
+                }
+            }
+            if ($fallbackPreset) {
                 $fbResults = Invoke-ReviewerDispatch -ReviewerList @($fallbackPreset) `
                     -SuffixReviewerList @($approvedList + $fallbackPreset) `
                     -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `

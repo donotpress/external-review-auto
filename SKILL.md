@@ -413,7 +413,7 @@ checks it against each selected seat:
 |---|---|---|---|
 | `opencode` | `attach` (`-f`) at/under 51,200 B, `read-tool` above | **1,048,576 bytes** | Measured. Attaching truncates silently at exactly 50 KiB, so above that the model reads the bundle itself — verified to 668,389 B (see below). |
 | `claude` | `stdin` (inlined as the prompt) | **550,000 tokens** | **Measured 2026-08-31** (see below). |
-| `anthropic` | `inline-api` | 750,000 tokens | Derived from the model's 1M-token API window. Unmeasured — no API key on this host. |
+| `anthropic` | `inline-api` | not measured | Reported as unknown and **never refused** — the 1M API window is real but the adapter's practical ceiling has never been measured here. |
 | `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
 | `geminiapi`, `openaicompat` | `inline-api` | not measured | Reported as unknown and never refused — inventing a ceiling would refuse rounds that work. |
 
@@ -422,7 +422,10 @@ nothing spent, safe to re-run after curating. Pass `-ForceBundleSize` (or
 `ERA_BUNDLE_FORCE=1`) to dispatch the doomed seats anyway; era then warns per seat and
 tells you what to expect. A preset may override its ceiling with `max_bundle_bytes` /
 `max_bundle_tokens` in `backends/_registry.json`, so a newly measured number is data
-rather than a code change.
+rather than a code change. (This was **broken and documented as working** in v2.3 —
+`era.ps1` projects the registry field by field and did not copy those two keys, so the
+override never reached a real dispatch. Fixed in v2.3.1, with an end-to-end test that
+runs the real `era.ps1` against a real edited registry.)
 
 **Where the `claude` ceiling comes from.** Measured by bisection against the live CLI,
 replacing a derived 150,000 that was ~4x too tight. Slices of a real 2,396,233-byte
