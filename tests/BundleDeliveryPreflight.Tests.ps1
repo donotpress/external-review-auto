@@ -49,6 +49,23 @@ Describe 'Get-EraBackendDelivery' -Tag Unit {
         $d.LimitBytes  | Should -BeNullOrEmpty
     }
 
+    It 'uses the MEASURED claude ceiling, inside the bisected bracket' {
+        # Measured 2026-08-31: `claude --print` returned a tail canary at 600,000
+        # repomix tokens and said "Prompt is too long" at 630,000. A ceiling above
+        # 600,000 would dispatch rounds that cannot run; one at the old derived
+        # 150,000 refuses rounds that demonstrably work. Both are regressions.
+        $d = Get-EraBackendDelivery -Backend 'claude'
+        $d.LimitTokens | Should -BeGreaterThan 150000
+        $d.LimitTokens | Should -BeLessOrEqual 600000
+        $d.Basis       | Should -Match 'measured 2026-08-31'
+    }
+
+    It 'accepts the 500k-token bundle the old derived ceiling would have refused' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus') -Registry $script:Reg `
+            -BundleBytes 1684500 -BundleTokens 500000
+        $p.OverCount | Should -Be 0
+    }
+
     It 'imposes no channel limit on agy, which opens the file from disk' {
         $d = Get-EraBackendDelivery -Backend 'agy'
         $d.Mode        | Should -Be 'disk-read'
@@ -91,9 +108,10 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
     }
 
     It 'catches the 2,396,233-byte bundle that really overflowed opus' {
-        # ~600k tokens on a 200k-token model.
+        # repomix's OWN count for that round was 711,253 tokens, and the CLI
+        # rejected it. Use the real number, not a bytes/4 estimate.
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus') -Registry $script:Reg `
-            -BundleBytes 2396233 -BundleTokens 599058
+            -BundleBytes 2396233 -BundleTokens 711253
         $p.OverCount   | Should -Be 1
         $p.Seats[0].Ok | Should -BeFalse
         $p.Seats[0].Reason | Should -Match 'tokens'
@@ -104,7 +122,7 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
         # it; agy reads from disk and is fine. This is the round the gate exists
         # to have refused.
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','gemini','deepseek-flash','muse-spark') `
-            -Registry $script:Reg -BundleBytes 2396233 -BundleTokens 599058
+            -Registry $script:Reg -BundleBytes 2396233 -BundleTokens 711253
         $p.OverCount | Should -Be 3
         ($p.Seats | Where-Object { $_.Preset -eq 'gemini' }).Ok | Should -BeTrue
     }

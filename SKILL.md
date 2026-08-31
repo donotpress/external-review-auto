@@ -412,8 +412,8 @@ checks it against each selected seat:
 | Backend | Channel | Ceiling | Basis |
 |---|---|---|---|
 | `opencode` | `attach` (`-f`) | **51,200 bytes** | Measured. opencode silently truncates an attached file at exactly 50 KiB. |
-| `claude` | `stdin` (inlined as the prompt) | **150,000 tokens** | Derived from the 200k-token context window, reserving ~25% for prompt + output. |
-| `anthropic` | `inline-api` | 150,000 tokens | Same derivation. |
+| `claude` | `stdin` (inlined as the prompt) | **550,000 tokens** | **Measured 2026-08-31** (see below). |
+| `anthropic` | `inline-api` | 750,000 tokens | Derived from the model's 1M-token API window. Unmeasured — no API key on this host. |
 | `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
 | `geminiapi`, `openaicompat` | `inline-api` | not measured | Reported as unknown and never refused — inventing a ceiling would refuse rounds that work. |
 
@@ -423,6 +423,30 @@ nothing spent, safe to re-run after curating. Pass `-ForceBundleSize` (or
 tells you what to expect. A preset may override its ceiling with `max_bundle_bytes` /
 `max_bundle_tokens` in `backends/_registry.json`, so a newly measured number is data
 rather than a code change.
+
+**Where the `claude` ceiling comes from.** Measured by bisection against the live CLI,
+replacing a derived 150,000 that was ~4x too tight. Slices of a real 2,396,233-byte
+bundle (3.369 bytes per repomix token) were piped to `claude --print --model
+claude-opus-5`, each with a unique **canary appended at the very end** and a prompt
+asking only for the canary back — echoing it proves the *tail* reached the model, where
+a bare "OK" would only prove the request was accepted (`--autocompact` defaults to on,
+so a silently-compacted prompt is exactly what this gate exists to prevent).
+
+| repomix tokens | bytes | result |
+|---|---|---|
+| 600,000 | 2,021,400 | **canary returned — full prompt seen** (68s) |
+| 630,000 | 2,122,470 | `Prompt is too long` (7s) |
+| 660,000 | 2,223,540 | `Prompt is too long` (6s) |
+| 700,000 | 2,358,300 | `Prompt is too long` (6s) |
+| 711,253 | 2,396,233 | `Prompt is too long` — the real 2026-08-30 round |
+
+So the CLI carries **≥600,000 and <630,000** repomix tokens. Note this is *not* the
+model's 1M API window — `claude --print` gets appreciably less. Rejection happens
+**before inference** (6s and unbilled, against 68s for the accepted probe), which is what
+made bisecting affordable: only the first accepted probe costs anything. 550,000 leaves
+~8% headroom for the CLI's own system prompt and tool definitions, which repomix's count
+cannot see. To re-measure after a CLI upgrade, repeat the canary bisection and update
+`max_bundle_tokens`.
 
 **Why this gate exists.** Three consecutive 4-seat panels delivered 2 seats, for two
 independent reasons of one shape — a bundle bigger than the channel:

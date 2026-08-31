@@ -3421,17 +3421,39 @@ function Get-EraBackendDelivery {
                Basis = 'opencode silently truncates an attached file at exactly 50 KiB (measured 2026-08-03, re-confirmed 2026-08-31)' }
         }
         'claude' {
-            # NOT measured — DERIVED, and labelled as such. The only two real data
-            # points are a success at ~73 KB and "Prompt is too long" at 2.4 MB, so
-            # the true ceiling is somewhere in between and this is a deliberately
-            # conservative reading of the model's context window (200k tokens for
-            # claude-opus-5), reserving ~25% for the prompt and the answer.
-            @{ Mode = 'stdin'; LimitBytes = $null; LimitTokens = 150000
-               Basis = 'bundle is piped into `claude --print` as the prompt, so it must fit the context window (derived: 200k-token window less ~25% for prompt + output)' }
+            # MEASURED 2026-08-31 by bisection against the live CLI, replacing a
+            # derived 150,000 that was ~4x too tight and was refusing rounds that
+            # work. Method: slices of a real 2,396,233-byte bundle (3.369 bytes per
+            # repomix token) piped to `claude --print --model claude-opus-5`, with a
+            # unique CANARY appended at the very END of each slice and the prompt
+            # asking only for the canary back. Echoing it proves the TAIL reached
+            # the model -- "OK" would only have proved the request was ACCEPTED, and
+            # `--autocompact` defaults to on, so a silently-compacted prompt is
+            # exactly the failure this gate exists to prevent.
+            #
+            #   600,000 tok / 2,021,400 B   canary returned -- full prompt seen, 68s
+            #   630,000 tok / 2,122,470 B   "Prompt is too long",  7s
+            #   660,000 tok / 2,223,540 B   "Prompt is too long",  6s
+            #   700,000 tok / 2,358,300 B   "Prompt is too long",  6s
+            #   711,253 tok (the real 2026-08-30 round) "Prompt is too long"
+            #
+            # So the CLI ceiling is >=600,000 and <630,000 repomix tokens. It is NOT
+            # the model's 1M API window -- `claude --print` gets appreciably less.
+            # Rejection happens BEFORE inference (6s and unbilled, against 68s for
+            # the accepted probe), which is what made bisecting affordable.
+            #
+            # 550,000 leaves ~8% under the measured accept point for the CLI's own
+            # system prompt and tool definitions, which repomix's count cannot see.
+            @{ Mode = 'stdin'; LimitBytes = $null; LimitTokens = 550000
+               Basis = 'bundle is piped into `claude --print` as the prompt; measured 2026-08-31, the CLI accepts 600,000 and rejects 630,000 repomix tokens (550,000 keeps headroom for CLI overhead repomix cannot count)' }
         }
         'anthropic' {
-            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = 150000
-               Basis = 'bundle is placed in the Messages API request body (derived: 200k-token window less ~25% for prompt + output)' }
+            # The API window is 1M for claude-opus-5, appreciably more than the CLI
+            # gets. DERIVED, not measured: this host has no ANTHROPIC_API_KEY (the
+            # operator is on a Claude Code subscription and does not want per-token
+            # API billing), so no round has ever run through this adapter to measure.
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = 750000
+               Basis = 'bundle is placed in the Messages API request body (derived: claude-opus-5 has a 1M-token window; 750,000 reserves ~25% for prompt + output). UNMEASURED - no API key on this host' }
         }
         'agy' {
             @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null
