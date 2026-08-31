@@ -3,12 +3,12 @@
     opencode backend adapter for /external-review-auto. Invokes
     `opencode run "<prompt>" -m <model_id> [--variant <v>] -f <bundle>`.
 .DESCRIPTION
-    - Bundle is ATTACHED via `-f` (the model receives the file content directly in
-      its message context; no agentic Read-tool call to refuse / narrate / truncate
-      — the false-success root cause). opencode truncates an attached file at
-      51,200 bytes, so a larger bundle is REFUSED here rather than routed to the
-      Read-tool prompt, which was retired 2026-08-31 for hanging out the full
-      timeout. ERA_OPENCODE_READ_TOOL=1 still re-enables it for diagnosis.
+    - Bundle delivery is SIZE-DEPENDENT. At or under 51,200 bytes it is ATTACHED
+      via `-f` (fast, no tool calls). Above that opencode truncates an attached
+      file silently, so the model is told to READ the bundle itself — verified
+      2026-08-31 with mid-bundle canaries up to 668,389 bytes on both default
+      seats. Past 1,048,576 bytes, beyond anything measured, the adapter refuses.
+      ERA_OPENCODE_READ_TOOL forces either mode (1 = read, 0 = attach).
     - Model + variant are selected purely via the `-m` / `--variant` CLI flags.
       Probe-verified (2026-06-04): `opencode run -m <id>` overrides recent[0] and
       does NOT mutate ~/.local/state/opencode/model.json. The old state.json swap +
@@ -184,85 +184,89 @@ function Invoke-OpencodeReview {
         # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
         [string]$PidFile
     )
-    # Bundle access: ATTACH via `-f`, and REFUSE above the attach cap.
+    # Bundle access: ATTACH via `-f` under the cap, READ TOOL over it.
     #
     # opencode TRUNCATES an attached file at exactly 50 KiB (51200 bytes), silently.
     # Measured 2026-08-03 against two real runs: DeepSeek V4 Flash reported its input
     # ending at line 1169 of a 9,234-line bundle, and `head -1169` of that file is
     # 51,191 bytes while line 1170 would cross 51,200 - the cut lands mid-line at the
-    # 50 KiB boundary. On a 474 KB bundle the reviewer therefore saw 10.7% of it; on a
-    # 692 KB bundle, 7.3%.
+    # 50 KiB boundary. On a 474 KB bundle the reviewer therefore saw 10.7% of it.
     #
-    # The failure is SILENT and worse than an error: the model still returns a
+    # That failure is SILENT and worse than an error: the model still returns a
     # well-formed review, so `content_ok` is true and the run looks successful - it is
-    # simply a review of a tenth of the input, and its "no blocking defects found" is
-    # near-worthless. In one observed run the model worked around it by chunk-reading
-    # anyway, which is why that attempt took 566s.
+    # simply a review of a tenth of the input. So over the cap we must NOT attach.
     #
-    # So the cap is real and it is HARD. Under it, attach - fast, no tool calls.
-    # Over it era refuses (see the retirement note below); ERA_OPENCODE_READ_TOOL=1
-    # re-enables the retired Read-tool path and 0/false forces attach anyway - both
-    # diagnostics only, and both documented as lossy.
+    # --- 2026-08-31: this path was retired, and then UN-retired the same day -----
+    #
+    # It was retired on the reading that it "hangs and returns nothing". That was
+    # wrong, and it is worth recording exactly how, because the mistake was in the
+    # evidence rather than in the reasoning.
+    #
+    # Every artifact in %TEMP%\opencode-stall-debug is 0 bytes while the error line
+    # beside it reports a non-zero `total bytes`. That contradiction was read as
+    # "the process produced nothing". It was actually a BUG IN THE SNAPSHOT:
+    # $stdoutSink.Length counts bytes still sitting in the FileStream write buffer,
+    # and the snapshot copied the file WITHOUT FLUSHING (fixed below). Reproduced:
+    # 218 bytes written -> sink.Length=218, on-disk length=0. So the "it never
+    # starts" premise came from a measuring instrument that was broken.
+    #
+    # MEASURED PROPERLY 2026-08-31, with a mid-bundle CANARY. A bundle is not
+    # "covered" because a review came back - the model can read the head, skip to
+    # the instructions at the tail, and write something plausible. So each probe
+    # planted marker lines at widely separated offsets and asked for them back
+    # verbatim before the review. Both default opencode seats, every size:
+    #
+    #   bundle      lines    canaries        wall   result
+    #   109,066 B    2,066   1/1 both seats    57s  real reviews, file:line cited
+    #   314,720 B    5,226   2/2 both seats    85s  real reviews
+    #   668,389 B   10,773   3/3 both seats   256s  real reviews
+    #
+    # 668 KB is 13x the attach cap, and coverage was verified at 25/50/75% depth,
+    # so this is not "it read the first chunk and guessed".
+    #
+    # IT IS STILL INTERMITTENT, and that is not explained. Historically:
+    #
+    #   deepseek-flash  74,740 B     600s timeout, nothing   (2026-08-31)
+    #   deepseek-flash  79,294 B     600s timeout, nothing   (2026-08-25)
+    #   deepseek-flash  2,396,233 B  failed                  (2026-08-30)
+    #   muse-spark      2,396,233 B  SUCCEEDED - a 7,628-byte grounded review
+    #
+    # Not size (109 KB works, 74 KB failed) and not model (both models pass every
+    # probe here; both appear in the failure list). The untested hypothesis with
+    # the most support is CONCURRENCY: three interactive `opencode -c` sessions
+    # were live during the failing dispatches and none were during these probes.
+    # The run mutex below serialises era's OWN seats but cannot see an operator's
+    # interactive session. If this stalls again, that is the first thing to check,
+    # and the snapshot will now actually contain the evidence.
+    #
+    # Refusing outright was the wrong trade: it removes the only way to review
+    # anything over 50 KiB on an opencode seat, to avoid a failure that the stall
+    # detector and timeout already bound. Over the cap we read; far over it - past
+    # anything measured - we refuse, because an unbounded agentic read on a bundle
+    # nobody has ever successfully reviewed is a bet, not a default.
     $OPENCODE_ATTACH_LIMIT_BYTES = 51200
+    # Ceiling for the read-tool path. 668,389 bytes is verified end-to-end above;
+    # muse-spark has separately carried 2,396,233. 1 MB sits between "measured" and
+    # "known to have worked once", which is the honest place for a default.
+    $OPENCODE_READ_TOOL_MAX_BYTES = 1048576
     $forceReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
     $forceAttach = $env:ERA_OPENCODE_READ_TOOL -and ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false')
     $bundleBytes = 0
     try { $bundleBytes = (Get-Item -LiteralPath $BundlePath).Length } catch { $bundleBytes = 0 }
     $overAttachLimit = $bundleBytes -gt $OPENCODE_ATTACH_LIMIT_BYTES
-    $useReadTool = $forceReadTool
+    $useReadTool = $forceReadTool -or ($overAttachLimit -and -not $forceAttach)
 
-    # RETIRED 2026-08-31: over the cap, this used to switch to the Read-tool
-    # prompt AUTOMATICALLY. It now refuses instead, in about a second, having
-    # spent nothing. Read-tool mode survives only behind an explicit
-    # ERA_OPENCODE_READ_TOOL=1.
-    #
-    # WHY. The Read-tool path was believed to "never start" -- every artifact in
-    # %TEMP%\opencode-stall-debug is 0 bytes while the error line reports a
-    # non-zero `total bytes`. That contradiction was a BUG IN THE SNAPSHOT, not
-    # evidence: $stdoutSink.Length counts bytes still sitting in the FileStream
-    # write buffer, and the snapshot copied the file WITHOUT FLUSHING (fixed
-    # below). Reproduced 2026-08-31: 218 bytes written -> sink.Length=218,
-    # on-disk length=0.
-    #
-    # The one artifact that did survive (4,096 bytes -- exactly one buffer flush,
-    # 2026-08-25, a 79,294-byte bundle) shows what actually happens:
-    #
-    #     -> Read .external-reviews/<slug>/round-1-bundle.xml
-    #     -> Read .external-reviews/<slug>/round-1-bundle.xml [offset=822]
-    #     $  Get-ChildItem -LiteralPath "...\<slug>" -Force | Select-Object ...
-    #     $  Get-Content -LiteralPath "...\round-1-config.json"; ... round-1-prompt.md
-    #
-    # It starts fine. It then CHUNK-READS the bundle 822 lines at a time and
-    # wanders into arbitrary shell commands -- listing era's own artifact
-    # directory and reading era's config and prompt files. That is an unbounded
-    # agentic exploration with no bound on how long it runs.
-    #
-    # IT IS UNRELIABLE, NOT UNIFORMLY FATAL -- and the difference is the model,
-    # not the size:
-    #
-    #   deepseek-flash  74,740 B    stalled, 600s, nothing
-    #   deepseek-flash  79,294 B    stalled, 600s, nothing
-    #   deepseek-flash  2,396,233 B failed
-    #   muse-spark      2,396,233 B SUCCEEDED -- a 7,628-byte review with real
-    #                               file:line citations across the bundle
-    #
-    # So a per-model allowlist is conceivable. It is not what this does, for two
-    # reasons: the one success is n=1, and the failure costs 600s of wall clock
-    # plus the full input spend and returns nothing, while the refusal costs a
-    # second. Selective reading is also a DIFFERENT review -- the model chooses
-    # what it looks at -- which is not what a caller asking for a review of a
-    # curated bundle asked for. ERA_OPENCODE_READ_TOOL=1 remains for the operator
-    # who wants to take that bet deliberately.
-    #
-    # A path that hangs for 600s and returns nothing is worse than a refusal, and
-    # era's caller-side preflight (Get-EraBundleDeliveryPlan) now refuses this
-    # before a single seat is dispatched. This is the adapter's own backstop for
-    # a direct call that bypassed it.
     if ($overAttachLimit -and $forceAttach) {
         Write-Host "[opencode] WARNING: bundle is $bundleBytes bytes but ERA_OPENCODE_READ_TOOL=0 forces attach - opencode will TRUNCATE at $OPENCODE_ATTACH_LIMIT_BYTES bytes; the review covers only the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))%."
     }
-    elseif ($overAttachLimit -and $useReadTool) {
-        Write-Host "[opencode] WARNING: bundle is $bundleBytes bytes and ERA_OPENCODE_READ_TOOL=1 forces the RETIRED Read-tool path. Measured behaviour: the model chunk-reads the bundle and runs unrelated shell commands until the timeout, returning nothing. Expect to lose this seat."
+    elseif ($useReadTool -and $bundleBytes -gt $OPENCODE_READ_TOOL_MAX_BYTES -and -not $forceReadTool) {
+        throw ("opencode cannot review this bundle: it is $bundleBytes bytes. Attaching truncates at $OPENCODE_ATTACH_LIMIT_BYTES bytes " +
+               "(the reviewer would see the first $([math]::Round($OPENCODE_ATTACH_LIMIT_BYTES * 100 / $bundleBytes, 1))% and report on it as if it were the whole thing), and the Read-tool path " +
+               "is only verified to $OPENCODE_READ_TOOL_MAX_BYTES bytes. Curate with -IncludeFiles, or send this round to a reviewer whose channel can carry it " +
+               "(agy reads from disk). Set ERA_OPENCODE_READ_TOOL=1 to try the read anyway. Nothing was dispatched and nothing was spent.")
+    }
+    elseif ($overAttachLimit) {
+        Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
     }
     elseif ($overAttachLimit) {
         throw ("opencode cannot review this bundle: it is $bundleBytes bytes and opencode silently truncates an attached file at $OPENCODE_ATTACH_LIMIT_BYTES bytes " +

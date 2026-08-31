@@ -34,10 +34,20 @@ BeforeAll {
 
 Describe 'Get-EraBackendDelivery' -Tag Unit {
 
-    It 'reports the measured 50 KiB attach cap for opencode' {
-        $d = Get-EraBackendDelivery -Backend 'opencode'
+    It 'reports the measured 50 KiB attach cap for a bundle under it' {
+        $d = Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 40000
         $d.Mode       | Should -Be 'attach'
         $d.LimitBytes | Should -Be 51200
+    }
+
+    It 'switches to read-tool above the attach cap, with a far higher ceiling' {
+        # Verified 2026-08-31 with canaries at 25/50/75% depth: both opencode seats
+        # covered 109,066 / 314,720 / 668,389-byte bundles in full. Reporting
+        # 'attach' here would make the round summary lie about how the bundle
+        # actually reached the seat -- the one thing that field is for.
+        $d = Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 300000
+        $d.Mode       | Should -Be 'read-tool'
+        $d.LimitBytes | Should -Be 1048576
     }
 
     It 'bounds claude by tokens, because the bundle is inlined as the prompt' {
@@ -99,12 +109,30 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
         $p.Seats[0].Ok | Should -BeTrue
     }
 
-    It 'catches the 74,740-byte bundle that really stalled' {
+    It 'sends a 74,740-byte bundle by read-tool rather than refusing it' {
+        # This one DID stall on 2026-08-31, which is what got the read-tool path
+        # retired. Retiring it was wrong: a 109,066-byte bundle came back fully
+        # covered on this same seat, so the stall was not about size. Refusing here
+        # would remove the only way to review anything over 50 KiB on opencode.
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
             -BundleBytes 74740 -BundleTokens 19000
-        $p.OverCount     | Should -Be 1
-        $p.Seats[0].Ok   | Should -BeFalse
-        $p.Seats[0].Reason | Should -Match '51,200'
+        $p.OverCount     | Should -Be 0
+        $p.Seats[0].Mode | Should -Be 'read-tool'
+    }
+
+    It 'covers the three sizes verified end-to-end with canaries' {
+        foreach ($b in @(109066, 314720, 668389)) {
+            $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash','muse-spark') `
+                -Registry $script:Reg -BundleBytes $b -BundleTokens ([int]($b/3.65))
+            $p.OverCount | Should -Be 0 -Because "a $b-byte bundle was verified covered on both seats"
+        }
+    }
+
+    It 'still refuses past the point anything has been verified' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
+            -BundleBytes 2396233 -BundleTokens 711253
+        $p.OverCount   | Should -Be 1
+        $p.Seats[0].Ok | Should -BeFalse
     }
 
     It 'catches the 2,396,233-byte bundle that really overflowed opus' {
@@ -133,6 +161,12 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
         $p.TightestBytes | Should -Be 51200
     }
 
+    It 'reports the read-tool ceiling as the tightest once past the attach cap' {
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','gemini','deepseek-flash') `
+            -Registry $script:Reg -BundleBytes 300000 -BundleTokens 82000
+        $p.TightestBytes | Should -Be 1048576
+    }
+
     It 'never refuses a seat whose channel has no measured limit' {
         # An unmeasured ceiling must not become a refusal.
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('gemini','deepseek-api') -Registry $script:Reg `
@@ -149,14 +183,14 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
 
     It 'names each seat, its channel and its verdict in the printed notice' {
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('opus','deepseek-flash') -Registry $script:Reg `
-            -BundleBytes 74740 -BundleTokens 19000
+            -BundleBytes 2396233 -BundleTokens 711253
         $text = $p.Lines -join "`n"
-        $text | Should -Match 'deepseek-flash.*attach'
+        $text | Should -Match 'deepseek-flash.*read-tool'
         $text | Should -Match 'CANNOT FIT'
         $text | Should -Match 'opus.*stdin'
     }
 
-    It 'catches a follow-up round pushed over the cap by carried-forward review text' {
+    It 'moves a follow-up round to read-tool when carried-forward text crosses the cap' {
         # ERA_PREVIOUS_ROUND_MAX_CHARS is 80,000 chars, and the substituted
         # previous round goes into the prompt, which repomix embeds in the
         # bundle. So a round-2 opencode seat can cross the 51,200-byte attach cap
@@ -164,7 +198,7 @@ Describe 'Get-EraBundleDeliveryPlan' -Tag Unit {
         # bundle rather than the sources, which is the only layer that sees this.
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('deepseek-flash') -Registry $script:Reg `
             -BundleBytes 84000 -BundleTokens 21000
-        $p.OverCount | Should -Be 1
+        $p.Seats[0].Mode | Should -Be 'read-tool'
     }
 }
 
@@ -176,7 +210,7 @@ Describe 'Get-EraDeliveryModeMap' -Tag Unit {
         $m = Get-EraDeliveryModeMap -Plan $p
         $m['opus']           | Should -Be 'stdin'
         $m['gemini']         | Should -Be 'disk-read'
-        $m['deepseek-flash'] | Should -Be 'attach'
+        $m['deepseek-flash'] | Should -Be 'attach'   # 1,000-byte bundle -> under the cap
     }
 
     It 'returns an empty map for a null plan rather than throwing' {

@@ -1,28 +1,32 @@
 <#
-  The retired Read-tool path, and the snapshot bug that hid why it failed.
+  Read-tool delivery over the attach cap, and the snapshot bug that once hid how
+  it behaves.
 
-  DIAGNOSIS (2026-08-31). The Read-tool path was believed to "never start":
-  every artifact in %TEMP%\opencode-stall-debug is 0 bytes, while the error line
-  beside it reports a non-zero `total bytes`. That contradiction was a BUG IN THE
-  SNAPSHOT, not evidence.
+  THE SNAPSHOT BUG. Every artifact in %TEMP%\opencode-stall-debug is 0 bytes while
+  the error line beside it reports a non-zero `total bytes`. That contradiction was
+  read as "the process produced nothing", and it was wrong:
 
-    $stdoutSink.Length  counts bytes still sitting in the FileStream write buffer
+    $stdoutSink.Length       counts bytes still in the FileStream write buffer
     Get-Content / Copy-Item  see only what has reached disk
 
-  So every snapshot under 4 KB came back empty. Reproduced: 218 bytes copied in ->
-  sink.Length = 218, on-disk length = 0, after Flush() -> 218. The same 218 as the
-  2026-08-31 timeout log.
+  So every snapshot under 4 KB came back empty. Reproduced below: 218 bytes copied
+  in -> sink.Length = 218, on-disk length = 0, after Flush() -> 218. The same 218 as
+  the 2026-08-31 timeout log. A broken measuring instrument, not evidence.
 
-  The ONE artifact that survived (4,096 bytes — exactly one buffer flush) shows
-  what actually happens on that path:
+  WHAT THE PATH ACTUALLY DOES. Measured 2026-08-31 with CANARIES planted at widely
+  separated offsets and reported back verbatim before the review -- a review coming
+  back does not prove coverage, since a model can read the head, skip to the
+  instructions at the tail, and write something plausible.
 
-      -> Read .external-reviews/<slug>/round-1-bundle.xml
-      -> Read .external-reviews/<slug>/round-1-bundle.xml [offset=822]
-      $  Get-ChildItem -LiteralPath "...\<slug>" -Force | Select-Object ...
-      $  Get-Content -LiteralPath "...\round-1-config.json"; ... round-1-prompt.md
+    bundle      lines    canaries       wall   result
+    109,066 B    2,066   1/1 both seats   57s  real reviews, file:line cited
+    314,720 B    5,226   2/2 both seats   85s  real reviews
+    668,389 B   10,773   3/3 both seats  256s  real reviews
 
-  It starts fine, chunk-reads the bundle, then wanders into unrelated shell
-  commands until the budget is gone. Never "never starts" — never finishes.
+  IT IS STILL INTERMITTENT and that is unexplained -- deepseek-flash lost seats at
+  74,740 B and 79,294 B, sizes these probes clear comfortably. Not size, not model.
+  The leading untested hypothesis is concurrency with an operator's interactive
+  `opencode -c` session, which era's run mutex cannot see.
 #>
 
 BeforeAll {
@@ -69,17 +73,25 @@ Describe 'the stall snapshot tells the truth' -Tag Unit {
     }
 }
 
-Describe 'the Read-tool path is retired' -Tag Unit {
+Describe 'the Read-tool path carries bundles over the attach cap' -Tag Unit {
 
-    It 'refuses an oversized bundle without spawning opencode' {
-        # Behavioural, not a source assertion: the refusal must happen before
-        # Process::Start, so it costs a second and no tokens rather than 600s.
+    It 'does NOT refuse a bundle in the verified range' {
+        # Regression guard for the day this was retired. 74,740 bytes is the size
+        # that stalled on 2026-08-31 and triggered the retirement; a 109,066-byte
+        # bundle was afterwards covered in full on this same seat, so refusing here
+        # removes a capability over a failure that is not about size.
+        . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
+        $script:Src | Should -Match '\$useReadTool\s*=\s*\$forceReadTool\s*-or\s*\(\$overAttachLimit'
+        $script:Src | Should -Match '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*1048576'
+    }
+
+    It 'refuses past the verified ceiling, without spawning opencode' {
         . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
         $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-oc-" + [guid]::NewGuid().ToString('N').Substring(0,8))
         $null = New-Item -ItemType Directory -Path $dir -Force
         try {
             $bundle = Join-Path $dir 'bundle.xml'
-            [System.IO.File]::WriteAllBytes($bundle, [byte[]]::new(60000))   # > 51,200
+            [System.IO.File]::WriteAllBytes($bundle, [byte[]]::new(2000000))   # > 1 MB
             $prompt = Join-Path $dir 'prompt.md'; 'review this' | Set-Content -LiteralPath $prompt
             $resp   = Join-Path $dir 'response.md'
 
@@ -89,31 +101,8 @@ Describe 'the Read-tool path is retired' -Tag Unit {
                 Should -Throw -ExpectedMessage '*opencode cannot review this bundle*'
             $sw.Stop()
 
-            # A refusal, not a hang. The whole point.
             $sw.Elapsed.TotalSeconds | Should -BeLessThan 30
             Test-Path -LiteralPath $resp | Should -BeFalse
-        } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
-    }
-
-    It 'says how far over the cap the bundle is, and what to do about it' {
-        . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
-        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("era-oc-" + [guid]::NewGuid().ToString('N').Substring(0,8))
-        $null = New-Item -ItemType Directory -Path $dir -Force
-        try {
-            $bundle = Join-Path $dir 'bundle.xml'
-            [System.IO.File]::WriteAllBytes($bundle, [byte[]]::new(512000))  # 10x the cap
-            $prompt = Join-Path $dir 'prompt.md'; 'review this' | Set-Content -LiteralPath $prompt
-            $msg = $null
-            try {
-                Invoke-OpencodeReview -BundlePath $bundle -PromptPath $prompt `
-                    -ResponsePath (Join-Path $dir 'r.md') `
-                    -ModelInfo @{ model_id = 'opencode-go/deepseek-v4-flash' } -TimeoutSec 600
-            } catch { $msg = $_.Exception.Message }
-
-            $msg | Should -Match '512000 bytes'
-            $msg | Should -Match '10%'              # the fraction the model would have seen
-            $msg | Should -Match '-IncludeFiles'    # the way out
-            $msg | Should -Match 'retired'
         } finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
@@ -122,15 +111,18 @@ Describe 'the Read-tool path is retired' -Tag Unit {
         $script:Src | Should -Match "if \(-not \`$useReadTool\) \{[\s\S]{0,200}ArgumentList\.Add\('-f'\)"
     }
 
-    It 'records the evidence in the source, not just in a commit message' {
+    It 'records the canary measurements in the source, not just a commit message' {
         # The next person to hit this must find the measurement without git
-        # archaeology — the same standard the rest of this adapter is held to.
-        $script:Src | Should -Match 'chunk-read|CHUNK-READ'
-        # Including the COUNTER-example. The path is unreliable, not uniformly
-        # fatal -- muse-spark returned a real review on the same 2.4 MB bundle
-        # deepseek-flash failed on -- and a comment that hides that is arguing
-        # for the fix rather than recording what was measured.
-        $script:Src | Should -Match 'muse-spark'
-        $script:Src | Should -Match 'SUCCEEDED'
+        # archaeology -- the same standard the rest of this adapter is held to.
+        $script:Src | Should -Match 'CANARY'
+        $script:Src | Should -Match '668,389'
+        $script:Src | Should -Match '109,066'
+    }
+
+    It 'records that it is still intermittent, and the untested hypothesis' {
+        # The probes all pass; the historical stalls are real and unexplained. A
+        # comment reporting only the passes is arguing for its conclusion.
+        $script:Src | Should -Match '74,740'
+        $script:Src | Should -Match '(?i)concurrency'
     }
 }

@@ -7,12 +7,13 @@
   would have seen 7.3% of a 692 KB one — while still returning a well-formed review,
   so nothing in the pipeline noticed.
 
-  RETIRED 2026-08-31: over the cap the adapter used to switch to an agentic
-  Read-tool prompt. That path hangs for the full timeout and returns nothing
-  (three consecutive panels lost both opencode seats to it), so over the cap the
-  adapter now REFUSES. See backends/opencode.ps1 for the evidence.
+  Over the cap the adapter switches to an agentic Read-tool prompt. That was
+  briefly retired on 2026-08-31 on the reading that it "hangs and returns
+  nothing", and UN-retired the same day: the evidence for the hang was a broken
+  snapshot, and canary probes showed both seats covering 668,389-byte bundles in
+  full. See backends/opencode.ps1 for both halves of that.
 
-  These pin the source-level contract of the attach-vs-refuse decision. They are
+  These pin the source-level contract of the attach-vs-read decision. They are
   static assertions rather than a live opencode run: spawning the CLI in unit tests
   would be slow, networked and non-hermetic, and the thing that regressed is the
   DECISION, not the transport.
@@ -33,23 +34,17 @@ Describe 'opencode attach limit' -Tag Unit {
         $script:Src | Should -Match '\$overAttachLimit\s*=\s*\$bundleBytes\s*-gt\s*\$OPENCODE_ATTACH_LIMIT_BYTES'
     }
 
-    It 'no longer switches to the Read tool on size alone' {
-        # THE REGRESSION GUARD. `$useReadTool = $forceReadTool -or ($overAttachLimit ...)`
-        # is the retired auto-switch: it is what turned an oversized bundle into a
-        # 600s hang. useReadTool must now depend on the ENV VAR only.
-        $script:Src | Should -Not -Match '\$useReadTool\s*=\s*\$forceReadTool\s*-or'
-        $script:Src | Should -Match '\$useReadTool\s*=\s*\$forceReadTool\s*\r?\n'
+    It 'switches to the Read tool on size, so the model sees the whole bundle' {
+        # `-f` attachment is what truncates; over the cap we must not use it.
+        $script:Src | Should -Match '\$useReadTool\s*=\s*\$forceReadTool\s*-or\s*\(\$overAttachLimit'
     }
 
-    It 'refuses an oversized bundle instead of dispatching it' {
+    It 'refuses only past the point the read path has been verified' {
+        $script:Src | Should -Match '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*1048576'
         $script:Src | Should -Match 'throw \("opencode cannot review this bundle'
         # The refusal must say the round cost nothing, so a caller can tell it
         # apart from a void round that already spent money.
         $script:Src | Should -Match 'Nothing was dispatched and nothing was spent'
-    }
-
-    It 'keeps the Read-tool path reachable for diagnosis, with a loud warning' {
-        $script:Src | Should -Match 'ERA_OPENCODE_READ_TOOL=1 forces the RETIRED Read-tool path'
     }
 
     It 'still attaches for a small bundle (attach needs no tool calls and is faster)' {

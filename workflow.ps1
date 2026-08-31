@@ -3408,17 +3408,35 @@ function Get-EraBackendDelivery {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Backend,
-        [hashtable]$ModelInfo = @{}
+        [hashtable]$ModelInfo = @{},
+        # opencode is the one backend whose MODE depends on the bundle: at or under
+        # 51,200 bytes it attaches, above that it reads the file with its own Read
+        # tool. Reporting 'attach' for a read-tool round would make the summary lie
+        # about the thing it exists to explain.
+        [long]$BundleBytes = 0
     )
     $d = switch ($Backend) {
         'opencode' {
-            @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null
+            if ($BundleBytes -gt 51200) {
+                @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null
+                   # Verified end-to-end 2026-08-31 with canaries planted at 25/50/75%
+                   # depth and reported back before the review, on both default
+                   # opencode seats: 109,066 B (57s), 314,720 B (85s), 668,389 B
+                   # (256s) -- full coverage every time. muse-spark has separately
+                   # carried 2,396,233 B. 1 MB sits between measured and known-once.
+                   # It is intermittent in a way not yet explained -- see
+                   # backends/opencode.ps1 for the failure list and the concurrency
+                   # hypothesis.
+                   Basis = 'over the 51,200-byte attach cap opencode reads the bundle with its own Read tool; verified to 668,389 bytes on both seats 2026-08-31, ceiling set at 1,048,576' }
+            } else {
+                @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null
                # MEASURED, twice. 2026-08-03: DeepSeek V4 Flash reported its input
                # ending at line 1169 of a 9,234-line bundle; `head -1169` of that
                # file is 51,191 bytes and line 1170 crosses 51,200. 2026-08-31: a
                # 13,433-byte bundle returned a 7,957-byte review while a
                # 73,000-byte bundle on the same seat, same prompt, stalled out.
-               Basis = 'opencode silently truncates an attached file at exactly 50 KiB (measured 2026-08-03, re-confirmed 2026-08-31)' }
+                   Basis = 'opencode silently truncates an attached file at exactly 50 KiB (measured 2026-08-03, re-confirmed 2026-08-31), so this is the cap for ATTACH delivery only' }
+            }
         }
         'claude' {
             # MEASURED 2026-08-31 by bisection against the live CLI, replacing a
@@ -3503,7 +3521,7 @@ function Get-EraBundleDeliveryPlan {
         $backend = if ($info) { "$($info.backend)" } else { 'unknown' }
         $infoHash = @{}
         if ($info) { foreach ($k in @('max_bundle_bytes','max_bundle_tokens')) { if ($info.$k) { $infoHash[$k] = $info.$k } } }
-        $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash
+        $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash -BundleBytes $BundleBytes
 
         $ok = $true
         $reason = $null

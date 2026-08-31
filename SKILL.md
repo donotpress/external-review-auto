@@ -411,7 +411,7 @@ checks it against each selected seat:
 
 | Backend | Channel | Ceiling | Basis |
 |---|---|---|---|
-| `opencode` | `attach` (`-f`) | **51,200 bytes** | Measured. opencode silently truncates an attached file at exactly 50 KiB. |
+| `opencode` | `attach` (`-f`) at/under 51,200 B, `read-tool` above | **1,048,576 bytes** | Measured. Attaching truncates silently at exactly 50 KiB, so above that the model reads the bundle itself — verified to 668,389 B (see below). |
 | `claude` | `stdin` (inlined as the prompt) | **550,000 tokens** | **Measured 2026-08-31** (see below). |
 | `anthropic` | `inline-api` | 750,000 tokens | Derived from the model's 1M-token API window. Unmeasured — no API key on this host. |
 | `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
@@ -463,19 +463,36 @@ ceiling — roughly 200x looser than the tightest channel era dispatches to — 
 only when no `-IncludeFiles` was passed. All three failing rounds were curated rounds,
 so it never even ran.
 
-**The retired Read-tool path.** Above the attach cap, the opencode adapter used to tell
-the model to `Read` the bundle itself. Forensic evidence showed the model chunk-reading
-the bundle 822 lines at a time and then wandering into unrelated shell commands —
-listing era's own artifact directory and reading its config and prompt files — until the
-budget ran out. It is **unreliable rather than uniformly fatal**, and the variable is the
-model, not the size: `deepseek-flash` lost the seat on 74,740 / 79,294 / 2,396,233-byte
-bundles, while `muse-spark` returned a well-grounded 7,628-byte review on that same
-2.4 MB bundle. It still defaults to refusing, because the failure costs 600s and the full
-input spend while the refusal costs a second, and because selective reading is a
-*different* review — the model picks what it looks at. `ERA_OPENCODE_READ_TOOL=1` is
-there for taking that bet deliberately. Every stall artifact recorded before
-2026-08-31 is empty or cut at a 4,096-byte boundary because the snapshot read the capture
-files without flushing their write buffers; that is fixed, so new artifacts are real.
+**The Read-tool path — retired and un-retired the same day.** Above the attach cap the
+adapter tells the model to `Read` the bundle itself. On 2026-08-31 this was retired on
+the reading that it "hangs and returns nothing", and restored hours later. Both halves
+are worth recording, because the mistake was in the evidence, not the reasoning:
+
+- Every stall artifact was 0 bytes while the error line beside it reported non-zero
+  `total bytes`. That was read as "the process produced nothing". It was actually a bug
+  in the snapshot — `FileStream.Length` counts bytes still in the write buffer, and the
+  snapshot copied the file without flushing. The instrument was broken, not the path.
+- Measured properly with **canaries** — marker lines planted at widely separated offsets
+  and asked for back verbatim *before* the review, because a review coming back does not
+  prove coverage (a model can read the head, skip to the instructions at the tail, and
+  write something plausible):
+
+| bundle | lines | canaries found | wall | result |
+|---|---|---|---|---|
+| 109,066 B | 2,066 | 1/1, both seats | 57 s | real reviews, `file:line` cited |
+| 314,720 B | 5,226 | 2/2, both seats | 85 s | real reviews |
+| 668,389 B | 10,773 | 3/3, both seats | 256 s | real reviews |
+
+668 KB is **13x the attach cap**, with coverage confirmed at 25/50/75% depth. Refusing
+outright removed the only way to review anything over 50 KiB on an opencode seat, to
+avoid a failure the stall detector and timeout already bound — the wrong trade.
+
+**It is still intermittent, and that is unexplained.** `deepseek-flash` lost seats at
+74,740 B and 79,294 B — sizes these probes clear comfortably — so it is neither size nor
+model. The leading untested hypothesis is **concurrency**: interactive `opencode -c`
+sessions were live during the failing dispatches and none were during the probes, and
+era's run mutex serialises its own seats but cannot see an operator's session. If it
+stalls again, check that first — and the snapshot will now actually hold the evidence.
 
 The round summary now names each seat's delivery mode (`via=attach`, `via=stdin`, …),
 and `round-N-metadata.json` records `delivery_mode` per reviewer plus `bundle_bytes`.
