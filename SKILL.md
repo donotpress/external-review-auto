@@ -323,6 +323,7 @@ When round N's response contains critical issues:
 | `--diff` | `-Diff` | Round 2+: only bundle changed files (opt-in) |
 | `--auto-detect` | `-AutoDetect` | Derive include list from `git status` + `HEAD~1` (human use) |
 | `--spec-review <path>` | `-SpecReview <path>` | One-flag spec review: auto-fills template + bundles spec |
+| `--blind-seat <preset>` | `-BlindSeat <preset>` | Give ONE reviewer the bundle with comments blanked, while the others review the normal one. Attacks premise-blindness: a bare number invites *"where did this come from?"*, an explained number suppresses it. Line numbers are preserved, so `file:line` citations from that seat stay valid. |
 | `--premise-check` | `-PremiseCheck` | Append a premise-checking section to this round's prompt: which numbers were never measured, which documented claims no code path exercises, which tests would pass if the thing they cover were broken. Round-level (every seat sees it) — the prompt is embedded in the bundle, so a per-seat lens would need a per-seat bundle. |
 | `--force-bundle-size` | `-ForceBundleSize` | Dispatch reviewers whose delivery channel cannot carry the bundle. Without it era refuses (exit 1, nothing spent). See *Bundle delivery limits*. **`-Force` does not do this.** |
 

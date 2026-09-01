@@ -1735,6 +1735,11 @@ function Invoke-ReviewerDispatch {
         [hashtable]$AgyModelMap = @{},
         [hashtable]$ModelOverrides = @{},
         [hashtable]$ProviderOverrides = @{},
+        # preset -> an ALTERNATE bundle path for that seat only. Same shape as the
+        # two override maps above. Used by -BlindSeat to hand one reviewer a
+        # comment-stripped copy while every other seat reviews the normal bundle,
+        # so the round is an A/B rather than a different round.
+        [hashtable]$BundleOverrides = @{},
         # Bundle size in tokens (from repomix). Used to scale TimeoutSec and
         # Wait-Job timeout: reasoning-heavy models on large bundles need 8+ min
         # of silent thinking before first output. Without scaling, a 100k-token
@@ -1792,6 +1797,7 @@ function Invoke-ReviewerDispatch {
                     -Family $modelInfo.agy_model_family -Tier $modelInfo.agy_model_tier
             }
         } else { $null }
+        $seatBundle = if ($BundleOverrides.ContainsKey($r) -and $BundleOverrides[$r]) { $BundleOverrides[$r] } else { $BundlePath }
         $job = Start-ThreadJob -Name "review-$r" -ThrottleLimit 4 -ScriptBlock {
             param($adapterPath, $bp, $pp, $rp, $mi, $to, $fnName, $agyHint, $modelOverride, $opencodeProvider, $resolvedAgyModel, $pidFile)
             # Started here, not inside the try: on the exception path the adapter
@@ -1900,7 +1906,7 @@ function Invoke-ReviewerDispatch {
                     TruncationWarning = $null
                 }
             }
-        } -ArgumentList @($adapterPath, $BundlePath, $PromptPath, $respPath, $modelInfo, $TimeoutSec, $fnName, $AgyModelHint, $ModelOverrides[$r], $opencodeProvider, $resolvedAgyModelForReviewer, $pidPath)
+        } -ArgumentList @($adapterPath, $seatBundle, $PromptPath, $respPath, $modelInfo, $TimeoutSec, $fnName, $AgyModelHint, $ModelOverrides[$r], $opencodeProvider, $resolvedAgyModelForReviewer, $pidPath)
         [pscustomobject]@{ Job = $job; Preset = $r; ResponsePath = $respPath; PidPath = $pidPath }
     }
 
@@ -3783,4 +3789,115 @@ function Test-EraResponseCitations {
     }
     $result.Lines = @($lines)
     return $result
+}
+
+# --- Comment-stripped bundle for one seat (2026-09-01) -----------------------
+# Proposed by opus in the design panel, and the only idea in that round that no
+# other seat raised.
+#
+# THE ARGUMENT. This codebase's comments are unusually strong -- non-obvious
+# decisions carry the measurement that produced them -- and that is exactly why a
+# WRONG one is dangerous: it is persuasive. The 150,000-token ceiling that was 4x
+# too tight came with a confident explanation of its own derivation, and every
+# reviewer that read it inherited that premise before forming its own. A bare
+# `150000` invites "where did this number come from?"; an explained `150000`
+# suppresses the question. That is not a reviewer weakness -- it is the comment
+# doing its job.
+#
+# So: give ONE seat the code with the narrative removed. It attacks premise
+# blindness directly, costs one seat per round, and unlike a coverage probe it
+# does not mutate the artifact the OTHER seats review.
+#
+# WHY NOT repomix's own --remove-comments. Checked against 1.12.0: its
+# StripCommentsManipulator covers 33 extensions and `.ps1` is not among them
+# (core/file/fileManipulate.js). This skill is almost entirely PowerShell, so the
+# native option is a no-op on precisely the files that matter here.
+#
+# LINE NUMBERS ARE PRESERVED, deliberately and load-bearingly. Deleting comment
+# lines would shift every line after them, and era now validates `file:line`
+# citations against the bundle -- so a stripped seat would have every citation
+# flagged as fabricated. The comment TEXT goes; the numbered line stays.
+
+function Remove-EraBundleComments {
+    <#
+    .SYNOPSIS
+        Copy a repomix XML bundle with whole-line comments blanked, preserving
+        every line number and the file structure. Returns the output path.
+
+    .DESCRIPTION
+        Only lines whose FIRST non-whitespace character begins a comment are
+        blanked. A trailing comment after code survives -- stripping those needs a
+        real parser, and mangling a `#` inside a string literal would corrupt the
+        code under review, which is a worse failure than leaving a comment.
+
+        Block comments are tracked per file, for PowerShell, the C family, CSS,
+        SQL, Python triple-quotes and HTML/Markdown. The exact delimiter pairs are
+        in $blockPairs below rather than written out here: a literal PowerShell
+        block-comment terminator inside this very docstring closes it early, which
+        it duly did on the first attempt. Coverage is deliberately partial, and
+        this says so rather than the code pretending otherwise.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BundlePath,
+        [Parameter(Mandatory)][string]$OutputPath
+    )
+    $lineMarkers = @{
+        '.ps1'='#'; '.psm1'='#'; '.psd1'='#'; '.py'='#'; '.sh'='#'; '.bash'='#'; '.rb'='#'
+        '.yml'='#'; '.yaml'='#'; '.toml'='#'; '.r'='#'; '.pl'='#'
+        '.js'='//'; '.ts'='//'; '.jsx'='//'; '.tsx'='//'; '.go'='//'; '.java'='//'; '.c'='//'
+        '.cpp'='//'; '.h'='//'; '.hpp'='//'; '.cs'='//'; '.rs'='//'; '.kt'='//'; '.swift'='//'
+        '.php'='//'; '.sol'='//'; '.dart'='//'; '.scala'='//'
+        '.sql'='--'; '.lua'='--'
+    }
+    $blockPairs = @{
+        '.ps1'=@('<#','#>'); '.psm1'=@('<#','#>')
+        '.js'=@('/*','*/'); '.ts'=@('/*','*/'); '.jsx'=@('/*','*/'); '.tsx'=@('/*','*/')
+        '.go'=@('/*','*/'); '.java'=@('/*','*/'); '.c'=@('/*','*/'); '.cpp'=@('/*','*/')
+        '.h'=@('/*','*/'); '.hpp'=@('/*','*/'); '.cs'=@('/*','*/'); '.rs'=@('/*','*/')
+        '.css'=@('/*','*/'); '.scss'=@('/*','*/'); '.less'=@('/*','*/'); '.sql'=@('/*','*/')
+        '.md'=@('<!--','-->'); '.html'=@('<!--','-->'); '.xml'=@('<!--','-->'); '.vue'=@('<!--','-->')
+    }
+    $stripped = 0
+    $out = [System.Collections.Generic.List[string]]::new()
+    $ext = ''; $inBlock = $false; $blockEnd = $null
+
+    foreach ($line in [System.IO.File]::ReadLines($BundlePath)) {
+        if ($line -match '^<file path="([^"]+)">') {
+            $ext = [System.IO.Path]::GetExtension($matches[1]).ToLowerInvariant()
+            $inBlock = $false; $blockEnd = $null
+            $out.Add($line); continue
+        }
+        if ($line -match '^</file>') { $inBlock = $false; $out.Add($line); continue }
+
+        # Content lines are `  <n>: <text>`; anything else is bundle scaffolding.
+        if (-not ($line -match '^(\s*)(\d+):(.*)$')) { $out.Add($line); continue }
+        $prefix = "$($matches[1])$($matches[2]):"
+        $body   = $matches[3]
+        $trim   = $body.TrimStart()
+
+        if ($inBlock) {
+            $stripped++
+            if ($blockEnd -and $body -match [regex]::Escape($blockEnd)) { $inBlock = $false; $blockEnd = $null }
+            $out.Add($prefix); continue
+        }
+        $isComment = $false
+        $lm = $lineMarkers[$ext]
+        if ($lm -and $trim.StartsWith($lm)) { $isComment = $true }
+        $bp = $blockPairs[$ext]
+        if (-not $isComment -and $bp -and $trim.StartsWith($bp[0])) {
+            $isComment = $true
+            # Same-line open+close (`<# note #>`) does not open a block.
+            $after = $trim.Substring($bp[0].Length)
+            if (-not ($after -match [regex]::Escape($bp[1]))) { $inBlock = $true; $blockEnd = $bp[1] }
+        }
+        if (-not $isComment -and $ext -eq '.py' -and ($trim.StartsWith('"""') -or $trim.StartsWith("'''"))) {
+            $q = $trim.Substring(0,3); $isComment = $true
+            if ($trim.Length -le 3 -or -not ($trim.Substring(3) -match [regex]::Escape($q))) { $inBlock = $true; $blockEnd = $q }
+        }
+        if ($isComment) { $stripped++; $out.Add($prefix) } else { $out.Add($line) }
+    }
+    [System.IO.File]::WriteAllLines($OutputPath, $out)
+    Write-Host "[era] Comment-stripped bundle: $stripped comment line(s) blanked, line numbers preserved -> $([System.IO.Path]::GetFileName($OutputPath))"
+    return $OutputPath
 }

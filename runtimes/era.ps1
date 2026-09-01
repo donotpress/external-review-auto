@@ -97,6 +97,15 @@ param(
     # one repomix run per reviewer. Alternating by ROUND costs nothing and
     # reproduces exactly the A/B that produced the evidence for this feature.
     [switch]$PremiseCheck,
+    # -BlindSeat <preset>: give ONE reviewer the bundle with comments blanked.
+    # This codebase's comments are unusually strong, which is exactly why a wrong
+    # one is persuasive: the 4x-too-tight ceiling came with a confident account of
+    # its own derivation, and every reviewer that read it inherited that premise.
+    # A bare number invites "where did this come from?"; an explained one
+    # suppresses the question. One seat reading the code without the narrative
+    # attacks that directly, and because the other seats keep the normal bundle
+    # the round stays an A/B rather than becoming a different round.
+    [string]$BlindSeat,
     # -AllowDirtyTree: dispatch even though the working tree has uncommitted
     # changes. Deliberately SEPARATE from -Force for the same reason as
     # -ForceBroadScope: -Force means "skip the COST prompt" and the skill's own
@@ -1949,11 +1958,29 @@ Be terse. If a section is empty, write "(none)".
         exit 2
     }
 
+    # --- Comment-stripped seat (2026-09-01) ----------------------------------
+    # Built AFTER repomix, from the finished bundle, so the stripped copy is
+    # byte-comparable to what every other seat sees. Line numbers are preserved by
+    # Remove-EraBundleComments -- deleting comment lines would shift every line
+    # after them and era now validates file:line citations against the bundle, so
+    # a stripped seat would have all of its citations flagged as fabricated.
+    $bundleOverrides = @{}
+    if ($BlindSeat) {
+        if ($approvedList -notcontains $BlindSeat) {
+            Write-Host "[era] WARNING: -BlindSeat '$BlindSeat' is not in this round's reviewer list ($($approvedList -join ', ')); no seat will be blinded."
+        } else {
+            $blindPath = Join-Path $reviewDir "round-$round-bundle-blind.xml"
+            $bundleOverrides[$BlindSeat] = Remove-EraBundleComments -BundlePath $bundlePath -OutputPath $blindPath
+            Write-Host "[era] '$BlindSeat' reviews the comment-stripped bundle; the other seat(s) review the normal one."
+        }
+    }
+
     $results = Invoke-ReviewerDispatch -ReviewerList $approvedList `
         -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
         -ReviewDir $reviewDir -Round $round -AgyModelHint $resolvedAgyHint `
         -AgyModelMap $agyModelMap `
         -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
+        -BundleOverrides $bundleOverrides `
         -BundleTokens $tokenCount
 
     # --- Response contract (P1) ---------------------------------------------
