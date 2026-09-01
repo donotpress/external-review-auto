@@ -21,7 +21,7 @@ pwsh -Command "Invoke-Pester -Path tests/Get-AgyTranscriptResponse.Tests.ps1"
 pwsh -Command "Invoke-Pester -Path tests/ -Output Detailed"
 ```
 
-Tests are pure PowerShell with no network or live backend spawning (953 tests as of v2.6). Most are fast; a few (`Resolve`, `SpecReview`, `Invoke-Era`, `AutoDetect`) fork `pwsh` to exercise `era.ps1`/`resolve.ps1` end-to-end, so a full run is **~8 min** (one `Slow`-tagged ThreadJob test alone takes ~30s; exclude it with `-ExcludeTagFilter Slow`). No external dependencies.
+Tests are pure PowerShell with no network or live backend spawning (956 tests as of v2.6.2). Most are fast; a few (`Resolve`, `SpecReview`, `Invoke-Era`, `AutoDetect`) fork `pwsh` to exercise `era.ps1`/`resolve.ps1` end-to-end, so a full run is **~8 min** (one `Slow`-tagged ThreadJob test alone takes ~30s; exclude it with `-ExcludeTagFilter Slow`). No external dependencies.
 
 ## What's covered
 

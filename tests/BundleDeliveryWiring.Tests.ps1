@@ -124,6 +124,42 @@ Describe 'registry ceilings reach the real dispatch path' -Tag Unit {
         } finally { Remove-Item -LiteralPath $box.Root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
+    It '-PremiseCheck lands in the BUNDLE the reviewer receives' {
+        # THE GAP THIS CLOSES. -PremiseCheck shipped in v2.5 with source-assertion
+        # tests only: they checked that the Add-Content call exists and sits before
+        # repomix, which would pass against an implementation that wrote to the
+        # wrong file, wrote nothing, or ran after the bundle was sealed. Exactly
+        # the class of test this project spent two days finding elsewhere.
+        #
+        # Free and hermetic: the registry override forces a preflight refusal, so
+        # era builds the bundle and then exits 1 without dispatching a reviewer.
+        # The bundle is the artifact under test, and no money changes hands.
+        $box = New-EraSandbox -RegistryOverrides @{ 'deepseek-flash' = @{ max_bundle_bytes = 4096 } }
+        try {
+            $r = Invoke-EraInSandbox -Box $box -ExtraArgs @('-PremiseCheck')
+            $r.Exit | Should -Be 1
+            $r.Text | Should -Match 'Premise check appended'
+
+            $bundle = Get-ChildItem -LiteralPath (Join-Path $box.Repo '.external-reviews/wiring') -Filter 'round-*-bundle.xml' |
+                        Select-Object -First 1
+            $bundle | Should -Not -BeNullOrEmpty -Because 'repomix must have run before the gate refused'
+            $text = Get-Content -Raw -LiteralPath $bundle.FullName
+            $text | Should -Match 'Premise check \(required'
+            $text | Should -Match 'Which numbers here were never measured'
+            $text | Should -Match 'would still pass if the thing they cover were broken'
+        } finally { Remove-Item -LiteralPath $box.Root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'leaves the bundle untouched when -PremiseCheck is not passed' {
+        $box = New-EraSandbox -RegistryOverrides @{ 'deepseek-flash' = @{ max_bundle_bytes = 4096 } }
+        try {
+            $null = Invoke-EraInSandbox -Box $box
+            $bundle = Get-ChildItem -LiteralPath (Join-Path $box.Repo '.external-reviews/wiring') -Filter 'round-*-bundle.xml' |
+                        Select-Object -First 1
+            (Get-Content -Raw -LiteralPath $bundle.FullName) | Should -Not -Match 'Premise check \(required'
+        } finally { Remove-Item -LiteralPath $box.Root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
     It 'era.ps1 carries the delivery keys into the registry hash it dispatches with' {
         # Belt and braces for the exact omission: the projection is explicit, so a
         # future field added to _registry.json is dropped unless named here too.
