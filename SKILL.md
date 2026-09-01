@@ -323,6 +323,7 @@ When round N's response contains critical issues:
 | `--diff` | `-Diff` | Round 2+: only bundle changed files (opt-in) |
 | `--auto-detect` | `-AutoDetect` | Derive include list from `git status` + `HEAD~1` (human use) |
 | `--spec-review <path>` | `-SpecReview <path>` | One-flag spec review: auto-fills template + bundles spec |
+| `--premise-check` | `-PremiseCheck` | Append a premise-checking section to this round's prompt: which numbers were never measured, which documented claims no code path exercises, which tests would pass if the thing they cover were broken. Round-level (every seat sees it) — the prompt is embedded in the bundle, so a per-seat lens would need a per-seat bundle. |
 | `--force-bundle-size` | `-ForceBundleSize` | Dispatch reviewers whose delivery channel cannot carry the bundle. Without it era refuses (exit 1, nothing spent). See *Bundle delivery limits*. **`-Force` does not do this.** |
 
 ### LLM-driven file selection
@@ -417,7 +418,17 @@ checks it against each selected seat:
 | `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
 | `geminiapi`, `openaicompat` | `inline-api` | not measured | Reported as unknown and never refused — inventing a ceiling would refuse rounds that work. |
 
-A seat over its ceiling makes era **refuse the round with exit 1** — nothing dispatched,
+Each ceiling is classified by **how it was arrived at** — `measured` (someone ran
+the experiment), `chosen` (a deliberate policy number, including an operator's own
+registry override), `derived` (inferred from a vendor's advertised window or an
+analogy), or `none`. **A `derived` ceiling warns and lets the round through; it is
+not allowed to refuse.** Refusing on a number nobody validated is how a gate
+removes capability while looking like it is working — `anthropic` once carried an
+enforceable 750,000 tokens derived as "a 1M window less ~25%", the identical
+derivation that made the `claude` ceiling 4x too tight. That rule existed in prose
+in two places with no enforcement; it is now a mechanism.
+
+A seat over a `measured` or `chosen` ceiling makes era **refuse the round with exit 1** — nothing dispatched,
 nothing spent, safe to re-run after curating. Pass `-ForceBundleSize` (or
 `ERA_BUNDLE_FORCE=1`) to dispatch the doomed seats anyway; era then warns per seat and
 tells you what to expect. A preset may override its ceiling with `max_bundle_bytes` /
@@ -437,11 +448,28 @@ so a silently-compacted prompt is exactly what this gate exists to prevent).
 
 | repomix tokens | bytes | result |
 |---|---|---|
-| 600,000 | 2,021,400 | **canary returned — full prompt seen** (68s) |
+| 600,000 | 2,021,400 | **canary returned — prompt reached the model** (68s) |
 | 630,000 | 2,122,470 | `Prompt is too long` (7s) |
 | 660,000 | 2,223,540 | `Prompt is too long` (6s) |
 | 700,000 | 2,358,300 | `Prompt is too long` (6s) |
 | 711,253 | 2,396,233 | `Prompt is too long` — the real 2026-08-30 round |
+
+> **What the canaries prove.** A returned marker proves **retrievability** — the
+> channel carried the bytes and the model could locate them — **not** that it read
+> the content in between; on the read-tool path a model can find a marker by
+> searching. What supports "it reviewed the whole bundle" is the *conjunction*:
+> markers at three depths, plus grounded `file:line` citations spread across a
+> 10,773-line bundle, plus wall clock scaling with size (57 s → 85 s → 256 s). A
+> sound coverage probe would ask a question answerable only by synthesising text
+> *between* the markers. That is not what was run. Flagged unanimously by the
+> 2026-09-01 design panel.
+
+> **And one soft spot in this bisection.** The canary sat at the **tail** — the
+> position most likely to survive any compaction that summarises the middle, i.e.
+> exactly the failure it was chosen to detect. The 600k/630k bracket does not rest
+> on it (the reject side is a hard `Prompt is too long`, 6 s and unbilled), but the
+> *accept* endpoint is n=1 with the weakest available probe position. Head+mid+tail
+> markers would retire the caveat.
 
 So the CLI carries **≥600,000 and <630,000** repomix tokens. Note this is *not* the
 model's 1M API window — `claude --print` gets appreciably less. Rejection happens

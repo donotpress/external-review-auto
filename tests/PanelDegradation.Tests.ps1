@@ -142,7 +142,11 @@ Describe 'reviewers are told to flag what they cannot execute' -Tag Unit {
         $cites = ([regex]::Matches($script:Src, 'Cite locations as file:line')).Count
         $tags  = ([regex]::Matches($script:Src, '\[UNVERIFIED\]')).Count
         $cites | Should -BeGreaterThan 0
-        $tags  | Should -Be $cites -Because 'every prompt that asks for citations must also ask for this'
+        # >= not ==. The invariant is that no citation-asking template LACKS the
+        # tag, not that the two counts match: -PremiseCheck appends a section that
+        # invites [UNVERIFIED] without asking for citations, and an equality test
+        # made a correct addition look like a regression.
+        $tags  | Should -BeGreaterOrEqual $cites -Because 'every prompt that asks for citations must also ask for this'
     }
 
     It 'it tells the reviewer HOW to settle the claim, not just to flag it' {

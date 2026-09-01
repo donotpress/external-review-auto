@@ -89,6 +89,14 @@ param(
     # curated -IncludeFiles rounds, so neither existing switch was even loaded.
     # ERA_BUNDLE_FORCE=1 is the env equivalent for CI.
     [switch]$ForceBundleSize,
+    # -PremiseCheck: append a premise-checking section to this round's prompt.
+    # ROUND-level, not seat-level, and that is forced by the architecture rather
+    # than chosen: repomix embeds the prompt INTO the bundle
+    # (instructionFilePath), and the opencode seat is told its instructions live
+    # inside that bundle -- so a per-seat lens would need a per-seat bundle, i.e.
+    # one repomix run per reviewer. Alternating by ROUND costs nothing and
+    # reproduces exactly the A/B that produced the evidence for this feature.
+    [switch]$PremiseCheck,
     # -AllowDirtyTree: dispatch even though the working tree has uncommitted
     # changes. Deliberately SEPARATE from -Force for the same reason as
     # -ForceBroadScope: -Force means "skip the COST prompt" and the skill's own
@@ -1091,6 +1099,49 @@ Be terse. If a section is empty, write "(none)".
     # -ConversationFile contract is still picked up: the contract travels WITH
     # the prompt, it just must be read before untrusted text is spliced in.
     $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
+
+    # --- Premise check (2026-09-01) ------------------------------------------
+    # WHY THIS EXISTS. era is good at finding defects in code as written and
+    # weak on defects in premises never checked -- a constant nobody measured, a
+    # registry key nobody copied, a buffer nobody flushed. None of those look
+    # wrong when read, so a "find the defects" prompt walks past them.
+    #
+    # The evidence is a direct A/B on this codebase: the same 4-seat panel, on the
+    # same code, found none of four premise defects with a normal review prompt,
+    # and all four seats independently found a dead registry override when the
+    # prompt asked whether the gate could be wrong in BOTH directions.
+    #
+    # Deliberately additive, and deliberately not a third prompt family to
+    # maintain: it appends to whatever prompt the caller already wrote.
+    #
+    # Runs BEFORE repomix, because repomix embeds the prompt into the bundle.
+    if ($PremiseCheck) {
+        $premiseSection = @'
+
+---
+
+## Premise check (required — answer before the review)
+
+The findings above are about what the code DOES. This section is about what it
+ASSUMES. Answer briefly and concretely; `[UNVERIFIED]` is a valid answer and a
+better one than a guess.
+
+1. **Which numbers here were never measured?** For each threshold, constant or
+   limit you can see: is it a measurement, a derivation from something else, or a
+   policy choice? Say which, and say how you can tell from the code.
+2. **Which documented claims are not exercised by any code path you can see?** A
+   comment or doc asserting behaviour is a claim. Name any you cannot trace to
+   code that would fail if the claim were false.
+3. **Which tests would still pass if the thing they cover were broken?** Name any
+   that assert on source text rather than behaviour, or that call past the layer
+   the defect would live in.
+4. **What is the most load-bearing assumption here that nobody has stated?**
+
+Do not pad this section. Three grounded answers beat twelve speculative ones.
+'@
+        Add-Content -LiteralPath $promptPath -Value $premiseSection -Encoding utf8
+        Write-Host "[era] Premise check appended to this round's prompt (-PremiseCheck). Round-level: every seat sees it."
+    }
 
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
     # If the finalized prompt contains {{PREVIOUS_ROUND}}, replace it with the

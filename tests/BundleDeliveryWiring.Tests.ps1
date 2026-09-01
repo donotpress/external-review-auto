@@ -46,9 +46,12 @@ BeforeAll {
         }
         $reg | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $regPath -Encoding utf8
 
-        # ~30 KB of content: comfortably over a 4,096-byte test ceiling and over
-        # the 51,200-byte attach cap is NOT needed, so opencode stays on attach.
-        1..300 | ForEach-Object { "# line $_ : " + ('x' * 80) } | Set-Content -LiteralPath (Join-Path $repo 'subject.md') -Encoding utf8
+        # ~90 KB of content, deliberately OVER opencode's 51,200-byte attach cap so
+        # the seat is on the read-tool path. That matters: the attach cap is a
+        # property of the transport (it is where opencode truncates) and is NOT
+        # overridable by a registry key, so exercising the override through an
+        # attach round would test a path that correctly ignores it.
+        1..900 | ForEach-Object { "# line $_ : " + ('x' * 90) } | Set-Content -LiteralPath (Join-Path $repo 'subject.md') -Encoding utf8
         'review this' | Set-Content -LiteralPath (Join-Path $repo 'prompt.md') -Encoding utf8
 
         Push-Location $repo
@@ -76,9 +79,9 @@ BeforeAll {
 Describe 'registry ceilings reach the real dispatch path' -Tag Unit {
 
     It 'honours max_bundle_bytes from the registry, end to end' {
-        # THE REGRESSION TEST. Before the fix this printed the built-in 51,200 and
+        # THE REGRESSION TEST. Before the fix this printed the built-in ceiling and
         # the round proceeded; the override was silently dropped in era.ps1's
-        # projection. 4,096 is far below the ~30 KB bundle, so the gate must bite.
+        # projection. 4,096 is far below the ~90 KB bundle, so the gate must bite.
         $box = New-EraSandbox -RegistryOverrides @{ 'deepseek-flash' = @{ max_bundle_bytes = 4096 } }
         try {
             $r = Invoke-EraInSandbox -Box $box
@@ -117,7 +120,7 @@ Describe 'registry ceilings reach the real dispatch path' -Tag Unit {
         try {
             $r = Invoke-EraInSandbox -Box $box
             $r.Text | Should -Match "max_bundle_bytes='lots' is not a non-negative number"
-            $r.Text | Should -Match 'limit 51,200 bytes'
+            $r.Text | Should -Match 'limit 1,048,576 bytes'
         } finally { Remove-Item -LiteralPath $box.Root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 

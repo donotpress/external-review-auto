@@ -213,3 +213,87 @@ Describe 'the preflight refusal records why it refuses the whole panel' -Tag Uni
         $src | Should -Match 'has spent NOTHING'
     }
 }
+
+Describe 'the delivery gate after the 2026-09-01 design panel' -Tag Unit {
+
+    It 'does not let a registry key appear to move a fixed transport limit' {
+        # FINDING 5: the plan applied max_bundle_bytes to whichever mode was
+        # active, including attach — but opencode's 51,200 is where opencode
+        # itself truncates and the adapter overrides only its read-tool ceiling.
+        # The harmful direction is an override BELOW 51,200: the plan refuses a
+        # round the adapter would have delivered. That is D3's exact shape,
+        # surviving D3's fix.
+        $reg = @{ 'tight' = @{ backend = 'opencode'; max_bundle_bytes = 30000 } }
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('tight') -Registry $reg -BundleBytes 40000 -BundleTokens 11000
+        $p.Seats[0].Mode       | Should -Be 'attach'
+        $p.Seats[0].LimitBytes | Should -Be 51200
+        $p.Seats[0].Ok         | Should -BeTrue -Because 'the adapter would have attached a 40,000-byte bundle without complaint'
+    }
+
+    It 'still honours the override on the read-tool ceiling, which IS a preset tunable' {
+        $reg = @{ 'rt' = @{ backend = 'opencode'; max_bundle_bytes = 60000 } }
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('rt') -Registry $reg -BundleBytes 80000 -BundleTokens 22000
+        $p.Seats[0].Mode       | Should -Be 'read-tool'
+        $p.Seats[0].LimitBytes | Should -Be 60000
+        $p.Seats[0].Ok         | Should -BeFalse
+    }
+
+    It 'classifies every channel as measured, chosen, derived or none' {
+        (Get-EraBackendDelivery -Backend 'opencode'  -BundleBytes 1).Kind      | Should -Be 'measured'
+        (Get-EraBackendDelivery -Backend 'opencode'  -BundleBytes 100000).Kind | Should -Be 'chosen'
+        (Get-EraBackendDelivery -Backend 'claude').Kind                        | Should -Be 'measured'
+        (Get-EraBackendDelivery -Backend 'anthropic').Kind                     | Should -Be 'derived'
+        (Get-EraBackendDelivery -Backend 'agy').Kind                           | Should -Be 'none'
+    }
+
+    It 'never refuses on a DERIVED ceiling' {
+        # The rule existed in prose in two places and had no enforcement:
+        # `anthropic` once carried an enforceable 750,000 derived as "a 1M window
+        # less ~25%" — the identical derivation that made the claude ceiling 4x
+        # too tight. It was fixed by hand and nothing stopped the next one.
+        $reg = @{ 'a' = @{ backend = 'anthropic'; max_bundle_tokens = $null } }
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('a') -Registry $reg -BundleBytes 99000000 -BundleTokens 20000000
+        $p.OverCount | Should -Be 0
+
+        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $src | Should -Match "A DERIVED CEILING MAY NOT REFUSE"
+        $src | Should -Match '\$advisoryOnly = \(\$d\.Kind -eq .derived.\)'
+    }
+
+    It 'lets an operator''s own registry number bind — a choice is not a derivation' {
+        $reg = @{ 'rt' = @{ backend = 'opencode'; max_bundle_bytes = 60000 } }
+        $p = Get-EraBundleDeliveryPlan -ReviewerList @('rt') -Registry $reg -BundleBytes 80000 -BundleTokens 22000
+        $p.Seats[0].Kind | Should -Be 'chosen'
+        $p.Seats[0].Ok   | Should -BeFalse
+    }
+}
+
+Describe '-PremiseCheck is a round-level lens' -Tag Unit {
+
+    BeforeAll { $script:EraSrc3 = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1') }
+
+    It 'exists as a switch and appends to the caller''s own prompt' {
+        $script:EraSrc3 | Should -Match '\[switch\]\$PremiseCheck'
+        $script:EraSrc3 | Should -Match 'Add-Content -LiteralPath \$promptPath -Value \$premiseSection'
+    }
+
+    It 'runs BEFORE repomix, which embeds the prompt into the bundle' {
+        $addIdx  = $script:EraSrc3.IndexOf('Add-Content -LiteralPath $promptPath -Value $premiseSection')
+        $repoIdx = $script:EraSrc3.IndexOf('instructionFilePath = $promptPath')
+        $addIdx  | Should -BeGreaterThan 0
+        $repoIdx | Should -BeGreaterThan $addIdx
+    }
+
+    It 'records why the lens is per-ROUND and not per-seat' {
+        # Not a preference: repomix embeds the prompt in the bundle and the
+        # opencode seat is told its instructions live there, so a per-seat lens
+        # would need one repomix run per reviewer.
+        $script:EraSrc3 | Should -Match 'per-seat lens would need a per-seat bundle'
+    }
+
+    It 'asks the four premise questions that found the real defects' {
+        foreach ($q in @('never measured', 'not exercised by any code path', 'would still pass if the thing they cover were broken')) {
+            $script:EraSrc3 | Should -Match ([regex]::Escape($q))
+        }
+    }
+}

@@ -3452,7 +3452,7 @@ function Get-EraBackendDelivery {
                           elseif ($ForcedOpencodeMode -eq 'attach') { $false }
                           else { $BundleBytes -gt 51200 }
             if ($ocReadTool) {
-                @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null
+                @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null; Kind = 'chosen'
                    # Verified end-to-end 2026-08-31 with canaries planted at 25/50/75%
                    # depth and reported back before the review, on both default
                    # opencode seats: 109,066 B (57s), 314,720 B (85s), 668,389 B
@@ -3463,7 +3463,7 @@ function Get-EraBackendDelivery {
                    # hypothesis.
                    Basis = 'over the 51,200-byte attach cap opencode reads the bundle with its own Read tool; verified to 668,389 bytes on both seats 2026-08-31, ceiling set at 1,048,576' }
             } else {
-                @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null
+                @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null; Kind = 'measured'; LimitFixed = $true
                # MEASURED, twice. 2026-08-03: DeepSeek V4 Flash reported its input
                # ending at line 1169 of a 9,234-line bundle; `head -1169` of that
                # file is 51,191 bytes and line 1170 crosses 51,200. 2026-08-31: a
@@ -3496,7 +3496,7 @@ function Get-EraBackendDelivery {
             #
             # 550,000 leaves ~8% under the measured accept point for the CLI's own
             # system prompt and tool definitions, which repomix's count cannot see.
-            @{ Mode = 'stdin'; LimitBytes = $null; LimitTokens = 550000
+            @{ Mode = 'stdin'; LimitBytes = $null; LimitTokens = 550000; Kind = 'measured'
                Basis = 'bundle is piped into `claude --print` as the prompt; measured 2026-08-31, the CLI accepts 600,000 and rejects 630,000 repomix tokens (550,000 keeps headroom for CLI overhead repomix cannot count)' }
         }
         'anthropic' {
@@ -3508,18 +3508,18 @@ function Get-EraBackendDelivery {
             # bisection is the evidence that the CLI/API relationship is not
             # derivable, so an invented number here is both unfalsifiable and live.
             # It stays $null until somebody measures it the way claude was measured.
-            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null; Kind = 'derived'
                Basis = 'bundle is placed in the Messages API request body; this adapter''s real ceiling has not been measured (no API key on this host), so it is not enforced' }
         }
         'agy' {
-            @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null
+            @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null; Kind = 'none'
                Basis = 'agy opens the bundle from disk with its own tools; the channel imposes no size limit' }
         }
         default {
             # geminiapi / openaicompat and anything added later. The bytes go in a
             # request body, so a limit EXISTS — it is simply provider-specific and
             # unmeasured here. Say "unknown" rather than guess.
-            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null
+            @{ Mode = 'inline-api'; LimitBytes = $null; LimitTokens = $null; Kind = 'none'
                Basis = 'bundle is placed in the API request body; this provider''s context limit has not been measured' }
         }
     }
@@ -3529,14 +3529,35 @@ function Get-EraBackendDelivery {
     # deliberate "this channel can carry nothing" was silently ignored, and a
     # non-numeric value threw a raw cast error instead of era's clean preflight
     # shape (the same lesson ERA_BROAD_MAX_FILES already learned). Parse, don't cast.
+    if (-not $d.ContainsKey('Kind')) { $d.Kind = 'none' }
     if ($ModelInfo) {
         foreach ($spec in @(@{ Key='max_bundle_bytes'; Field='LimitBytes' }, @{ Key='max_bundle_tokens'; Field='LimitTokens' })) {
+            # A FIXED limit is a property of the TRANSPORT, not a tunable of the
+            # preset, and a registry key must not appear to move it. opencode's
+            # 51,200 attach cap is where opencode itself truncates; no registry
+            # value changes that, and the adapter correctly overrides only its
+            # read-tool ceiling (opencode.ps1). Before this guard the plan applied
+            # the override to whichever mode was active, so on an attach round the
+            # two disagreed about the same registry key -- D3's exact shape,
+            # surviving D3's fix. The harmful direction is an override BELOW
+            # 51,200: the plan refuses a round the adapter would have delivered,
+            # which is the expensive error (it removes capability and looks like
+            # correct behaviour). Found by the 2026-09-01 design panel.
+            if ($spec.Field -eq 'LimitBytes' -and $d.LimitFixed) {
+                if ($null -ne $ModelInfo[$spec.Key] -and "$($ModelInfo[$spec.Key])" -ne '') {
+                    Write-Host "[era] NOTE: registry max_bundle_bytes is ignored for $Backend '$($d.Mode)' delivery — $($d.LimitBytes) is where the transport itself truncates, not a preset tunable."
+                }
+                continue
+            }
             $raw = $ModelInfo[$spec.Key]
             if ($null -eq $raw -or "$raw" -eq '') { continue }
             $parsed = [long]0
             if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) {
                 $d[$spec.Field] = $parsed
                 $d.Basis = "registry $($spec.Key)"
+                # An operator-supplied number is a deliberate choice, and a chosen
+                # ceiling is allowed to refuse. It is not a DERIVED one.
+                $d.Kind  = 'chosen'
             } else {
                 Write-Host "[era] WARNING: registry $($spec.Key)='$raw' is not a non-negative number; keeping the built-in limit."
             }
@@ -3581,8 +3602,29 @@ function Get-EraBundleDeliveryPlan {
         if ($info) { foreach ($k in @('max_bundle_bytes','max_bundle_tokens')) { if ($null -ne $info.$k) { $infoHash[$k] = $info.$k } } }
         $d = Get-EraBackendDelivery -Backend $backend -ModelInfo $infoHash -BundleBytes $BundleBytes -ForcedOpencodeMode $forcedOc
 
+        # --- A DERIVED CEILING MAY NOT REFUSE (2026-09-01) --------------------
+        # This rule already existed, in prose, in two places -- and had no
+        # enforcement. `anthropic` once carried an enforceable 750,000 tokens
+        # derived as "a 1M window less ~25%": the identical derivation that made
+        # the claude ceiling 4x too tight, and a direct violation of this
+        # function's own documented policy that an unmeasured channel is never
+        # refused. It was fixed by hand, and nothing stopped the next one.
+        #
+        # So the policy is now a mechanism. `Kind` records HOW a limit was
+        # arrived at, and only these may refuse:
+        #
+        #   measured  someone ran the experiment (51,200; the 600k/630k bracket)
+        #   chosen    a deliberate policy number, including an operator's own
+        #             registry override -- a choice is allowed to bind
+        #
+        # A `derived` limit -- inferred from a model's advertised window, a vendor
+        # doc, or an analogy -- WARNS and lets the round proceed. Refusing on a
+        # number nobody validated is how a gate removes capability while looking
+        # like it is working, which is the expensive direction of this whole
+        # subsystem. Measure it or do not enforce it.
         $ok = $true
         $reason = $null
+        $advisoryOnly = ($d.Kind -eq 'derived')
         if ($null -ne $d.LimitBytes -and $BundleBytes -gt [long]$d.LimitBytes) {
             $ok = $false
             $reason = "bundle is $('{0:N0}' -f $BundleBytes) bytes; the $($d.Mode) channel carries at most $('{0:N0}' -f [long]$d.LimitBytes)"
@@ -3591,10 +3633,15 @@ function Get-EraBundleDeliveryPlan {
             $ok = $false
             $reason = "bundle is $('{0:N0}' -f $BundleTokens) tokens; the $($d.Mode) channel carries at most $('{0:N0}' -f [int]$d.LimitTokens)"
         }
+        if (-not $ok -and $advisoryOnly) {
+            Write-Host "[era] WARNING: $r would exceed a DERIVED ceiling ($reason). Dispatching anyway — a limit nobody measured does not get to refuse a round. Measure it and record it as 'measured', or leave it unenforced."
+            $ok = $true
+            $reason = $null
+        }
         [pscustomobject]@{
             Preset = $r; Backend = $backend; Mode = $d.Mode
             LimitBytes = $d.LimitBytes; LimitTokens = $d.LimitTokens
-            Ok = $ok; Reason = $reason; Basis = $d.Basis
+            Ok = $ok; Reason = $reason; Basis = $d.Basis; Kind = $d.Kind
         }
     }
     $seats = @($seats)

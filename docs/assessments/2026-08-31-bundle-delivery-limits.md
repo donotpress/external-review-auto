@@ -83,11 +83,28 @@ failure the gate exists to prevent.
 
 | repomix tokens | bytes | result |
 |---|---|---|
-| 600,000 | 2,021,400 | **canary returned — full prompt seen** (68 s) |
+| 600,000 | 2,021,400 | **canary returned — prompt reached the model** (68 s) |
 | 630,000 | 2,122,470 | `Prompt is too long` (7 s) |
 | 660,000 | 2,223,540 | `Prompt is too long` (6 s) |
 | 700,000 | 2,358,300 | `Prompt is too long` (6 s) |
 | 711,253 | 2,396,233 | `Prompt is too long` — the real failing round |
+
+> **What the canaries prove.** A returned marker proves **retrievability** — the
+> channel carried the bytes and the model could locate them — **not** that it read
+> the content in between; on the read-tool path a model can find a marker by
+> searching. What supports "it reviewed the whole bundle" is the *conjunction*:
+> markers at three depths, plus grounded `file:line` citations spread across a
+> 10,773-line bundle, plus wall clock scaling with size (57 s → 85 s → 256 s). A
+> sound coverage probe would ask a question answerable only by synthesising text
+> *between* the markers. That is not what was run. Flagged unanimously by the
+> 2026-09-01 design panel.
+
+> **And one soft spot in this bisection.** The canary sat at the **tail** — the
+> position most likely to survive any compaction that summarises the middle, i.e.
+> exactly the failure it was chosen to detect. The 600k/630k bracket does not rest
+> on it (the reject side is a hard `Prompt is too long`, 6 s and unbilled), but the
+> *accept* endpoint is n=1 with the weakest available probe position. Head+mid+tail
+> markers would retire the caveat.
 
 The CLI carries **≥600,000 and <630,000** repomix tokens. This is *not* the
 model's 1M API window — `claude --print` gets appreciably less. The prior ceiling

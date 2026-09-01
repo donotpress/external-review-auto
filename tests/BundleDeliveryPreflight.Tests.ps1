@@ -92,11 +92,25 @@ Describe 'Get-EraBackendDelivery' -Tag Unit {
         $d.Basis       | Should -Match 'not been measured'
     }
 
-    It 'lets a registry entry override the derived limit' {
-        # So a newly measured ceiling is DATA, not a code change.
-        $d = Get-EraBackendDelivery -Backend 'opencode' -ModelInfo @{ max_bundle_bytes = 4096 }
-        $d.LimitBytes | Should -Be 4096
+    It 'lets a registry entry override an overridable limit' {
+        # So a newly measured ceiling is DATA, not a code change. -BundleBytes puts
+        # the seat on the READ-TOOL path, which is the ceiling a preset may tune;
+        # the attach cap below it is where opencode itself truncates and is not a
+        # preset tunable (see the fixed-limit test below).
+        $d = Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 100000 -ModelInfo @{ max_bundle_bytes = 200000 }
+        $d.LimitBytes | Should -Be 200000
         $d.Basis      | Should -Match 'registry'
+        $d.Kind       | Should -Be 'chosen'
+    }
+
+    It 'refuses to let a registry entry move the fixed attach cap' {
+        # The plan used to apply the override to whichever mode was active. On an
+        # attach round that made the plan and the adapter disagree about the same
+        # registry key, and an override BELOW 51,200 refused rounds the adapter
+        # would have delivered.
+        $d = Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 40000 -ModelInfo @{ max_bundle_bytes = 4096 }
+        $d.Mode       | Should -Be 'attach'
+        $d.LimitBytes | Should -Be 51200
     }
 }
 

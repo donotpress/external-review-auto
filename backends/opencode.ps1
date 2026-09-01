@@ -221,8 +221,21 @@ function Invoke-OpencodeReview {
     #   314,720 B    5,226   2/2 both seats    85s  real reviews
     #   668,389 B   10,773   3/3 both seats   256s  real reviews
     #
-    # 668 KB is 13x the attach cap, and coverage was verified at 25/50/75% depth,
-    # so this is not "it read the first chunk and guessed".
+    # 668 KB is 13x the attach cap, with markers returned from 25/50/75% depth.
+    #
+    # WHAT THE CANARIES DO AND DO NOT PROVE (2026-09-01 design panel, unanimous).
+    # A returned marker proves RETRIEVABILITY -- the channel carried the bytes and
+    # the model could locate them -- NOT that it read the content in between. On
+    # the read-tool path the model holds a Read tool over a file on disk and can
+    # find a marker by searching. What actually supports "it reviewed the whole
+    # bundle" is the CONJUNCTION: markers at three depths, PLUS grounded file:line
+    # citations spread across a 10,773-line bundle, PLUS wall clock scaling with
+    # size (57s -> 85s -> 256s). Attributing the conclusion to the canaries alone
+    # overstates the canaries and understates the citations.
+    #
+    # A sound coverage probe would ask a question answerable only by synthesising
+    # text BETWEEN the markers, rather than echoing the markers. That is not what
+    # was run here.
     #
     # IT IS STILL INTERMITTENT, and that is not explained. Historically:
     #
