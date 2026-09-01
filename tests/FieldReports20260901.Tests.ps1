@@ -1,0 +1,158 @@
+<#
+  Three issues from a field report (EQM repo, 4 rounds, 2026-09-01).
+
+  1. repomix aborts the entire run on ONE unreadable directory, and a
+     .repomixignore in the reviewed repo cannot prevent it. Verified in repomix
+     1.12.0 source: getIgnoreFilePatterns pushes '**/.repomixignore' and
+     createBaseGlobbyOptions passes it as globby's `ignoreFiles`, which globby
+     must GLOB for -- walking the locked directory to find the file that would
+     have excluded it. Only `ignore` (era's customPatterns) prunes traversal.
+
+  2. A reviewer cited line 5,891 of a 2,834-line file, in two separate rounds.
+     The prose findings were often correct; the citations were not.
+
+  3. `opus` failed with `agentic-narration-capture` and no response file. The
+     code covers three different branches and named only one of them, so the
+     operator could not tell a bundle-access refusal from a short answer from
+     actual narration -- three faults needing three different responses.
+#>
+
+BeforeAll {
+    $script:SkillRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $script:SkillRoot 'workflow.ps1')
+    . (Join-Path $script:SkillRoot 'backends/_capture-validation.ps1')
+}
+
+Describe 'browser-profile dirs are pruned from the walk' -Tag Unit {
+
+    It 'ignores live browser profile directories by pattern' {
+        # These MUST live here and cannot live in a repo's .repomixignore -- see
+        # the file header. They are also a privacy control: a live profile holds
+        # session cookies, and era uploads the bundle to a third party.
+        $p = Get-EraVendorIgnorePatterns
+        $p | Should -Contain '**/puppeteer_user_data/**'
+        $p | Should -Contain '**/chrome_user_data/**'
+        $p | Should -Contain '**/chrome-profile/**'
+    }
+
+    It 'spells them with the load-bearing **/ prefix' {
+        # A bare '<dir>/**' is ROOT-ANCHORED in repomix 1.12.0, so a nested
+        # profile directory would still be walked.
+        foreach ($pat in (Get-EraVendorIgnorePatterns | Where-Object { $_ -match 'user_data|chrome-profile' })) {
+            $pat | Should -BeLike '**/*'
+        }
+    }
+
+    It 'explains the permission abort instead of surfacing raw repomix text' {
+        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
+        $src | Should -Match 'PermissionError\|Permission denied while scanning'
+        $src | Should -Match 'NOT the fix'          # .repomixignore cannot fix it
+        $src | Should -Match 'Nothing was dispatched and nothing was spent'
+    }
+}
+
+Describe 'citations are checked against the bundle' -Tag Unit {
+
+    BeforeAll {
+        $script:Bundle = Join-Path ([System.IO.Path]::GetTempPath()) ("era-cit-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        # Two files: one 2,834 lines (the reported case), one short.
+        $sb = [System.Text.StringBuilder]::new()
+        $null = $sb.AppendLine('<file path="src/buy-routes.js">')
+        for ($i = 1; $i -le 2834; $i++) { $null = $sb.AppendLine("${i}: line") }
+        $null = $sb.AppendLine('</file>')
+        $null = $sb.AppendLine('<file path="src/util.js">')
+        for ($i = 1; $i -le 40; $i++) { $null = $sb.AppendLine("${i}: line") }
+        $null = $sb.AppendLine('</file>')
+        [System.IO.File]::WriteAllText($script:Bundle, $sb.ToString())
+        $script:LC = Get-EraBundleLineCounts -BundlePath $script:Bundle
+    }
+    AfterAll { Remove-Item -LiteralPath $script:Bundle -Force -ErrorAction SilentlyContinue }
+
+    It 'reads per-file line counts out of the bundle' {
+        $script:LC['src/buy-routes.js'] | Should -Be 2834
+        $script:LC['src/util.js']       | Should -Be 40
+    }
+
+    It 'catches the reported fabrications and nothing else' {
+        $r = Test-EraResponseCitations -LineCounts $script:LC -Response @'
+1. buy-routes.js:5891 - the cart total is wrong.
+2. buy-routes.js:3612 - race on the session token.
+3. buy-routes.js:1200 - this one is real.
+4. src/util.js:12 - also real.
+'@
+        $r.Checked          | Should -Be 4
+        $r.OutOfRange.Count | Should -Be 2
+        ($r.OutOfRange -join ' ') | Should -Match '5891'
+        ($r.OutOfRange -join ' ') | Should -Match '3612'
+        ($r.OutOfRange -join ' ') | Should -Match '2834 lines'
+    }
+
+    It 'does not flag a review with no citations at all' {
+        (Test-EraResponseCitations -LineCounts $script:LC -Response 'No issues found.').OutOfRange.Count | Should -Be 0
+    }
+
+    It 'refuses to guess when a basename is ambiguous' {
+        # An over-eager checker that cries wolf on a correct citation is worse
+        # than no checker.
+        $amb = @{ 'a/dup.js' = 10; 'b/dup.js' = 9000 }
+        (Test-EraResponseCitations -LineCounts $amb -Response 'see dup.js:5000').OutOfRange.Count | Should -Be 0
+    }
+
+    It 'says the findings may still be real' {
+        # The reported reviewer was often CORRECT and twice novel. Demoting a
+        # usable review over a formatting fault trades a real defect for a tidy
+        # artifact.
+        $r = Test-EraResponseCitations -LineCounts $script:LC -Response 'buy-routes.js:9999 - bug.'
+        ($r.Lines -join ' ') | Should -Match 'may still be real'
+    }
+}
+
+Describe 'a non-review says WHICH kind it was' -Tag Unit {
+
+    It 'names a bundle-access refusal as one, even when it is short' {
+        # This is the ordering fix: the refusal is ~80 chars, so the length branch
+        # used to reach it first and report "sub-floor", pointing the operator at
+        # the model's brevity when the bundle never arrived.
+        $v = Test-EraCaptureAcceptable -Vendor 'opus' -PromptPath '' `
+                -Response 'I cannot review the bundle because it was not included. Please paste the content.'
+        $v.Ok              | Should -BeFalse
+        $v.NonReviewBranch | Should -Be 'bundle-access-refusal'
+        $v.Warning         | Should -Match 'could not SEE the bundle'
+    }
+
+    It 'names a short structureless answer as sub-floor, not as narration' {
+        # Measured 2026-08-31: a correct, canary-verified 280-char answer was
+        # rejected while 301- and 324-char answers of near-identical content
+        # passed. Calling that "narration" sends the reader after the wrong cause.
+        $v = Test-EraCaptureAcceptable -Vendor 'opus' -PromptPath '' `
+                -Response ('COVERAGE: X. ' + ('These are backend adapters. ' * 9))
+        $v.Ok              | Should -BeFalse
+        $v.NonReviewBranch | Should -Be 'sub-floor-non-answer'
+        $v.Warning         | Should -Match 'often not narration at all'
+    }
+
+    It 'still names real narration as narration' {
+        $v = Test-EraCaptureAcceptable -Vendor 'opus' -PromptPath '' `
+                -Response 'Let me read the bundle first so I can check the dispatcher.'
+        $v.NonReviewBranch | Should -Be 'tool-intent-narration'
+    }
+
+    It 'keeps the error CODE unchanged so recovery still triggers' {
+        # Get-EraRecoverableFailures keys on this exact string; renaming it would
+        # silently stop the one bounded re-dispatch.
+        (Test-EraCaptureAcceptable -Vendor 'x' -PromptPath '' -Response 'Let me go read the bundle.').Error |
+            Should -Be 'agentic-narration-capture'
+    }
+
+    It 'accepts a real review and reports no branch' {
+        $v = Test-EraCaptureAcceptable -Vendor 'opus' -PromptPath '' -Response "## Critical`n1. a.ps1:12 - wrong."
+        $v.Ok              | Should -BeTrue
+        $v.NonReviewBranch | Should -BeNullOrEmpty
+    }
+
+    It 'does not leak a branch from a previous call' {
+        $null = Test-EraCaptureAcceptable -Vendor 'x' -PromptPath '' -Response 'Let me read the bundle.'
+        (Test-EraCaptureAcceptable -Vendor 'x' -PromptPath '' -Response "## Review`n- fine").NonReviewBranch |
+            Should -BeNullOrEmpty
+    }
+}

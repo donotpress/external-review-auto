@@ -1681,6 +1681,38 @@ Be terse. If a section is empty, write "(none)".
     $repomixResult = $repomixRun.Output
     $repomixExitCode = $repomixRun.ExitCode
     if ($repomixExitCode -ne 0) {
+        # A PERMISSION ABORT NEEDS ITS OWN MESSAGE (2026-09-01). repomix aborts the
+        # WHOLE run on one unreadable directory -- measured against 1.12.0 with a
+        # headful Chrome running: a locked <profile>/CertificateRevocation/<n>
+        # killed the round at exit 1, and the raw repomix text gives no hint that
+        # the fix is an ignore PATTERN rather than a permissions change.
+        #
+        # It cannot be fixed from the reviewed repo. repomix passes .repomixignore
+        # to globby as `ignoreFiles` ('**/.repomixignore', fileSearch.js
+        # getIgnoreFilePatterns, verified in 1.12.0), and globby must GLOB for
+        # that file before it can read it -- so the locked directory is walked
+        # while looking for the very file that would have excluded it. Only
+        # globby's `ignore` (era's customPatterns, i.e.
+        # Get-EraVendorIgnorePatterns) prunes traversal. A repo that added
+        # .repomixignore to fix this kept crashing on the next round. A narrow
+        # -IncludeFiles does not help either: the full-tree walk happens
+        # regardless, hunting for ignore files.
+        #
+        # era cannot make globby skip unreadable directories -- that abort is
+        # inside repomix's own catch. What it can do is stop the operator losing
+        # an hour to the wrong theory.
+        if ($repomixResult -match '(?i)PermissionError|Permission denied while scanning') {
+            $hint = ''
+            if ($repomixResult -match '(?im)path:\s*(.+)$') { $hint = "  reported path : $($matches[1].Trim())`n" }
+            Stop-EraWithError ("repomix could not scan the tree: a directory is locked or unreadable, and repomix aborts the whole run on it.`n" +
+                $hint +
+                "  usual cause  : a LIVE application holding its own data directory — a running Chrome/puppeteer profile is the common one.`n" +
+                "  the fix      : add an ignore PATTERN to Get-EraVendorIgnorePatterns in workflow.ps1 (browser-profile dirs are already there).`n" +
+                "  NOT the fix  : a .repomixignore in the reviewed repo. repomix hands that file to globby as an ignoreFile, so globby walks the " +
+                "locked directory while searching for it. Only the ignore-pattern list prunes traversal. Narrowing -IncludeFiles does not help either.`n" +
+                "  quickest unblock: close the application holding the directory, then re-run.`n" +
+                "Nothing was dispatched and nothing was spent.")
+        }
         # Truncate: this interpolated the entire capture, which was 16.9 MB on
         # the run that started collecting 72,378 files.
         throw ("repomix failed with exit code $repomixExitCode`:`n" + (Get-EraTruncatedText -Text $repomixResult -MaxChars 4000))
@@ -2069,6 +2101,24 @@ Be terse. If a section is empty, write "(none)".
     #
     # $runSucceeded is deliberately left unset so the finally block keeps the
     # repomix config as a receipt for the failed run.
+    # --- Citation grounding (2026-09-01) -------------------------------------
+    # A reviewer was measured citing line 5,891 of a 2,834-line file, twice, in
+    # separate rounds. The bundle is on disk and line-numbered, so era can check
+    # this instead of asking every reader to. Advisory: a bad citation does not
+    # fail the round -- the finding it decorates was repeatedly real.
+    $bundleLineCounts = Get-EraBundleLineCounts -BundlePath $bundlePath
+    if ($bundleLineCounts.Count -gt 0) {
+        foreach ($preset in (@($results.Keys) | Sort-Object)) {
+            $rr = $results[$preset]
+            if (-not $rr -or -not $rr.Response) { continue }
+            $cit = Test-EraResponseCitations -Response $rr.Response -LineCounts $bundleLineCounts
+            if ($cit.OutOfRange.Count -gt 0) {
+                Write-Host "[era] WARNING: $preset cited line numbers that do not exist in the bundled files."
+                foreach ($cl in $cit.Lines) { Write-Host $cl }
+            }
+        }
+    }
+
     $voidReport = Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
         -Results $results -RequestedCount @($reviewerList).Count -DeliveryModes $deliveryModes
     if ($voidReport.IsVoid) {

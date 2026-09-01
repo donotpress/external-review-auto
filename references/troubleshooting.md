@@ -249,3 +249,66 @@ least-supported explanation rather than the first thing to check.
 the (now real) stall artifact and check whether the model is chunk-reading or wandering
 into unrelated shell commands. `ERA_OPENCODE_READ_TOOL=0` forces attach as a diagnostic
 — you will get a review of the first 50 KiB, and it warns.
+
+---
+
+## "PermissionError: Permission denied while scanning directory" (exit 1)
+
+**Cause:** repomix aborts the **entire run** when it cannot read one directory.
+The usual culprit is a live application holding its own data directory — a running
+headful Chrome or puppeteer profile, e.g.
+`scripts/puppeteer_user_data/headful/CertificateRevocation/<n>`.
+
+**A `.repomixignore` in the reviewed repo CANNOT fix this.** repomix hands that
+file to globby as an `ignoreFile` (`'**/.repomixignore'`, `fileSearch.js`
+`getIgnoreFilePatterns` — verified in 1.12.0), and globby has to **glob for the
+file before it can read it**, so it walks the locked directory while searching for
+the very file that would have excluded it. Only globby's `ignore` option — era's
+`customPatterns`, filled from `Get-EraVendorIgnorePatterns` — prunes traversal.
+A repo that added `.repomixignore` for this crashed identically on the next round.
+
+**Narrowing `-IncludeFiles` does not help either:** the full-tree walk happens
+regardless, hunting for ignore files.
+
+**Fix:** the common browser-profile directories are already pruned
+(`**/puppeteer_user_data/**`, `**/chrome_user_data/**`, `**/chrome-profile/**`).
+For anything else, add the pattern to `Get-EraVendorIgnorePatterns` in
+`workflow.ps1`. The quickest unblock is to close the application holding the
+directory and re-run — exit 1 means nothing was dispatched and nothing was spent.
+
+These patterns are also a **privacy control**: a live browser profile holds session
+cookies and auth tokens, and era uploads the bundle to a third party.
+
+---
+
+## "WARNING: <reviewer> cited line numbers that do not exist in the bundled files"
+
+**Cause:** the reviewer invented `file:line` references. Measured on one model
+across two separate rounds: lines 5891, 5360 and 3612 cited in a 2,834-line file.
+
+era reads the line count of every file in the bundle and checks each citation
+against it. Only citations whose file is unambiguously in the bundle are checked;
+a basename that appears at more than one path is skipped rather than guessed.
+
+**This does not fail the round, deliberately.** In the observed cases the prose
+findings were often correct and twice genuinely novel — it is the line numbers,
+not the reasoning, that are unreliable. Read the finding, then locate it yourself
+rather than trusting the citation. If a model does this consistently, that is a
+reason to weight its findings differently, not to drop the seat.
+
+---
+
+## A reviewer failed with `agentic-narration-capture`
+
+That one error code covers **three** different faults, and the round summary now
+names which fired:
+
+| Branch | What happened | What to do |
+|---|---|---|
+| `bundle-access-refusal` | The model says it could not **see** the bundle | Look at delivery (the `via=` field), not the prompt. Re-dispatching buys the same refusal. |
+| `sub-floor-non-answer` | The model answered, but too briefly and with no heading or list to be accepted | **Often not narration at all** — read the response before assuming the model misbehaved. Measured: a correct 280-character answer was rejected while 301- and 324-character answers of near-identical content passed. |
+| `tool-intent-narration` | The model narrated tool use instead of reviewing | Re-dispatch usually fixes it. |
+
+Before this split, all three reported the same generic message listing all three
+possibilities, so a `sub-floor` rejection on a strong reviewer read as "the model
+misbehaved" when it had in fact answered correctly and briefly.

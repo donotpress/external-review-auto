@@ -3632,3 +3632,108 @@ function Get-EraDeliveryModeMap {
     if ($Plan -and $Plan.Seats) { foreach ($s in $Plan.Seats) { $map[$s.Preset] = $s.Mode } }
     return $map
 }
+
+# --- Citation grounding (2026-09-01) ----------------------------------------
+# A reviewer reported muse-spark citing buy-routes.js:5891, :5360 and :3612 in a
+# 2,834-line file, across two separate rounds. Its prose findings were often
+# correct and twice genuinely novel -- the CITATIONS are what could not be
+# trusted. That is the worst shape for a defect claim: a specific, checkable-
+# looking reference that sends the reader to a line which does not exist, and a
+# reader who checks one and finds nothing tends to discount the whole review.
+#
+# era already has everything needed to check this. The bundle is on disk, it is
+# line-numbered, and a citation is `path:line`. So check it and say so, rather
+# than asking every reader to.
+#
+# Advisory ONLY. A bad citation does not fail the round: the finding it decorates
+# may still be real (measured: it repeatedly was), and demoting a usable review
+# over a formatting fault would trade a real defect for a tidy artifact -- the
+# exact trade this codebase's detector history says not to make.
+
+function Get-EraBundleLineCounts {
+    <#
+    .SYNOPSIS
+        path -> highest line number present, read from a repomix XML bundle.
+        Returns an empty map if the bundle is unreadable or not line-numbered.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BundlePath)
+    $counts = @{}
+    if (-not (Test-Path -LiteralPath $BundlePath)) { return $counts }
+    $current = $null
+    try {
+        foreach ($line in [System.IO.File]::ReadLines($BundlePath)) {
+            if ($line -match '^<file path="([^"]+)">') { $current = $matches[1]; $counts[$current] = 0; continue }
+            if ($line -match '^</file>') { $current = $null; continue }
+            if ($current -and $line -match '^\s*(\d+):') {
+                $n = [int]$matches[1]
+                if ($n -gt $counts[$current]) { $counts[$current] = $n }
+            }
+        }
+    } catch { return @{} }
+    return $counts
+}
+
+function Test-EraResponseCitations {
+    <#
+    .SYNOPSIS
+        Check `path:line` citations in a review against the bundle it reviewed.
+        Returns @{ Checked; OutOfRange; Unresolved; Lines }.
+
+    .DESCRIPTION
+        OutOfRange is the load-bearing one: the file IS in the bundle and the
+        cited line is past its end, so the citation cannot be real. Unresolved
+        (a path not in the bundle) is reported separately and much more quietly --
+        a reviewer may legitimately name a file it was told about rather than one
+        it was given, and basename collisions across directories are common.
+
+        Matching is by BASENAME. Reviewers cite `buy-routes.js:5891` as often as
+        the full repo-relative path, and a basename that is unique in the bundle
+        is unambiguous. A basename appearing at more than one path is skipped
+        rather than guessed -- an over-eager checker that cries wolf on a correct
+        citation is worse than no checker.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Response,
+        [Parameter(Mandatory)][hashtable]$LineCounts
+    )
+    $result = @{ Checked = 0; OutOfRange = @(); Unresolved = @(); Lines = @() }
+    if (-not $Response -or $LineCounts.Count -eq 0) { return $result }
+
+    # basename -> line count, only where the basename is UNIQUE in the bundle.
+    $byBase = @{}
+    foreach ($p in $LineCounts.Keys) {
+        $b = ($p -split '[\\/]')[-1]
+        if ($byBase.ContainsKey($b)) { $byBase[$b] = $null } else { $byBase[$b] = $LineCounts[$p] }
+    }
+
+    $bad = [System.Collections.Generic.List[string]]::new()
+    $unk = [System.Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($m in [regex]::Matches($Response, '(?<path>[A-Za-z0-9_.\-/\\]+\.[A-Za-z0-9]{1,8}):(?<line>\d{1,7})\b')) {
+        $cited = $m.Groups['path'].Value
+        $lineNo = [int]$m.Groups['line'].Value
+        $key = "$cited`:$lineNo"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        $base = ($cited -split '[\\/]')[-1]
+        if (-not $byBase.ContainsKey($base)) { $unk.Add($key); continue }
+        $max = $byBase[$base]
+        if ($null -eq $max) { continue }   # ambiguous basename -- do not guess
+        $result.Checked++
+        if ($lineNo -gt $max) { $bad.Add("$key (file has $max lines)") }
+    }
+    $result.OutOfRange = @($bad)
+    $result.Unresolved = @($unk)
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    if ($result.OutOfRange.Count -gt 0) {
+        $lines.Add("  $($result.OutOfRange.Count) of $($result.Checked) checkable citation(s) point past the end of the cited file:")
+        foreach ($b in ($result.OutOfRange | Select-Object -First 6)) { $lines.Add("    $b") }
+        if ($result.OutOfRange.Count -gt 6) { $lines.Add("    ... and $($result.OutOfRange.Count - 6) more") }
+        $lines.Add("  The findings may still be real — treat the line numbers, not the reasoning, as unreliable.")
+    }
+    $result.Lines = @($lines)
+    return $result
+}

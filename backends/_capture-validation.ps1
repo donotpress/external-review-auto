@@ -54,6 +54,29 @@ function Test-AgenticNarrationCapture {
     # Empty / whitespace-only captures are not "narration" per se; let the caller
     # treat a null response as a hard failure separately. Here, only classify
     # actual text. An empty string is not flagged by this detector.
+    # WHICH BRANCH FIRED, not just THAT one did (2026-09-01). All three branches
+    # returned the same `agentic-narration-capture` code, and the operator-facing
+    # warning listed all three possibilities with no way to tell them apart. They
+    # need opposite responses:
+    #
+    #   tool-intent-narration   the model talked about reviewing instead of
+    #                           reviewing -- a re-dispatch usually fixes it.
+    #   bundle-access-refusal   the model says it could not SEE the bundle --
+    #                           re-dispatching just buys the same refusal; the
+    #                           delivery channel is what to look at.
+    #   sub-floor-non-answer    the model answered, briefly, with no heading and
+    #                           no list. Often not narration AT ALL: measured
+    #                           2026-08-31, a correct canary-verified 280-char
+    #                           answer was rejected while 301- and 324-char
+    #                           answers of near-identical content passed. Naming
+    #                           this "narration" sends the reader after the wrong
+    #                           cause -- exactly what happened to a reported
+    #                           `opus` failure.
+    #
+    # Script-scoped rather than a changed return type: the boolean contract has
+    # five call sites plus agy's own, and tests pin it.
+    $script:EraLastNonReviewBranch = $null
+    $script:EraLastNonReviewDetail = $null
     if (-not $Response) { return $false }
     $text = [string]$Response
 
@@ -101,7 +124,17 @@ function Test-AgenticNarrationCapture {
         ($text -match '(?im)\b(bundle|attachment|file content)\b[^.\n]{0,40}\b(not|n.t)\s+(included|attached|provided|present|available)\b')
 
     # Branch 1: no heading + narration -> flag (list marker irrelevant here).
-    if (-not $hasHeading -and $narration) { return $true }
+    if (-not $hasHeading -and $narration) { $script:EraLastNonReviewBranch = 'tool-intent-narration'; return $true }
+
+    # Branch 3 is evaluated BEFORE branch 2, and only since the branches started
+    # being NAMED. A bundle-access refusal is usually short ("I cannot review the
+    # bundle, it was not included" is ~80 chars), so the length branch reached it
+    # first and labelled it `sub-floor-non-answer` -- pointing the operator at the
+    # model's brevity when the actual problem is that the bundle never arrived.
+    # The BOOLEAN is unaffected: every branch returns $true, so ordering cannot
+    # change whether a capture is flagged, only which cause is reported. The most
+    # specific diagnosis wins.
+    if (-not $hasHeading -and $bundleRefusal) { $script:EraLastNonReviewBranch = 'bundle-access-refusal'; return $true }
 
     # Branch 2: no heading + no list + under the length floor -> flag,
     # UNLESS the text reads like natural-language code-review prose
@@ -129,10 +162,12 @@ function Test-AgenticNarrationCapture {
     $gerundOpener = $text -match '(?i)\A\s*(checking|looking|reviewing|analy[sz]ing|examining|inspecting|scanning|starting|beginning|working)\b'
     if ($hasProseReview -and $noNarration -and -not $gerundOpener) {
         # Legitimate terse review prose — let it pass even if under the floor.
-    } elseif (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) { return $true }
+    } elseif (-not $hasHeading -and -not $hasList -and $text.Length -lt $LengthFloor) {
+        $script:EraLastNonReviewBranch = 'sub-floor-non-answer'
+        $script:EraLastNonReviewDetail = "$($text.Length) chars, no markdown heading and no list, against a $LengthFloor-char floor"
+        return $true
+    }
 
-    # Branch 3: no heading + bundle-unavailable refusal -> flag.
-    if (-not $hasHeading -and $bundleRefusal) { return $true }
 
     return $false
 }
@@ -310,9 +345,22 @@ function Test-EraCaptureAcceptable {
         [string]$Vendor = 'The provider'
     )
     if (Test-AgenticNarrationCapture -Response $Response) {
+        # The Error CODE is unchanged on purpose: Get-EraRecoverableFailures keys
+        # on it, and renaming it would silently stop the one bounded re-dispatch.
+        # The branch goes in the warning and in a NonReviewBranch field instead.
+        $branch = $script:EraLastNonReviewBranch
+        $detail = $script:EraLastNonReviewDetail
+        $advice = switch ($branch) {
+            'bundle-access-refusal' { 'the model says it could not SEE the bundle — check delivery (era''s per-seat via= line), not the prompt; a re-dispatch buys the same refusal' }
+            'sub-floor-non-answer'  { 'the model ANSWERED but too briefly and with no structure to be accepted — this is often not narration at all, so read the response before assuming the model misbehaved' }
+            'tool-intent-narration' { 'the model narrated tool use instead of reviewing — a re-dispatch usually fixes it' }
+            default                 { 'tool-intent narration / bundle-access refusal / sub-floor non-answer' }
+        }
+        $where = if ($detail) { " ($detail)" } else { '' }
         return @{
             Ok = $false; Error = 'agentic-narration-capture'
-            Warning = "$Vendor returned a non-review (tool-intent narration / bundle-access refusal / sub-floor non-answer); detector fired — re-dispatch to retry."
+            NonReviewBranch = $branch
+            Warning = "$Vendor returned a non-review [$branch]${where}: $advice."
         }
     }
     if ($PromptPath -and (Test-EraPromptEcho -PromptPath $PromptPath -Response $Response)) {
