@@ -331,3 +331,50 @@ Describe '-PremiseCheck is a round-level lens' -Tag Unit {
         }
     }
 }
+
+Describe 'the two claims the audit panel made that were not acted on at the time' -Tag Unit {
+
+    BeforeAll {
+        $script:EraSrc4 = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
+        $script:WfSrc4  = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+    }
+
+    It 'has no UNSORTED hashtable-key loop left in either agy resolver' {
+        # v2.4.1 made agy hint resolution deterministic in resolve-model.ps1 and
+        # ONLY there. era.ps1 carries a second, independent implementation of the
+        # same rule (the -AgyModel path) which kept the exact defect that release
+        # claimed to fix. One rule, two implementations, one of them fixed — the
+        # shape this panel kept finding.
+        foreach ($src in @($script:EraSrc4, $script:WfSrc4,
+                           (Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/resolve-model.ps1')))) {
+            [regex]::Matches($src, '(?m)foreach \(\$\w+ in \$\w*[Mm]ap\.Keys\)').Count |
+                Should -Be 0 -Because 'a bare .Keys loop has no defined enumeration order'
+        }
+    }
+
+    It 'tie-breaks agy candidates explicitly rather than inheriting enumeration order' {
+        # Sort-Object is STABLE, so a tie on TierRank silently takes whatever order
+        # the hashtable happened to enumerate.
+        $script:EraSrc4 | Should -Match "Expression = 'TierRank'; Descending = \`$true"
+        $script:EraSrc4 | Should -Match "Expression = 'Display'"
+        $script:EraSrc4 | Should -Match 'matches \$\(\$tied\.Count\) models at the same tier'
+    }
+
+    It 'warns when a registry override RAISES a measured ceiling' {
+        # Predicted by the panel as "the next plan/adapter drift", and correct: no
+        # adapter reads max_bundle_tokens, so a raised token ceiling means the plan
+        # says "fits" and the CLI answers "Prompt is too long" after the round is
+        # already paid for on every other seat. Lowering stays quiet.
+        $d = Get-EraBackendDelivery -Backend 'claude'
+        $d.Kind | Should -Be 'measured'
+        $raised = Get-EraBackendDelivery -Backend 'claude' -ModelInfo @{ max_bundle_tokens = 900000 }
+        $raised.LimitTokens | Should -Be 900000   # the operator still gets what they asked for
+        $script:WfSrc4 | Should -Match 'RAISES a measured ceiling'
+    }
+
+    It 'stays quiet when an override LOWERS a measured ceiling' {
+        $lowered = Get-EraBackendDelivery -Backend 'claude' -ModelInfo @{ max_bundle_tokens = 100000 }
+        $lowered.LimitTokens | Should -Be 100000
+        $lowered.Kind        | Should -Be 'chosen'
+    }
+}

@@ -3574,6 +3574,20 @@ function Get-EraBackendDelivery {
             if ($null -eq $raw -or "$raw" -eq '') { continue }
             $parsed = [long]0
             if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) {
+                # RAISING a MEASURED ceiling replaces an experiment with a guess,
+                # and the enforcement then lives downstream where it costs money:
+                # no adapter reads max_bundle_tokens at all, so a raised token
+                # ceiling means the plan says "fits" and the claude CLI answers
+                # "Prompt is too long" AFTER the round is paid for on every other
+                # seat. Lowering is always safe and stays quiet.
+                #
+                # Predicted by the 2026-09-01 audit panel as "the next plan/adapter
+                # drift", and it was right: the same asymmetry the opencode attach
+                # cap had, one backend over.
+                $prev = $d[$spec.Field]
+                if ($d.Kind -eq 'measured' -and $null -ne $prev -and $parsed -gt [long]$prev) {
+                    Write-Host "[era] WARNING: registry $($spec.Key)=$parsed RAISES a measured ceiling of $prev for $Backend. The measurement is the thing that knows; nothing downstream enforces the new number, so an over-limit round fails after it has been paid for. Lower it, or re-measure and update the basis."
+                }
                 $d[$spec.Field] = $parsed
                 $d.Basis = "registry $($spec.Key)"
                 # An operator-supplied number is a deliberate choice, and a chosen

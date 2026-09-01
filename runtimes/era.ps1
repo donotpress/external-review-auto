@@ -1409,8 +1409,20 @@ Be terse. If a section is empty, write "(none)".
             }
         }
 
+        # SORTED, and tie-broken explicitly. v2.4.1 made agy hint resolution
+        # deterministic -- in runtimes/resolve-model.ps1, and only there. This is a
+        # SECOND, independent implementation of the same rule (the -AgyModel path),
+        # and it kept the exact defect that release claimed to fix: `.Keys` on a
+        # hashtable has no defined enumeration order, and Sort-Object is STABLE, so
+        # a tie on TierRank silently inherited it. Two families at the same tier
+        # resolved to different models between runs.
+        #
+        # Found by the 2026-09-01 audit panel, which is also the shape it kept
+        # flagging elsewhere: one rule, two implementations, only one of them
+        # fixed. The real repair is to collapse these two loops; this is the
+        # narrow one, so the fix does not exceed the finding.
         $candidates = @()
-        foreach ($familyKey in $agyMap.Keys) {
+        foreach ($familyKey in ($agyMap.Keys | Sort-Object)) {
             $family = $agyMap[$familyKey]
             foreach ($tierKey in $family.PSObject.Properties.Name) {
                 $entry = $family.$tierKey
@@ -1422,8 +1434,14 @@ Be terse. If a section is empty, write "(none)".
             }
         }
         if ($candidates.Count -gt 0) {
-            $best = $candidates | Sort-Object TierRank -Descending | Select-Object -First 1
+            $best = $candidates |
+                Sort-Object @{ Expression = 'TierRank'; Descending = $true }, @{ Expression = 'Display'; Descending = $false } |
+                Select-Object -First 1
             $resolvedAgyHint = $best.Display
+            if (@($candidates | Where-Object { $_.TierRank -eq $best.TierRank }).Count -gt 1) {
+                $tied = @($candidates | Where-Object { $_.TierRank -eq $best.TierRank } | ForEach-Object { $_.Display } | Sort-Object)
+                Write-Host "[era] WARNING: AgyModel hint '$hint' matches $($tied.Count) models at the same tier ($($tied -join ', ')); taking '$resolvedAgyHint'. Give a more specific hint to pin it."
+            }
             Write-Host "[era] AgyModel hint '$hint' -> resolved to '$resolvedAgyHint' (tier: $($best.TierKey))"
         } else {
             Write-Host "[era] WARNING: AgyModel hint '$hint' did not resolve. Using current agy model."
