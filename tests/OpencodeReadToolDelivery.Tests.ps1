@@ -25,8 +25,10 @@
 
   IT IS STILL INTERMITTENT and that is unexplained -- deepseek-flash lost seats at
   74,740 B and 79,294 B, sizes these probes clear comfortably. Not size, not model.
-  The leading untested hypothesis is concurrency with an operator's interactive
-  `opencode -c` session, which era's run mutex cannot see.
+  Concurrency was the leading hypothesis; a controlled A/B (10 trials under a live
+  `opencode serve` plus 22 external `opencode run` contenders, against 10 with no
+  other opencode process) produced 0 stalls in BOTH arms, so it is now the
+  least-supported explanation rather than the first thing to check.
 #>
 
 BeforeAll {
@@ -139,10 +141,14 @@ Describe 'the Read-tool path carries bundles over the attach cap' -Tag Unit {
         $script:Src | Should -Match '109,066'
     }
 
-    It 'records that it is still intermittent, and the untested hypothesis' {
+    It 'records the intermittency AND that the leading hypothesis was ruled out' {
         # The probes all pass; the historical stalls are real and unexplained. A
-        # comment reporting only the passes is arguing for its conclusion.
+        # comment reporting only the passes is arguing for its conclusion -- and a
+        # comment still naming a hypothesis that has since been measured and
+        # rejected is worse, because it sends the next reader down a closed path.
         $script:Src | Should -Match '74,740'
         $script:Src | Should -Match '(?i)concurrency'
+        $script:Src | Should -Match '(?i)0 stalls / 10'
+        $script:Src | Should -Match '(?i)(did not hold|does not hold|least-supported)'
     }
 }
