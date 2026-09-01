@@ -21,7 +21,7 @@ pwsh -Command "Invoke-Pester -Path tests/Get-AgyTranscriptResponse.Tests.ps1"
 pwsh -Command "Invoke-Pester -Path tests/ -Output Detailed"
 ```
 
-Tests are pure PowerShell with no network or live backend spawning (956 tests as of v2.6.2). Most are fast; a few (`Resolve`, `SpecReview`, `Invoke-Era`, `AutoDetect`) fork `pwsh` to exercise `era.ps1`/`resolve.ps1` end-to-end, so a full run is **~8 min** (one `Slow`-tagged ThreadJob test alone takes ~30s; exclude it with `-ExcludeTagFilter Slow`). No external dependencies.
+Tests are pure PowerShell with no network or live backend spawning (957 tests as of v2.7). ⚠️ `BundleDeliveryWiring.Tests.ps1` copies the whole skill tree and forks a real `era.ps1` per case, which is why it is the slowest file by a wide margin — it exists because the unit test it replaced passed while the feature was dead, so the cost is deliberate. Budget for it when running the full suite. Most are fast; a few (`Resolve`, `SpecReview`, `Invoke-Era`, `AutoDetect`) fork `pwsh` to exercise `era.ps1`/`resolve.ps1` end-to-end, so a full run is **~20 min** as of v2.7, up from ~8 (one `Slow`-tagged ThreadJob test alone takes ~30s; exclude it with `-ExcludeTagFilter Slow`). No external dependencies.
 
 ## What's covered
 

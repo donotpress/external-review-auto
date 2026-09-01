@@ -88,7 +88,12 @@ Describe 'Remove-EraBundleComments' -Tag Unit {
 
     It 'blanks block comment bodies, and closes on a one-line block' {
         ($script:Lines | Where-Object { $_ -match 'block comment body' }).Count | Should -Be 0
-        ($script:Lines | Where-Object { $_ -match 'docstring body' }).Count     | Should -Be 0
+        # Python triple-quotes are NO LONGER handled, deliberately: a line scanner
+        # cannot tell an opening docstring delimiter from a closing one, and the
+        # common `x = """multi-line"""` shape made the CLOSER look like an opener,
+        # started a phantom block, and blanked live code. Three reviewers flagged
+        # it. A surviving docstring is the safe failure.
+        ($script:Lines | Where-Object { $_ -match 'docstring body' }).Count     | Should -Be 1
         ($script:Lines | Where-Object { $_ -match 'block\s*$|body \*/' }).Count | Should -Be 0
         # `<# one-liner block #>` must NOT open a block that swallows $y = 2.
         ($script:Lines | Where-Object { $_ -match '\$y = 2' }).Count | Should -Be 1

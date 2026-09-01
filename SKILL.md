@@ -1,11 +1,11 @@
+---
+name: external-review-auto
+description: "Automatically send a curated repomix bundle to an external reviewer (agy/Claude CLI/opencode) for a second opinion. No manual paste step — the backend reads the bundle from disk and the response is captured automatically."
+trigger: /external-review-auto
+---
 <!-- 2026-05-28: SKILL.md split. Hardening/troubleshooting/internals
      relocated to references/. If you reach for "edge case #7" by section
      name, check references/troubleshooting.md. -->
----
-name: external-review-auto
-description: Automatically send a curated repomix bundle to an external reviewer (agy/Claude CLI/opencode) for a second opinion. No manual paste step — the backend reads the bundle from disk and the response is captured automatically.
-trigger: /external-review-auto
----
 
 # /external-review-auto
 
@@ -324,7 +324,7 @@ When round N's response contains critical issues:
 | `--auto-detect` | `-AutoDetect` | Derive include list from `git status` + `HEAD~1` (human use) |
 | `--spec-review <path>` | `-SpecReview <path>` | One-flag spec review: auto-fills template + bundles spec |
 | `--blind-seat <preset>` | `-BlindSeat <preset>` | Give ONE reviewer the bundle with comments blanked, while the others review the normal one. Attacks premise-blindness: a bare number invites *"where did this come from?"*, an explained number suppresses it. Line numbers are preserved, so `file:line` citations from that seat stay valid. Evidence is a directional A/B at n=1 per cell — see `docs/assessments/2026-09-01-blind-seat-ab.md`; blinding also costs you findings that depend on a comment stating the intent, which is why only one seat is blinded. |
-| `--premise-check` | `-PremiseCheck` | Append a premise-checking section to this round's prompt: which numbers were never measured, which documented claims no code path exercises, which tests would pass if the thing they cover were broken. Round-level (every seat sees it) — the prompt is embedded in the bundle, so a per-seat lens would need a per-seat bundle. |
+| `--premise-check` | `-PremiseCheck` | Append a premise-checking section to this round's prompt (applied *after* any `-Diff` merge, which used to discard it): which numbers were never measured, which documented claims no code path exercises, which tests would pass if the thing they cover were broken. Round-level (every seat sees it) — the prompt is embedded in the bundle, so a per-seat lens would need a per-seat bundle. |
 | `--force-bundle-size` | `-ForceBundleSize` | Dispatch reviewers whose delivery channel cannot carry the bundle. Without it era refuses (exit 1, nothing spent). See *Bundle delivery limits*. **`-Force` does not do this.** |
 
 ### LLM-driven file selection

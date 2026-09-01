@@ -1109,49 +1109,6 @@ Be terse. If a section is empty, write "(none)".
     # the prompt, it just must be read before untrusted text is spliced in.
     $contractRequired = @(Get-EraResponseContract -PromptText (Get-Content -Raw -LiteralPath $promptPath -ErrorAction SilentlyContinue))
 
-    # --- Premise check (2026-09-01) ------------------------------------------
-    # WHY THIS EXISTS. era is good at finding defects in code as written and
-    # weak on defects in premises never checked -- a constant nobody measured, a
-    # registry key nobody copied, a buffer nobody flushed. None of those look
-    # wrong when read, so a "find the defects" prompt walks past them.
-    #
-    # The evidence is a direct A/B on this codebase: the same 4-seat panel, on the
-    # same code, found none of four premise defects with a normal review prompt,
-    # and all four seats independently found a dead registry override when the
-    # prompt asked whether the gate could be wrong in BOTH directions.
-    #
-    # Deliberately additive, and deliberately not a third prompt family to
-    # maintain: it appends to whatever prompt the caller already wrote.
-    #
-    # Runs BEFORE repomix, because repomix embeds the prompt into the bundle.
-    if ($PremiseCheck) {
-        $premiseSection = @'
-
----
-
-## Premise check (required — answer before the review)
-
-The findings above are about what the code DOES. This section is about what it
-ASSUMES. Answer briefly and concretely; `[UNVERIFIED]` is a valid answer and a
-better one than a guess.
-
-1. **Which numbers here were never measured?** For each threshold, constant or
-   limit you can see: is it a measurement, a derivation from something else, or a
-   policy choice? Say which, and say how you can tell from the code.
-2. **Which documented claims are not exercised by any code path you can see?** A
-   comment or doc asserting behaviour is a claim. Name any you cannot trace to
-   code that would fail if the claim were false.
-3. **Which tests would still pass if the thing they cover were broken?** Name any
-   that assert on source text rather than behaviour, or that call past the layer
-   the defect would live in.
-4. **What is the most load-bearing assumption here that nobody has stated?**
-
-Do not pad this section. Three grounded answers beat twelve speculative ones.
-'@
-        Add-Content -LiteralPath $promptPath -Value $premiseSection -Encoding utf8
-        Write-Host "[era] Premise check appended to this round's prompt (-PremiseCheck). Round-level: every seat sees it."
-    }
-
     # --- {{PREVIOUS_ROUND}} template token substitution (PR 3) ---
     # If the finalized prompt contains {{PREVIOUS_ROUND}}, replace it with the
     # prior round's response text. Must run AFTER the prompt file is finalized
@@ -1718,6 +1675,57 @@ Be terse. If a section is empty, write "(none)".
     if ($slugWarning) { Write-Host $slugWarning }
 
     Write-Host "Running repomix..."
+    # --- Premise check (2026-09-01) ------------------------------------------
+    # WHY THIS EXISTS. era is good at finding defects in code as written and
+    # weak on defects in premises never checked -- a constant nobody measured, a
+    # registry key nobody copied, a buffer nobody flushed. None of those look
+    # wrong when read, so a "find the defects" prompt walks past them.
+    #
+    # The evidence is a direct A/B on this codebase: the same 4-seat panel, on the
+    # same code, found none of four premise defects with a normal review prompt,
+    # and all four seats independently found a dead registry override when the
+    # prompt asked whether the gate could be wrong in BOTH directions.
+    #
+    # Deliberately additive, and deliberately not a third prompt family to
+    # maintain: it appends to whatever prompt the caller already wrote.
+    #
+    # Runs BEFORE repomix (which embeds the prompt into the bundle) and AFTER the
+    # -Diff merge, and the ORDER RELATIVE TO -Diff IS THE WHOLE POINT.
+    #
+    # It first sat above the merge, where Merge-EraDiffPrompt's
+    # `if (-not $ExistingCarriesCallerContent) { return $DiffPrompt }` threw the
+    # section away on every -Diff round that did not also pass a prompt override
+    # -- while this function's own log line said "appended". A silent no-op that
+    # reported success, in the feature built to ask what nobody had checked.
+    # Found by the first panel ever pointed at this code.
+    if ($PremiseCheck) {
+        $premiseSection = @'
+
+---
+
+## Premise check (required — answer before the review)
+
+The findings above are about what the code DOES. This section is about what it
+ASSUMES. Answer briefly and concretely; `[UNVERIFIED]` is a valid answer and a
+better one than a guess.
+
+1. **Which numbers here were never measured?** For each threshold, constant or
+   limit you can see: is it a measurement, a derivation from something else, or a
+   policy choice? Say which, and say how you can tell from the code.
+2. **Which documented claims are not exercised by any code path you can see?** A
+   comment or doc asserting behaviour is a claim. Name any you cannot trace to
+   code that would fail if the claim were false.
+3. **Which tests would still pass if the thing they cover were broken?** Name any
+   that assert on source text rather than behaviour, or that call past the layer
+   the defect would live in.
+4. **What is the most load-bearing assumption here that nobody has stated?**
+
+Do not pad this section. Three grounded answers beat twelve speculative ones.
+'@
+        Add-Content -LiteralPath $promptPath -Value $premiseSection -Encoding utf8
+        Write-Host "[era] Premise check appended to this round's prompt (-PremiseCheck). Round-level: every seat sees it."
+    }
+
     $repomixTimeoutSec = 300
     # Run repomix under a handle we can TREE-KILL. This was Start-ThreadJob +
     # Wait-Job + Stop-Job, which ends the THREAD but not the native node process
@@ -2126,6 +2134,7 @@ Be terse. If a section is empty, write "(none)".
                 $fbResults = Invoke-ReviewerDispatch -ReviewerList @($fallbackPreset) `
                     -SuffixReviewerList @($approvedList + $fallbackPreset) `
                     -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
+                    -BundleOverrides $bundleOverrides `
                     -ReviewDir $reviewDir -Round $round -AgyModelMap $agyModelMap `
                     -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
                     -BundleTokens $tokenCount
@@ -2176,10 +2185,33 @@ Be terse. If a section is empty, write "(none)".
         try { $bundleFileCount = @((Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json).sources).Count } catch {}
     }
 
+    # --- Citation grounding (2026-09-01) -------------------------------------
+    # A reviewer was measured citing line 5,891 of a 2,834-line file, twice, in
+    # separate rounds. The bundle is on disk and line-numbered, so era can check
+    # this instead of asking every reader to. Advisory: a bad citation does not
+    # fail the round -- the finding it decorates was repeatedly real.
+    # Runs BEFORE Write-ReviewMetadata, so the warnings reach the round's own
+    # telemetry. It used to run after it, which made the only durable record of a
+    # reviewer inventing line numbers a console line nobody keeps.
+    $citationWarnings = @()
+    $bundleLineCounts = Get-EraBundleLineCounts -BundlePath $bundlePath
+    if ($bundleLineCounts.Count -gt 0) {
+        foreach ($preset in (@($results.Keys) | Sort-Object)) {
+            $rr = $results[$preset]
+            if (-not $rr -or -not $rr.Response) { continue }
+            $cit = Test-EraResponseCitations -Response $rr.Response -LineCounts $bundleLineCounts
+            if ($cit.OutOfRange.Count -gt 0) {
+                Write-Host "[era] WARNING: $preset cited line numbers that do not exist in the bundled files."
+                foreach ($cl in $cit.Lines) { Write-Host $cl }
+                $citationWarnings += "$preset cited $($cit.OutOfRange.Count) of $($cit.Checked) checkable line numbers past the end of the named file: $($cit.OutOfRange -join '; ')"
+            }
+        }
+    }
+
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
         -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
-        -CostWarnings $costReport.Warnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
+        -CostWarnings $costReport.Warnings -CitationWarnings $citationWarnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
         -TopicRoundCount $topicRoundCount -DeliveryModes $deliveryModes -BundleBytes ([long]$bundleBytes)
 
     # --- Void-round gate (2026-08-10) ----------------------------------------
@@ -2201,24 +2233,6 @@ Be terse. If a section is empty, write "(none)".
     #
     # $runSucceeded is deliberately left unset so the finally block keeps the
     # repomix config as a receipt for the failed run.
-    # --- Citation grounding (2026-09-01) -------------------------------------
-    # A reviewer was measured citing line 5,891 of a 2,834-line file, twice, in
-    # separate rounds. The bundle is on disk and line-numbered, so era can check
-    # this instead of asking every reader to. Advisory: a bad citation does not
-    # fail the round -- the finding it decorates was repeatedly real.
-    $bundleLineCounts = Get-EraBundleLineCounts -BundlePath $bundlePath
-    if ($bundleLineCounts.Count -gt 0) {
-        foreach ($preset in (@($results.Keys) | Sort-Object)) {
-            $rr = $results[$preset]
-            if (-not $rr -or -not $rr.Response) { continue }
-            $cit = Test-EraResponseCitations -Response $rr.Response -LineCounts $bundleLineCounts
-            if ($cit.OutOfRange.Count -gt 0) {
-                Write-Host "[era] WARNING: $preset cited line numbers that do not exist in the bundled files."
-                foreach ($cl in $cit.Lines) { Write-Host $cl }
-            }
-        }
-    }
-
     $voidReport = Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
         -Results $results -RequestedCount @($reviewerList).Count -DeliveryModes $deliveryModes
     if ($voidReport.IsVoid) {

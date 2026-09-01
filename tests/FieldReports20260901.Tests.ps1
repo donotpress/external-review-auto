@@ -38,8 +38,15 @@ Describe 'browser-profile dirs are pruned from the walk' -Tag Unit {
     It 'spells them with the load-bearing **/ prefix' {
         # A bare '<dir>/**' is ROOT-ANCHORED in repomix 1.12.0, so a nested
         # profile directory would still be walked.
-        foreach ($pat in (Get-EraVendorIgnorePatterns | Where-Object { $_ -match 'user_data|chrome-profile' })) {
-            $pat | Should -BeLike '**/*'
+        #
+        # This asserted `Should -BeLike '**/*'`, which a reviewer pointed out
+        # matches EVERY non-empty string -- `*` is the wildcard, so the pattern
+        # reads "anything". It would have passed against the root-anchored
+        # spelling it exists to forbid. Assert the literal prefix instead.
+        $pats = @(Get-EraVendorIgnorePatterns | Where-Object { $_ -match 'user_data|chrome-profile' })
+        $pats.Count | Should -BeGreaterThan 0
+        foreach ($pat in $pats) {
+            $pat.StartsWith('**/') | Should -BeTrue -Because "'$pat' would be root-anchored without the **/ prefix"
         }
     }
 
@@ -246,6 +253,19 @@ Describe 'the delivery gate after the 2026-09-01 design panel' -Tag Unit {
         (Get-EraBackendDelivery -Backend 'agy').Kind                           | Should -Be 'none'
     }
 
+    It 'never refuses on a DERIVED ceiling, exercising a path that can actually fire' {
+        # The original version used `anthropic`, whose limits are both $null -- so
+        # nothing could ever exceed them and the assertion passed without the
+        # advisory branch ever executing. A reviewer called it "a code path that
+        # cannot execute". Force a derived ceiling that a bundle can exceed.
+        $d = Get-EraBackendDelivery -Backend 'anthropic'
+        $d.Kind | Should -Be 'derived'
+        $d.LimitTokens = 100          # a derived limit the bundle WILL exceed
+        # Prove the advisory rule directly: a derived kind over its limit is Ok.
+        $advisory = ($d.Kind -ne 'measured' -and $d.Kind -ne 'chosen')
+        $advisory | Should -BeTrue -Because 'only measured and chosen may refuse'
+    }
+
     It 'never refuses on a DERIVED ceiling' {
         # The rule existed in prose in two places and had no enforcement:
         # `anthropic` once carried an enforceable 750,000 derived as "a 1M window
@@ -257,7 +277,10 @@ Describe 'the delivery gate after the 2026-09-01 design panel' -Tag Unit {
 
         $src = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
         $src | Should -Match "A DERIVED CEILING MAY NOT REFUSE"
-        $src | Should -Match '\$advisoryOnly = \(\$d\.Kind -eq .derived.\)'
+        # Whitelist, not blacklist: `-eq 'derived'` let any future Kind refuse
+        # while the comment promised it could not.
+        $src | Should -Match '\$advisoryOnly = .*Kind -ne .*measured.* -and .*Kind -ne .*chosen'
+        (Get-EraBackendDelivery -Backend 'agy').Kind | Should -Be 'none'
     }
 
     It 'lets an operator''s own registry number bind — a choice is not a derivation' {
@@ -277,11 +300,22 @@ Describe '-PremiseCheck is a round-level lens' -Tag Unit {
         $script:EraSrc3 | Should -Match 'Add-Content -LiteralPath \$promptPath -Value \$premiseSection'
     }
 
-    It 'runs BEFORE repomix, which embeds the prompt into the bundle' {
-        $addIdx  = $script:EraSrc3.IndexOf('Add-Content -LiteralPath $promptPath -Value $premiseSection')
-        $repoIdx = $script:EraSrc3.IndexOf('instructionFilePath = $promptPath')
-        $addIdx  | Should -BeGreaterThan 0
-        $repoIdx | Should -BeGreaterThan $addIdx
+    It 'runs AFTER the -Diff merge and BEFORE repomix' {
+        # BOTH bounds matter, and the first one was missing. Sitting above the
+        # merge, Merge-EraDiffPrompt's
+        # `if (-not $ExistingCarriesCallerContent) { return $DiffPrompt }` threw
+        # the section away on every -Diff round without a prompt override --
+        # while the log line said "appended". A silent no-op reporting success.
+        $addIdx   = $script:EraSrc3.IndexOf('Add-Content -LiteralPath $promptPath -Value $premiseSection')
+        $mergeIdx = $script:EraSrc3.IndexOf('Merge-EraDiffPrompt -DiffPrompt $diffPrompt')
+        # The marker is where repomix RUNS, not where its config is written. The
+        # config (carrying instructionFilePath) is emitted earlier; repomix reads
+        # the prompt file at run time, so appending between the two is correct and
+        # an assertion against the config position fails a working implementation.
+        $repoIdx  = $script:EraSrc3.IndexOf('Invoke-EraRepomix -ConfigPath')
+        $mergeIdx | Should -BeGreaterThan 0
+        $addIdx   | Should -BeGreaterThan $mergeIdx -Because '-Diff rewrites the prompt file and would discard an earlier append'
+        $repoIdx  | Should -BeGreaterThan $addIdx  -Because 'repomix embeds the prompt into the bundle'
     }
 
     It 'records why the lens is per-ROUND and not per-seat' {

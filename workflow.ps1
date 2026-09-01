@@ -2354,6 +2354,15 @@ function Get-EraFailureCategory {
     # Deliberate capture-failure codes: the call completed and what came back was
     # not a review. Same list Get-EraRecoverableFailures uses — keep them in step.
     $answered = @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+    # A BUNDLE-ACCESS REFUSAL IS NOT AN ANSWER. The detector already worked out
+    # which of its three branches fired and put it in NonReviewBranch; this
+    # function ignored it and called every agentic-narration-capture
+    # 'answered-badly' -- including the one that means the model never SAW the
+    # bundle, where nothing was reviewed at all. Those are opposite facts, and
+    # collapsing them is the exact thing this classifier exists to prevent.
+    # Two implementations of one rule, one of them discarding what the other
+    # computed. Found by the first panel pointed at this code.
+    if ($Result.NonReviewBranch -eq 'bundle-access-refusal') { return 'not-delivered' }
     if ($Result.Error -and $answered -contains $Result.Error) { return 'answered-badly' }
     if ($Result.ExitCode -eq 0 -and -not $HasArtifact) { return 'no-artifact' }
     if ($Result.Error -or $Result.RetryReason) { return 'not-delivered' }
@@ -2460,6 +2469,11 @@ function Write-ReviewMetadata {
         # Cap breaches noticed before dispatch. Advisory (see Get-EraCostReport),
         # so they must survive into the record even though nothing blocked.
         [string[]]$CostWarnings = @(),
+        # Citations that point past the end of the file they name. Advisory, but
+        # they belong in the round's own telemetry: they were console-only, so the
+        # one durable record of a reviewer inventing line numbers was a line in a
+        # terminal that nobody keeps.
+        [string[]]$CitationWarnings = @(),
         [string[]]$IncludeFilesList = @(),
         [int]$BundleFileCount = 0,
         [int]$TopicRoundCount = 0,
@@ -2618,6 +2632,7 @@ function Write-ReviewMetadata {
         bundle_bytes = $BundleBytes
         convergence_warnings = @($ConvergenceWarnings)
         cost_warnings = @($CostWarnings)
+        citation_warnings = @($CitationWarnings)
         reviewers = @($reviewerEntries)
     }
     $meta | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
@@ -3630,7 +3645,13 @@ function Get-EraBundleDeliveryPlan {
         # subsystem. Measure it or do not enforce it.
         $ok = $true
         $reason = $null
-        $advisoryOnly = ($d.Kind -eq 'derived')
+        # Whitelist, not blacklist. This read `-eq 'derived'`, so any Kind that was
+        # neither measured nor chosen -- 'none', or anything added later -- could
+        # refuse a round while the comment above promised it could not. Unreachable
+        # today (a 'none' channel carries no limit to exceed), and left that way on
+        # purpose: the next Kind added should be advisory until someone decides
+        # otherwise, not enforcing by default.
+        $advisoryOnly = ($d.Kind -ne 'measured' -and $d.Kind -ne 'chosen')
         if ($null -ne $d.LimitBytes -and $BundleBytes -gt [long]$d.LimitBytes) {
             $ok = $false
             $reason = "bundle is $('{0:N0}' -f $BundleBytes) bytes; the $($d.Mode) channel carries at most $('{0:N0}' -f [long]$d.LimitBytes)"
@@ -3712,7 +3733,19 @@ function Get-EraBundleLineCounts {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$BundlePath)
     $counts = @{}
-    if (-not (Test-Path -LiteralPath $BundlePath)) { return $counts }
+    if (-not (Test-Path -LiteralPath $BundlePath)) {
+        Write-Host "[era] WARNING: citation grounding skipped -- no bundle at '$BundlePath'."
+        return $counts
+    }
+    # [System.IO.File] resolves a RELATIVE path against the PROCESS working
+    # directory, which Set-Location does not change. So Test-Path could succeed
+    # (PowerShell-aware) while ReadLines below threw FileNotFound, and the catch
+    # returned an empty map -- citation checking silently doing nothing, with
+    # nothing saying so. Measured: relative path -> 0 files, absolute -> 6.
+    # era itself always passes an absolute path, so this never fired in
+    # production; it was one read error away from disabling the feature in
+    # silence, which is the same fail-open shape as the token-count gate.
+    $BundlePath = (Resolve-Path -LiteralPath $BundlePath).Path
     $current = $null
     try {
         foreach ($line in [System.IO.File]::ReadLines($BundlePath)) {
@@ -3723,7 +3756,14 @@ function Get-EraBundleLineCounts {
                 if ($n -gt $counts[$current]) { $counts[$current] = $n }
             }
         }
-    } catch { return @{} }
+    } catch {
+        # A read failure must not look like "this bundle has no files".
+        Write-Host "[era] WARNING: citation grounding skipped -- could not read the bundle ($($_.Exception.Message))."
+        return @{}
+    }
+    if ($counts.Count -eq 0) {
+        Write-Host "[era] NOTE: citation grounding found no line-numbered files in the bundle; citations will not be checked this round."
+    }
     return $counts
 }
 
@@ -3877,8 +3917,20 @@ function Remove-EraBundleComments {
         $trim   = $body.TrimStart()
 
         if ($inBlock) {
+            # THE MIRROR OF THE v2.6.1 BUG. That fix stopped a block OPENER with
+            # code after the closer being treated as a comment line. This is the
+            # same shape at the other end: a line that CLOSES a block and then
+            # carries code -- `*/ doSomething();` -- was blanked wholesale,
+            # deleting the code. Found by the first panel pointed at this file,
+            # which is also how the opener case was found.
+            $closeAt = if ($blockEnd) { $body.IndexOf($blockEnd) } else { -1 }
+            if ($closeAt -ge 0) {
+                $inBlock = $false
+                $tail = $body.Substring($closeAt + $blockEnd.Length)
+                $blockEnd = $null
+                if ($tail.Trim()) { $stripped++; $out.Add($prefix + $tail); continue }
+            }
             $stripped++
-            if ($blockEnd -and $body -match [regex]::Escape($blockEnd)) { $inBlock = $false; $blockEnd = $null }
             $out.Add($prefix); continue
         }
         $isComment = $false
@@ -3919,10 +3971,24 @@ function Remove-EraBundleComments {
                 $isComment = $true
             }
         }
-        if (-not $isComment -and $ext -eq '.py' -and ($trim.StartsWith('"""') -or $trim.StartsWith("'''"))) {
-            $q = $trim.Substring(0,3); $isComment = $true
-            if ($trim.Length -le 3 -or -not ($trim.Substring(3) -match [regex]::Escape($q))) { $inBlock = $true; $blockEnd = $q }
-        }
+        # PYTHON TRIPLE-QUOTES ARE DELIBERATELY NOT HANDLED.
+        #
+        # They were, and it deleted code. A line scanner cannot tell an OPENING
+        # docstring delimiter from a CLOSING one, and the common shape
+        #
+        #     x = """some
+        #     multi-line string"""
+        #
+        # opens on a line that does NOT start with the delimiter and closes on one
+        # that does -- so the closer was read as an opener, started a phantom
+        # block, and everything after it was blanked until the next quote. Three
+        # reviewers flagged it independently.
+        #
+        # Distinguishing them needs a parser that tracks string state, which is
+        # far more machinery than this filter should carry. A `#` comment in a
+        # .py file is still stripped; a docstring survives. A surviving comment
+        # weakens the experiment, a deleted expression corrupts the code under
+        # review, and only one of those is acceptable.
         if ($isComment) { $stripped++; $out.Add($prefix) } else { $out.Add($line) }
     }
     [System.IO.File]::WriteAllLines($OutputPath, $out)

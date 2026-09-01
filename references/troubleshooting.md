@@ -331,3 +331,55 @@ model you had not asked for.
 
 **Fix:** give a more specific hint (`opus`, `sonnet 4.6`, `gemini 3.1 pro low`).
 Exact hints never reach the substring pass and are unaffected.
+
+---
+
+## Invoking era from WSL: two silent footguns
+
+`/era` **always runs on Windows PowerShell**, whichever shell you launch it from —
+the `pwsh` on a WSL PATH is a shim that `exec`s `pwsh.exe`, and every run reports
+`Win32NT`. That is by design and not worth changing: of the four backends, `agy`
+and `repomix` have no Linux install at all, and `claude` and `opencode` keep
+*separate* credential stores per platform which expire independently (see the
+`claude` WSL credential fallback above — a measured incident took `opus` from
+115/119 lifetime to 0/4 in a day on an expired Windows token while the WSL agent
+kept working).
+
+What that does mean is that a WSL front door crosses a process boundary, and two
+things silently fall through it.
+
+**1. `ERA_*` environment variables do not cross.** WSL forwards only what is named
+in `WSLENV`, which does not include them. So this looks right and does nothing:
+
+```bash
+ERA_OPENCODE_READ_TOOL=1 pwsh <skill>/runtimes/era.ps1 ...   # variable never arrives
+```
+
+era takes its default path and nothing reports the discrepancy. Set the variable
+**inside** the PowerShell command instead:
+
+```bash
+pwsh -Command "\$env:ERA_OPENCODE_READ_TOOL='1'; & '<skill>/runtimes/era.ps1' ..."
+```
+
+**2. `pwsh -Command "& script.ps1"` collapses the exit code.** A script that calls
+`exit 2` returns **1** through `-Command`, and `pwsh -File` returns 2. era's whole
+outcome contract rests on telling those apart — exit 1 spent nothing and re-running
+is free, exit 2 already cost money — so the `-Command` form silently destroys the
+distinction. Measured:
+
+| invocation | `exit 2` becomes |
+|---|---|
+| `pwsh -Command "& script.ps1"` | **1** |
+| `pwsh -File script.ps1` | 2 |
+| `pwsh script.ps1` (implicit `-File`) | 2 |
+
+The documented dispatch line already uses the safe form. Use `pwsh <path>` or
+`pwsh -File`, never `-Command "& ..."`.
+
+**A related trap inside PowerShell itself:** `Set-Location` does not change
+`[Environment]::CurrentDirectory`, so `Test-Path` (PowerShell-aware) can succeed on
+a relative path while `[System.IO.File]::ReadLines()` on the same path throws
+FileNotFound. Always resolve to an absolute path before handing one to a .NET API.
+That defect shipped once here, in citation grounding, where it made the check
+silently do nothing.
