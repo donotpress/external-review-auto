@@ -315,9 +315,9 @@ misbehaved" when it had in fact answered correctly and briefly.
 
 ---
 
-## "WARNING: model hint '<x>' matches N claude models"
+## "WARNING: model hint '<x>' matches N claude/opencode models" / "[agy] WARNING: model hint '<x>' matches N models at the same tier"
 
-**Cause:** `-Model` hints are resolved by an exact pass first and a **substring**
+**Cause:** `-Model` and `-AgyModel` hints are resolved by an exact pass first and a **substring**
 pass second, and the substring matcher is `a.Contains(b) -or b.Contains(a)`. A
 short hint can therefore match more than one family — against the shipped
 registry, `o` and `s` each match both `sonnet` and `opus`, and `u` matches both
@@ -331,6 +331,49 @@ model you had not asked for.
 
 **Fix:** give a more specific hint (`opus`, `sonnet 4.6`, `gemini 3.1 pro low`).
 Exact hints never reach the substring pass and are unaffected.
+
+**The same warning now comes from three other places**, because this one rule had
+four implementations and only the claude branch had it. Measured against the
+shipped registry: `deepseek` matches two opencode models, `minimax` eight, `flash`
+fourteen; and `-AgyModel gemini` used to return **three different models across
+five processes** because `backends/agy.ps1` named its match accumulator `$matches`,
+which is an automatic variable PowerShell overwrites on every `-match`. All four
+now sort, tie-break the same way, and say when a hint was ambiguous.
+
+---
+
+## "opencode: this seat's Ns budget was spent waiting for the run lock" (nothing spent)
+
+**Cause:** era's opencode seats are serialised behind one global mutex, because
+opencode keeps a single SQLite database and two concurrent `opencode run`
+processes fail with `database is locked`. The **default panel has two opencode
+seats**, so the second one queues behind the first. Since v2.8 that wait is
+bounded by the seat's own budget (the dispatcher waits `TimeoutSec + 30` and then
+tree-kills the seat, so time spent queueing is time the run does not get), and a
+seat that reaches the front with too little budget left refuses instead of
+starting a run that would be killed before it finished.
+
+Before v2.8 the wait was a fixed 900s against a 600s default budget, and the
+adapter's own deadline started *after* it — so a queued seat believed it had a
+further full budget and was recorded as a plain "Timed out (global)".
+
+**Fix:** raise the reviewer timeout, or run fewer opencode seats in one panel
+(`-Reviewer gemini,opus,deepseek-flash` drops to one). Nothing was spent.
+
+---
+
+## "registry max_bundle_tokens is ignored for opencode … delivery"
+
+**Cause:** an override only binds where the channel is bounded in that unit.
+opencode's channel is bounded in **bytes** (it truncates an attached file at
+51,200 and reads larger ones from disk), and no opencode adapter reads a token
+ceiling at all — so enforcing one in the plan refused rounds the adapter would
+have delivered, which is the expensive direction. Use `max_bundle_bytes` for
+opencode. `max_bundle_tokens` still binds on `claude`, where the CLI itself
+rejects on tokens.
+
+The same rule already applied to `max_bundle_bytes` on opencode's **attach** mode:
+51,200 is where the transport truncates, not a preset tunable.
 
 ---
 

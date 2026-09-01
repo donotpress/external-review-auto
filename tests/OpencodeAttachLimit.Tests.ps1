@@ -21,17 +21,26 @@
 
 BeforeAll {
     $script:SkillRoot = Split-Path -Parent $PSScriptRoot
+    . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
     $script:Src = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/opencode.ps1')
 }
 
 Describe 'opencode attach limit' -Tag Unit {
 
     It 'declares the 50 KiB cap as an explicit constant' {
-        $script:Src | Should -Match '\$OPENCODE_ATTACH_LIMIT_BYTES\s*=\s*51200'
+        # WAS a regex over source text. The constant moved into
+        # Get-OpencodeDeliveryLimits so tests/OpencodeConstantParity.Tests.ps1
+        # can compare it to the PLAN's number instead of to a literal; assert
+        # the value, which is what this was reaching for.
+        (Get-OpencodeDeliveryLimits).AttachLimitBytes | Should -Be 51200
     }
 
     It 'still measures the bundle against the cap' {
-        $script:Src | Should -Match '\$overAttachLimit\s*=\s*\$bundleBytes\s*-gt\s*\$OPENCODE_ATTACH_LIMIT_BYTES'
+        $cap = (Get-OpencodeDeliveryLimits).AttachLimitBytes
+        (Test-OpencodeOverAttachLimit -BundleBytes ($cap - 1) -AttachLimitBytes $cap) | Should -BeFalse
+        (Test-OpencodeOverAttachLimit -BundleBytes $cap       -AttachLimitBytes $cap) | Should -BeFalse
+        (Test-OpencodeOverAttachLimit -BundleBytes ($cap + 1) -AttachLimitBytes $cap) | Should -BeTrue
+        $script:Src | Should -Match '\$overAttachLimit = Test-OpencodeOverAttachLimit'
     }
 
     It 'switches to the Read tool on size, so the model sees the whole bundle' {
@@ -40,7 +49,7 @@ Describe 'opencode attach limit' -Tag Unit {
     }
 
     It 'refuses only past the point the read path has been verified' {
-        $script:Src | Should -Match '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*1048576'
+        (Get-OpencodeDeliveryLimits).ReadToolMaxBytes | Should -Be 1048576
         $script:Src | Should -Match 'throw \("opencode cannot review this bundle'
         # The refusal must say the round cost nothing, so a caller can tell it
         # apart from a void round that already spent money.
@@ -53,7 +62,14 @@ Describe 'opencode attach limit' -Tag Unit {
     }
 
     It 'measures the real bundle rather than trusting a caller-supplied size' {
-        $script:Src | Should -Match 'Get-Item -LiteralPath \$BundlePath\).Length'
+        $f = Join-Path ([System.IO.Path]::GetTempPath()) ("era-al-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        try {
+            Set-Content -LiteralPath $f -Value ('y' * 77) -NoNewline -Encoding ascii
+            Get-OpencodeBundleBytes -BundlePath $f | Should -Be 77
+        } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        # ...and a bundle it CANNOT measure is a refusal, not a zero. A zero
+        # reads as "smaller than the cap", which attaches and truncates.
+        { Get-OpencodeBundleBytes -BundlePath (Join-Path ([System.IO.Path]::GetTempPath()) 'nope-era.xml') } | Should -Throw
     }
 
     It 'warns loudly if a large bundle is force-attached anyway' {

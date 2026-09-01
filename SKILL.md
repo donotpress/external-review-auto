@@ -323,7 +323,7 @@ When round N's response contains critical issues:
 | `--diff` | `-Diff` | Round 2+: only bundle changed files (opt-in) |
 | `--auto-detect` | `-AutoDetect` | Derive include list from `git status` + `HEAD~1` (human use) |
 | `--spec-review <path>` | `-SpecReview <path>` | One-flag spec review: auto-fills template + bundles spec |
-| `--blind-seat <preset>` | `-BlindSeat <preset>` | Give ONE reviewer the bundle with comments blanked, while the others review the normal one. Attacks premise-blindness: a bare number invites *"where did this come from?"*, an explained number suppresses it. Line numbers are preserved, so `file:line` citations from that seat stay valid. Evidence is a directional A/B at n=1 per cell — see `docs/assessments/2026-09-01-blind-seat-ab.md`; blinding also costs you findings that depend on a comment stating the intent, which is why only one seat is blinded. |
+| `--blind-seat <preset>` | `-BlindSeat <preset>` | Give ONE reviewer the bundle with comments blanked, while the others review the normal one. If that seat fails recoverably and the agy fallback replaces it, the fallback inherits the stripped bundle and era says so (before v2.8 it silently got the sighted one, and the v2.7 fix for that was a no-op — the override map is keyed by preset and the fallback's preset is excluded from the round by construction). Attacks premise-blindness: a bare number invites *"where did this come from?"*, an explained number suppresses it. Line numbers are preserved, so `file:line` citations from that seat stay valid. Evidence: an A/B at n=1 per cell showed a direction, and a 20-cell replication across two subjects with blinded scoring **did not reproduce it** — zero difference on the only model measured at n=4 in both arms, both pairs reversing on the second subject, and two scorers of the same four files disagreeing by more than the effect. `-BlindSeat` rests on its argument, not on a measurement; see `docs/assessments/2026-09-01-blind-seat-ab.md`. Blinding also costs you findings that depend on a comment stating the intent the code violates, which is why only one seat is blinded. |
 | `--premise-check` | `-PremiseCheck` | Append a premise-checking section to this round's prompt (applied *after* any `-Diff` merge, which used to discard it): which numbers were never measured, which documented claims no code path exercises, which tests would pass if the thing they cover were broken. Round-level (every seat sees it) — the prompt is embedded in the bundle, so a per-seat lens would need a per-seat bundle. |
 | `--force-bundle-size` | `-ForceBundleSize` | Dispatch reviewers whose delivery channel cannot carry the bundle. Without it era refuses (exit 1, nothing spent). See *Bundle delivery limits*. **`-Force` does not do this.** |
 
@@ -439,6 +439,15 @@ rather than a code change. (This was **broken and documented as working** in v2.
 override never reached a real dispatch. Fixed in v2.3.1, with an end-to-end test that
 runs the real `era.ps1` against a real edited registry.)
 
+An override only binds where the channel is actually bounded in that unit, and era
+says so when it is not: `max_bundle_bytes` cannot move opencode's 51,200-byte attach
+cap (that is where the transport itself truncates), and since v2.8
+`max_bundle_tokens` does not bind on opencode at all — that channel is byte-bounded
+and no opencode adapter reads a token ceiling, so enforcing one made the plan refuse
+rounds the adapter would have delivered. Both cases print a NOTE naming the key that
+does work. `max_bundle_tokens` still binds on `claude`, where the CLI itself rejects
+on tokens.
+
 **Where the `claude` ceiling comes from.** Measured by bisection against the live CLI,
 replacing a derived 150,000 that was ~4x too tight. Slices of a real 2,396,233-byte
 bundle (3.369 bytes per repomix token) were piped to `claude --print --model
@@ -536,6 +545,12 @@ Full method, both ceilings, and the wrong turn in the middle:
 
 The round summary now names each seat's delivery mode (`via=attach`, `via=stdin`, …),
 and `round-N-metadata.json` records `delivery_mode` per reviewer plus `bundle_bytes`.
+
+It also records **which seat was blinded**: `blind_seat` at round level (always
+present, `null` when none was), and `blinded` / `delivery_bundle` per reviewer.
+Before v2.8 that fact existed only in a console line, so the arm label of a
+`-BlindSeat` A/B could not be recovered from the round's own artifacts — the same
+gap the citation warnings had before they were recorded.
 
 ### Environment variables
 

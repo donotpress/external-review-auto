@@ -1429,13 +1429,22 @@ Be terse. If a section is empty, write "(none)".
                 $displayNorm = $entry.display.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
                 if ($hintUsable -and ($displayNorm -match $hintNorm -or $hintNorm -match $displayNorm)) {
                     $tierRank = if ($tierKey -eq 'high') { 3 } elseif ($tierKey -eq 'medium') { 2 } else { 1 }
-                    $candidates += @{ Display = $entry.display; TierKey = $tierKey; TierRank = $tierRank }
+                    $candidates += @{ Display = $entry.display; SettingsValue = $entry.settings_value; TierKey = $tierKey; TierRank = $tierRank }
                 }
             }
         }
         if ($candidates.Count -gt 0) {
+            # TIE-BROKEN ON THE SAME KEY AS runtimes/resolve-model.ps1. Both copies
+            # of this rule were made deterministic (v2.4.1, then v2.7.1) and
+            # neither release asked whether they were deterministic the SAME way:
+            # one ranked on SettingsValue and this one on Display, so a TierRank
+            # tie could resolve to different models depending on which resolver
+            # was asked. Measured against the shipped registry they do not
+            # currently diverge -- latent, not live -- and the next registry entry
+            # is what decides whether it stays that way. See
+            # tests/AgyTieBreakParity.Tests.ps1.
             $best = $candidates |
-                Sort-Object @{ Expression = 'TierRank'; Descending = $true }, @{ Expression = 'Display'; Descending = $false } |
+                Sort-Object @{ Expression = 'TierRank'; Descending = $true }, @{ Expression = 'SettingsValue'; Descending = $false } |
                 Select-Object -First 1
             $resolvedAgyHint = $best.Display
             if (@($candidates | Where-Object { $_.TierRank -eq $best.TierRank }).Count -gt 1) {
@@ -1805,8 +1814,19 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     }
 
     $tokenCount = 0
-    $bundleBytesForEstimate = 0
-    try { if (Test-Path -LiteralPath $bundlePath) { $bundleBytesForEstimate = (Get-Item -LiteralPath $bundlePath).Length } } catch {}
+    # THE SAME FAIL-OPEN THIS RELEASE DELETED FROM TWO ADAPTERS, in the copy that
+    # matters most. `catch {}` left this at 0, which skips the byte-based token
+    # fallback below AND the warning that goes with it -- so the fix that made
+    # the token gate fail CLOSED had a silent fail-OPEN fallback sitting under
+    # it. Raised by the opus seat of the twin-sweep panel, which also pointed out
+    # that "it is guarded upstream today" is exactly the argument this release
+    # rejected for backends/agy.ps1.
+    #
+    # $null, not 0: "I could not measure it" and "it measured zero" are different
+    # facts and only one of them may disarm a gate.
+    $bundleBytesForEstimate = $null
+    try { $bundleBytesForEstimate = [long](Get-Item -LiteralPath $bundlePath -ErrorAction Stop).Length }
+    catch { Write-Host "[era] WARNING: could not size the bundle at '$bundlePath' ($($_.Exception.Message))." }
     $repomixText = $repomixResult
     if ($repomixText -match 'Total Tokens:\s*([0-9,]+)') {
         $tokenCount = [int]($matches[1] -replace ',', '')
@@ -1820,7 +1840,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # catch -- the 711,253-token round that returned "Prompt is too long".
     # Estimated from bytes so the gate still bites; 3.369 B/token is measured on a
     # real repomix XML bundle (2,396,233 B / 711,253 tok).
-    if ($tokenCount -le 0 -and $bundleBytesForEstimate -gt 0) {
+    if ($tokenCount -le 0 -and $null -ne $bundleBytesForEstimate -and $bundleBytesForEstimate -gt 0) {
         $tokenCount = [int][Math]::Ceiling($bundleBytesForEstimate / 3.369)
         Write-Host "[era] WARNING: could not parse a token count from repomix output; estimating $tokenCount tokens from $bundleBytesForEstimate bundle bytes (3.369 B/token, measured). Cost estimates and the delivery gate use this figure."
     }
@@ -1843,7 +1863,21 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         Stop-EraWithError "Bundle is empty -- repomix matched 0 files.$includeHint"
     }
 
-    $bundleBytes = if (Test-Path -LiteralPath $bundlePath) { (Get-Item -LiteralPath $bundlePath).Length } else { 0 }
+    # FAIL CLOSED. This was `... else { 0 }`, and 0 is the value that makes EVERY
+    # seat fit: it is the sole input to Get-EraBundleDeliveryPlan below and to
+    # Write-ReviewMetadata -BundleBytes. The bundle demonstrably exists at this
+    # point (the file-tag check above read it), so a failure here is a real read
+    # error and must refuse rather than wave the whole panel through. Nothing has
+    # been dispatched yet.
+    $bundleBytes = if ($null -ne $bundleBytesForEstimate) { $bundleBytesForEstimate } else {
+        try { [long](Get-Item -LiteralPath $bundlePath -ErrorAction Stop).Length }
+        catch {
+            Stop-EraWithError ("The bundle at '$bundlePath' was written and read, but its size cannot be measured ($($_.Exception.Message)).`n" +
+                "Every per-seat delivery check is measured against that number, and a zero would report that the bundle FITS every channel -- " +
+                "including the opencode attach cap, above which the bundle is silently truncated.`n" +
+                "Nothing was dispatched and nothing was spent.")
+        }
+    }
 
     # --- Per-backend delivery preflight (2026-08-31) -------------------------
     # $bundleBytes was computed here and then never read. The one thing era knew
@@ -2149,10 +2183,32 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 }
             }
             if ($fallbackPreset) {
+                # RE-KEY, do not pass through. $bundleOverrides is keyed by preset
+                # and $fallbackPreset is excluded from every seat in this round by
+                # construction, so handing the map over unchanged (which is what
+                # v2.7 did, calling it a fix) left the lookup with no key to find
+                # and the blinded seat's replacement still reading the sighted
+                # bundle. See Get-EraFallbackBundleOverrides.
+                $fbOverride = Get-EraFallbackBundleOverrides -BundleOverrides $bundleOverrides `
+                    -FallbackPreset $fallbackPreset -BlindSeat $BlindSeat -Replacing $failedRecoverable
+                if ($fbOverride.Note) { Write-Host $fbOverride.Note }
+                # Adopt it for the rest of the round so Write-ReviewMetadata
+                # records the fallback seat's arm too. The round map is not read
+                # for dispatch again after this point.
+                $bundleOverrides = $fbOverride.Overrides
+                # The fallback's delivery mode belongs in the round's telemetry
+                # too. $deliveryModes is keyed by the ORIGINAL seats, so the
+                # fallback's metadata row read delivery_mode = null -- unfulfilling
+                # the stated principle ("a post-mortem can answer how the bundle
+                # reached this seat from the round's own telemetry") for exactly
+                # the seat that had already failed once. $fbPlan was computed
+                # above; use it. Raised by the deepseek-flash seat of this
+                # change's panel.
+                foreach ($kv in (Get-EraDeliveryModeMap -Plan $fbPlan).GetEnumerator()) { $deliveryModes[$kv.Key] = $kv.Value }
                 $fbResults = Invoke-ReviewerDispatch -ReviewerList @($fallbackPreset) `
                     -SuffixReviewerList @($approvedList + $fallbackPreset) `
                     -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
-                    -BundleOverrides $bundleOverrides `
+                    -BundleOverrides $fbOverride.Overrides `
                     -ReviewDir $reviewDir -Round $round -AgyModelMap $agyModelMap `
                     -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
                     -BundleTokens $tokenCount
@@ -2230,7 +2286,8 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
         -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
         -CostWarnings $costReport.Warnings -CitationWarnings $citationWarnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
-        -TopicRoundCount $topicRoundCount -DeliveryModes $deliveryModes -BundleBytes ([long]$bundleBytes)
+        -TopicRoundCount $topicRoundCount -DeliveryModes $deliveryModes -BundleBytes ([long]$bundleBytes) `
+        -BundleOverrides $bundleOverrides
 
     # --- Void-round gate (2026-08-10) ----------------------------------------
     # A round could burn the whole budget, write artifacts, and still exit 0

@@ -1704,6 +1704,78 @@ function Resolve-AgyDefaultModelToken {
     return $tierNode.settings_value
 }
 
+function Get-EraSeatBundle {
+    <#
+    .SYNOPSIS
+        Which bundle does this seat review? The override map if it names this
+        preset, otherwise the round's normal bundle.
+
+    .DESCRIPTION
+        Extracted from Invoke-ReviewerDispatch so the fallback path can be tested
+        against the SAME lookup the dispatcher performs, rather than against a
+        copy of it in a test. The map is keyed by PRESET NAME, which is the whole
+        subtlety: see Get-EraFallbackBundleOverrides.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Preset,
+        [hashtable]$BundleOverrides = @{},
+        [Parameter(Mandatory)][string]$BundlePath
+    )
+    if ($BundleOverrides.ContainsKey($Preset) -and $BundleOverrides[$Preset]) { return $BundleOverrides[$Preset] }
+    return $BundlePath
+}
+
+function Get-EraFallbackBundleOverrides {
+    <#
+    .SYNOPSIS
+        The override map to hand the agy fallback re-dispatch, plus the line to
+        print about it. Returns @{ Overrides; Note }.
+
+    .DESCRIPTION
+        THE FIX THAT DID NOT FIX ANYTHING. e5d465e reported that the fallback
+        re-dispatch never received -BundleOverrides, so a blinded seat's
+        replacement silently got the SIGHTED bundle, and it added the parameter
+        to the call.
+
+        That cannot work. The map is keyed by preset name (Get-EraSeatBundle),
+        the fallback dispatches under its own preset name, and era.ps1 picks that
+        name with Resolve-EraAgyFallback -Exclude (every requested and approved
+        seat) -- so the fallback preset is GUARANTEED to be absent from a map
+        built out of this round's seats. The map was threaded into a lookup whose
+        key can never be present, and the behaviour did not change.
+
+        It shipped with a source-assertion test that the parameter EXISTS, which
+        passes against exactly that wiring.
+
+        So: re-key it. If the blinded seat is among the seats this fallback is
+        replacing, the fallback inherits its comment-stripped bundle -- which is
+        what -BlindSeat was asked for. If it is not, the fallback reviews the
+        normal bundle. Either way it is SAID, because the round summary was
+        otherwise reporting a blinded seat that had not been blinded.
+    #>
+    [CmdletBinding()]
+    param(
+        [hashtable]$BundleOverrides = @{},
+        [Parameter(Mandatory)][string]$FallbackPreset,
+        [string]$BlindSeat,
+        # The seats whose failure triggered this fallback.
+        [string[]]$Replacing = @()
+    )
+    $out = @{}
+    foreach ($k in $BundleOverrides.Keys) { $out[$k] = $BundleOverrides[$k] }
+    $note = $null
+    if ($BlindSeat -and $BundleOverrides.ContainsKey($BlindSeat) -and $BundleOverrides[$BlindSeat]) {
+        if ($Replacing -contains $BlindSeat) {
+            $out[$FallbackPreset] = $BundleOverrides[$BlindSeat]
+            $note = "[era] fallback '$FallbackPreset' inherits the comment-stripped bundle from the blinded seat '$BlindSeat' it replaces."
+        } else {
+            $note = "[era] fallback '$FallbackPreset' reviews the NORMAL bundle; the blinded seat '$BlindSeat' is not among the seats it replaces."
+        }
+    }
+    return @{ Overrides = $out; Note = $note }
+}
+
 function Invoke-ReviewerDispatch {
     [CmdletBinding()]
     param(
@@ -1797,7 +1869,7 @@ function Invoke-ReviewerDispatch {
                     -Family $modelInfo.agy_model_family -Tier $modelInfo.agy_model_tier
             }
         } else { $null }
-        $seatBundle = if ($BundleOverrides.ContainsKey($r) -and $BundleOverrides[$r]) { $BundleOverrides[$r] } else { $BundlePath }
+        $seatBundle = Get-EraSeatBundle -Preset $r -BundleOverrides $BundleOverrides -BundlePath $BundlePath
         $job = Start-ThreadJob -Name "review-$r" -ThrottleLimit 4 -ScriptBlock {
             param($adapterPath, $bp, $pp, $rp, $mi, $to, $fnName, $agyHint, $modelOverride, $opencodeProvider, $resolvedAgyModel, $pidFile)
             # Started here, not inside the try: on the exception path the adapter
@@ -2450,6 +2522,42 @@ function Get-EraVoidRoundReport {
     return @{ IsVoid = ($usable -eq 0); UsableCount = $usable; Lines = @($lines) }
 }
 
+function Get-EraSeatBlindRecord {
+    <#
+    .SYNOPSIS
+        The metadata fields describing this seat's bundle override:
+        @{ Blinded; Bundle; Sha256 }.
+
+    .DESCRIPTION
+        ONE definition of "is this seat blinded, and with what", because
+        Write-ReviewMetadata was open-coding
+        `$BundleOverrides.ContainsKey($p) -and $BundleOverrides[$p]` five times
+        across two branches -- which is precisely the shape the sweep this
+        function belongs to exists to remove. Raised by the opus seat of that
+        sweep's own panel.
+
+        THE HASH IS THE POINT, not the filename. era.ps1 asserts in a comment
+        that the stripped copy is "byte-comparable to what every other seat
+        sees", and nothing recorded enough to check it: Write-ReviewManifest
+        hashes the round's bundle and prompt and runs BEFORE the blind bundle is
+        built, so that file was never hashed anywhere. A leaf filename is not
+        evidence of content, which is what the A/B's control rests on.
+
+        A missing file records $null rather than an empty or invented hash: an
+        unhashable artifact and an unhashed one are different facts.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Preset,
+        [hashtable]$BundleOverrides = @{}
+    )
+    $path = if ($BundleOverrides.ContainsKey($Preset)) { $BundleOverrides[$Preset] } else { $null }
+    if (-not $path) { return @{ Blinded = $false; Bundle = $null; Sha256 = $null } }
+    $sha = $null
+    try { $sha = (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLower() } catch { $sha = $null }
+    return @{ Blinded = $true; Bundle = (Split-Path -Leaf $path); Sha256 = $sha }
+}
+
 function Write-ReviewMetadata {
     [CmdletBinding()]
     param(
@@ -2484,7 +2592,15 @@ function Write-ReviewMetadata {
         # Size of the bundle actually shipped. bundle_tokens was recorded and
         # bundle BYTES were not, which is the unit two of the four channels are
         # actually limited in.
-        [long]$BundleBytes = 0
+        [long]$BundleBytes = 0,
+        # preset -> alternate bundle path, from -BlindSeat. THE ARM LABEL OF THE
+        # EXPERIMENT. Which seat read the comment-stripped bundle existed only in
+        # a console line and in the prose of the assessment that scored it, so a
+        # later reader could not check a round's arms against its own record --
+        # and nothing stopped the sighted arm being scored as the blind one.
+        # Same failure as the citation warnings, which were console-only until
+        # v2.6 recorded them.
+        [hashtable]$BundleOverrides = @{}
     )
     $reviewerEntries = foreach ($preset in $Results.Keys) {
         $r = $Results[$preset]
@@ -2524,6 +2640,7 @@ function Write-ReviewMetadata {
         # has already renamed every rejected answer to *.rejected.md, so a plain
         # Test-Path asks exactly the right question -- and it covers backends
         # that exit 0 without ever writing a file, which no ExitCode check can.
+        $blindRec = Get-EraSeatBlindRecord -Preset $preset -BundleOverrides $BundleOverrides
         $artifactOk = Test-EraReviewerArtifact -ReviewDir $ReviewDir -Round $Round `
             -Preset $preset -ReviewerCount $Results.Count
         $contentOk = $adapterOk -and ($r.ExitCode -eq 0) -and $artifactOk
@@ -2562,6 +2679,9 @@ function Write-ReviewMetadata {
                 response_chars = if ($r.Response) { $r.Response.Length } else { 0 }
                 bundle_tokens = $BundleTokens
                 delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })
+                blinded = $blindRec.Blinded
+                delivery_bundle = $blindRec.Bundle
+                delivery_bundle_sha256 = $blindRec.Sha256
                 est_output_tokens = $r.OutputTokens
                 est_cost_input_usd = $estIn
                 est_cost_output_usd = $estOut
@@ -2609,6 +2729,9 @@ function Write-ReviewMetadata {
                 response_chars = $respLen
                 bundle_tokens = $BundleTokens
                 delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })
+                blinded = $blindRec.Blinded
+                delivery_bundle = $blindRec.Bundle
+                delivery_bundle_sha256 = $blindRec.Sha256
                 est_output_tokens = if ($null -ne $r.OutputTokens) { $r.OutputTokens } else { 0 }
                 est_cost_input_usd = $finalInputCost
                 est_cost_output_usd = 0
@@ -2633,6 +2756,23 @@ function Write-ReviewMetadata {
         convergence_warnings = @($ConvergenceWarnings)
         cost_warnings = @($CostWarnings)
         citation_warnings = @($CitationWarnings)
+        # Always present, even as $null: "no seat was blinded" and "this writer
+        # predates the field" are different facts, and a scorer reading a
+        # directory of rounds has to be able to tell them apart.
+        #
+        # RESTRICTED TO SEATS THIS ROUND ACTUALLY HAS A RESULT FOR. The override
+        # map is keyed by INTENT and can name a preset that never ran: when the
+        # blinded seat fails recoverably, Get-EraFallbackBundleOverrides copies
+        # the whole map and adds the fallback's preset, so an unfiltered join
+        # reads "gemini-api,muse-spark" and a scorer cannot tell which one read
+        # the stripped bundle -- the one question this field exists to answer.
+        # Found by the blinded seat of the panel run on the change that added it.
+        blind_seat = $(
+            $b = @($BundleOverrides.Keys |
+                    Where-Object { $Results.ContainsKey($_) -and (Get-EraSeatBlindRecord -Preset $_ -BundleOverrides $BundleOverrides).Blinded } |
+                    Sort-Object)
+            if ($b.Count -eq 1) { $b[0] } elseif ($b.Count -gt 1) { $b -join ',' } else { $null }
+        )
         reviewers = @($reviewerEntries)
     }
     $meta | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $ReviewDir "round-$Round-metadata.json") -Encoding utf8
@@ -3473,7 +3613,7 @@ function Get-EraBackendDelivery {
                           elseif ($ForcedOpencodeMode -eq 'attach') { $false }
                           else { $BundleBytes -gt 51200 }
             if ($ocReadTool) {
-                @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null; Kind = 'chosen'
+                @{ Mode = 'read-tool'; LimitBytes = 1048576; LimitTokens = $null; Kind = 'chosen'; TokensNotTunable = $true
                    # Verified end-to-end 2026-08-31 with canaries planted at 25/50/75%
                    # depth and reported back before the review, on both default
                    # opencode seats: 109,066 B (57s), 314,720 B (85s), 668,389 B
@@ -3484,7 +3624,7 @@ function Get-EraBackendDelivery {
                    # hypothesis.
                    Basis = 'over the 51,200-byte attach cap opencode reads the bundle with its own Read tool; verified to 668,389 bytes on both seats 2026-08-31, ceiling set at 1,048,576' }
             } else {
-                @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null; Kind = 'measured'; LimitFixed = $true
+                @{ Mode = 'attach'; LimitBytes = 51200; LimitTokens = $null; Kind = 'measured'; LimitFixed = $true; TokensNotTunable = $true
                # MEASURED, twice. 2026-08-03: DeepSeek V4 Flash reported its input
                # ending at line 1169 of a 9,234-line bundle; `head -1169` of that
                # file is 51,191 bytes and line 1170 crosses 51,200. 2026-08-31: a
@@ -3564,6 +3704,25 @@ function Get-EraBackendDelivery {
             # 51,200: the plan refuses a round the adapter would have delivered,
             # which is the expensive error (it removes capability and looks like
             # correct behaviour). Found by the 2026-09-01 design panel.
+            # OPENCODE IS BYTE-BOUNDED, AND max_bundle_tokens ON IT REFUSES IN THE
+            # EXPENSIVE DIRECTION. The override loop applied the token key to every
+            # backend, and Get-OpencodeDeliveryLimits reads only max_bundle_bytes --
+            # so a token ceiling on an opencode preset made the PLAN refuse a round
+            # the ADAPTER would have delivered. That is the error this function's
+            # own docstring calls out ("inventing a ceiling is how you refuse a
+            # round that would have worked"), reached through a registry key, and
+            # it is D3's shape a third time: the same asymmetry the attach cap had
+            # and then max_bundle_tokens had on claude, now one backend over.
+            #
+            # Both opencode seats of the 2026-09-01 twin-sweep panel named it
+            # independently, and the 2026-09-01 audit panel had predicted the
+            # class. Ignored with a NOTE that names the key which DOES work here.
+            if ($spec.Field -eq 'LimitTokens' -and $d.TokensNotTunable) {
+                if ($null -ne $ModelInfo[$spec.Key] -and "$($ModelInfo[$spec.Key])" -ne '') {
+                    Write-Host "[era] NOTE: registry max_bundle_tokens is ignored for $Backend '$($d.Mode)' delivery — this channel is bounded in BYTES and no $Backend adapter reads a token ceiling, so enforcing one here would refuse rounds that work. Use max_bundle_bytes."
+                }
+                continue
+            }
             if ($spec.Field -eq 'LimitBytes' -and $d.LimitFixed) {
                 if ($null -ne $ModelInfo[$spec.Key] -and "$($ModelInfo[$spec.Key])" -ne '') {
                     Write-Host "[era] NOTE: registry max_bundle_bytes is ignored for $Backend '$($d.Mode)' delivery — $($d.LimitBytes) is where the transport itself truncates, not a preset tunable."
@@ -3586,7 +3745,16 @@ function Get-EraBackendDelivery {
                 # cap had, one backend over.
                 $prev = $d[$spec.Field]
                 if ($d.Kind -eq 'measured' -and $null -ne $prev -and $parsed -gt [long]$prev) {
-                    Write-Host "[era] WARNING: registry $($spec.Key)=$parsed RAISES a measured ceiling of $prev for $Backend. The measurement is the thing that knows; nothing downstream enforces the new number, so an over-limit round fails after it has been paid for. Lower it, or re-measure and update the basis."
+                    # "nothing downstream enforces it" was too broad: the
+                    # opencode adapter DOES honour max_bundle_bytes on its
+                    # read-tool ceiling. It is true of max_bundle_tokens, which no
+                    # adapter reads at all. Say which case this is.
+                    $enforcement = if ($spec.Key -eq 'max_bundle_tokens') {
+                        'no adapter reads a token ceiling at all'
+                    } else {
+                        'the adapter may or may not honour the new number'
+                    }
+                    Write-Host "[era] WARNING: registry $($spec.Key)=$parsed RAISES a measured ceiling of $prev for $Backend. The measurement is the thing that knows, and $enforcement, so an over-limit round can fail after it has been paid for. Lower it, or re-measure and update the basis."
                 }
                 $d[$spec.Field] = $parsed
                 $d.Basis = "registry $($spec.Key)"
@@ -3912,6 +4080,33 @@ function Remove-EraBundleComments {
         '.css'=@('/*','*/'); '.scss'=@('/*','*/'); '.less'=@('/*','*/'); '.sql'=@('/*','*/')
         '.md'=@('<!--','-->'); '.html'=@('<!--','-->'); '.xml'=@('<!--','-->'); '.vue'=@('<!--','-->')
     }
+    # SAME RESOLUTION THE CITATION READER DOES, and for the same reason.
+    # Get-EraBundleLineCounts got this eleven lines up the file after a fail-open
+    # was found in it; this function reads the same bundle with the same API and
+    # was left as it was. [System.IO.File] resolves a RELATIVE path against the
+    # PROCESS working directory, which Set-Location / Push-Location do not
+    # change -- and era.ps1 does Push-Location $repoRoot. era itself always
+    # passes absolute paths, so this has never fired in production; it is the
+    # twin, not a new bug, and it is fixed here so the pair stops disagreeing.
+    # $OutputPath does not exist yet, so it cannot use Resolve-Path.
+    #
+    # THIS THROWS WHERE Get-EraBundleLineCounts WARNS, deliberately, and the two
+    # sit eleven lines apart with one root cause -- so the asymmetry is stated
+    # rather than left to look like an oversight (raised by the blinded seat of
+    # the twin-sweep panel). Citation grounding is ADVISORY: losing it degrades a
+    # round that is otherwise fine, so it warns and carries on. The stripped
+    # bundle is the INDEPENDENT VARIABLE of an A/B: producing it silently wrong,
+    # or not at all while the round proceeds, does not degrade the experiment, it
+    # invalidates it. This runs after repomix and before any dispatch, so a
+    # refusal here costs nothing.
+    if (-not (Test-Path -LiteralPath $BundlePath)) {
+        throw ("Remove-EraBundleComments: no bundle at '$BundlePath', so the -BlindSeat arm cannot be built. " +
+               "Refusing rather than dispatching an unblinded round that would be recorded as blinded. " +
+               "Nothing was dispatched and nothing was spent.")
+    }
+    $BundlePath = (Resolve-Path -LiteralPath $BundlePath).Path
+    $OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
+
     $stripped = 0
     $out = [System.Collections.Generic.List[string]]::new()
     $ext = ''; $inBlock = $false; $blockEnd = $null

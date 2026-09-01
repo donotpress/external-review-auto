@@ -127,8 +127,17 @@ Describe '-BlindSeat wiring' -Tag Unit {
 
     It 'gives ONE seat an alternate bundle and leaves the others on the normal one' {
         # Otherwise the round stops being an A/B and becomes a different round.
-        $script:WfSrc | Should -Match '\[hashtable\]\$BundleOverrides = @\{\}'
-        $script:WfSrc | Should -Match '\$seatBundle = if \(\$BundleOverrides\.ContainsKey\(\$r\)'
+        #
+        # WAS three `Should -Match` assertions on workflow.ps1's source text.
+        # Both the 2026-09-01 audit panel and the blinded seat recovered from it
+        # named this test by line as one that "passes if the function body is
+        # `return` and the string literal remains" -- and it did exactly that
+        # while the fallback path it covers was broken. Assert the lookup instead.
+        $ov = @{ 'muse-spark' = 'blind.xml' }
+        Get-EraSeatBundle -Preset 'muse-spark' -BundleOverrides $ov -BundlePath 'normal.xml' | Should -Be 'blind.xml'
+        Get-EraSeatBundle -Preset 'opus'       -BundleOverrides $ov -BundlePath 'normal.xml' | Should -Be 'normal.xml'
+        Get-EraSeatBundle -Preset 'deepseek-flash' -BundleOverrides $ov -BundlePath 'normal.xml' | Should -Be 'normal.xml'
+        # The seat bundle is what the ThreadJob is actually handed.
         $script:WfSrc | Should -Match '-ArgumentList @\(\$adapterPath, \$seatBundle,'
     }
 
@@ -179,5 +188,81 @@ Describe 'a block opener with code after the closer is not a comment line' -Tag 
             ($lines | Where-Object { $_ -match 'a real whole-line block comment' }).Count | Should -Be 0
             ($lines | Where-Object { $_ -match 'go\(\);' }).Count | Should -Be 1
         } finally { Remove-Item -LiteralPath $in, $out -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'keeps code that follows a block-comment CLOSER on the same line' {
+        # THE MIRROR CASE, and it shipped in e5d465e WITHOUT a test -- the fix
+        # for the opener above got one, the fix for the closer did not, which is
+        # the same "twin left behind" shape one level up.
+        #
+        # `*/ doSomething();` was blanked wholesale by the $inBlock branch, which
+        # emitted a bare prefix for every line until the block ended. That
+        # deletes live code from the bundle the blinded reviewer is asked to
+        # judge.
+        $in  = Join-Path ([System.IO.Path]::GetTempPath()) ("bsc-in-"  + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        $out = Join-Path ([System.IO.Path]::GetTempPath()) ("bsc-out-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        try {
+            @'
+<file path="src/n.js">
+  1: /* opens here
+  2:    still inside the comment
+  3: */ doSomething();
+  4: after();
+</file>
+<file path="src/o.ps1">
+  1: <# opens here
+  2:    still inside
+  3: #> Write-Host 'live'
+  4: Get-Thing
+</file>
+'@ | Set-Content -LiteralPath $in -Encoding utf8
+            $null = Remove-EraBundleComments -BundlePath $in -OutputPath $out
+            $lines = [System.IO.File]::ReadAllLines($out)
+
+            ($lines | Where-Object { $_ -match 'doSomething\(\);' }).Count      | Should -Be 1 -Because 'code after */ is code'
+            ($lines | Where-Object { $_ -match "Write-Host 'live'" }).Count     | Should -Be 1 -Because 'code after #> is code'
+            ($lines | Where-Object { $_ -match 'after\(\);' }).Count            | Should -Be 1 -Because 'the block must have CLOSED on line 3'
+            ($lines | Where-Object { $_ -match 'Get-Thing' }).Count             | Should -Be 1
+            ($lines | Where-Object { $_ -match 'still inside' }).Count          | Should -Be 0
+            ($lines | Where-Object { $_ -match 'opens here' }).Count            | Should -Be 0
+        } finally { Remove-Item -LiteralPath $in, $out -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'the stripper resolves its paths the way the citation reader does' -Tag Unit {
+
+    It 'reads a relative bundle path against the PowerShell location, not the process CWD' {
+        # THE TWIN OF THE Get-EraBundleLineCounts FAIL-OPEN (e5d465e finding 8).
+        # That function got a Resolve-Path because Test-Path is PowerShell-aware
+        # while [System.IO.File] resolves against the PROCESS working directory,
+        # which Set-Location and Push-Location do not change. era.ps1 does
+        # Push-Location $repoRoot.
+        #
+        # Remove-EraBundleComments reads the SAME bundle with the SAME API,
+        # eleven lines further down the same file, and got nothing. Its failure
+        # is louder (a raw FileNotFoundException out of a function whose caller
+        # has no catch) but it is the same defect and the same fix.
+        $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("bs-cwd-" + [guid]::NewGuid().ToString('N').Substring(0,8))
+        $null = New-Item -ItemType Directory -Path $dir
+        $oldCwd = [Environment]::CurrentDirectory
+        try {
+            @'
+<file path="src/a.ps1">
+  1: # a comment
+  2: $x = 1
+</file>
+'@ | Set-Content -LiteralPath (Join-Path $dir 'b.xml') -Encoding utf8
+            Push-Location -LiteralPath $dir
+            # The shape era produces: PowerShell is in $dir, the process is not.
+            [Environment]::CurrentDirectory = [System.IO.Path]::GetTempPath()
+            $null = Remove-EraBundleComments -BundlePath 'b.xml' -OutputPath 'out.xml'
+            $lines = Get-Content -LiteralPath (Join-Path $dir 'out.xml')
+            ($lines | Where-Object { $_ -match 'a comment' }).Count | Should -Be 0
+            ($lines | Where-Object { $_ -match '\$x = 1' }).Count   | Should -Be 1
+        } finally {
+            [Environment]::CurrentDirectory = $oldCwd
+            Pop-Location
+            Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }

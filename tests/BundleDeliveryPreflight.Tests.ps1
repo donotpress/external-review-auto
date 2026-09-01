@@ -257,14 +257,21 @@ Describe 'the plan agrees with what the adapter will actually do' -Tag Unit {
         # both suites green; if the adapter's ceiling drops below the plan's, the
         # gate passes a bundle the adapter throws on -- a free preflight refusal
         # upgraded into a billed void round.
-        $adapter = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/opencode.ps1')
-        $attach = [regex]::Match($adapter, '\$OPENCODE_ATTACH_LIMIT_BYTES\s*=\s*(\d+)').Groups[1].Value
-        $read   = [regex]::Match($adapter, '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*(\d+)').Groups[1].Value
-        $attach | Should -Not -BeNullOrEmpty
-        $read   | Should -Not -BeNullOrEmpty
+        #
+        # WAS a regex scrape of the adapter's source for two literal assignments,
+        # which is also why backends/opencode.ps1's own comment pointed at a
+        # DIFFERENT file ("OpencodeConstantParity.Tests.ps1") that did not exist:
+        # the guard was real but nobody could find it from the code it guards.
+        # The adapter now exposes the values, so both sides are CALLED. The
+        # override direction and the mode crossover are covered in
+        # tests/OpencodeConstantParity.Tests.ps1.
+        . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
+        $adapter = Get-OpencodeDeliveryLimits
+        $adapter.AttachLimitBytes | Should -Not -BeNullOrEmpty
+        $adapter.ReadToolMaxBytes | Should -Not -BeNullOrEmpty
 
-        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 1).LimitBytes      | Should -Be ([long]$attach)
-        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 100000).LimitBytes | Should -Be ([long]$read)
+        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 1).LimitBytes      | Should -Be $adapter.AttachLimitBytes
+        (Get-EraBackendDelivery -Backend 'opencode' -BundleBytes 100000).LimitBytes | Should -Be $adapter.ReadToolMaxBytes
     }
 }
 
@@ -304,8 +311,25 @@ Describe 'era.ps1 closes the paths that bypassed the gate' -Tag Unit {
     It 'fails CLOSED when repomix token parsing misses' {
         # $tokenCount = 0 passed every token ceiling, disarming the gate for exactly
         # the bundle it was built to catch.
-        $script:EraSrc2 | Should -Match '\$tokenCount -le 0 -and \$bundleBytesForEstimate -gt 0'
+        #
+        # ...and the byte fallback that replaced it had its OWN silent fail-open
+        # underneath: $bundleBytesForEstimate was seeded to 0 behind a `catch {}`,
+        # so an unreadable bundle skipped the estimate AND its warning. It is now
+        # $null on failure -- "not measured" and "measured zero" are different
+        # facts and only one of them may disarm a gate.
+        $script:EraSrc2 | Should -Match '\$tokenCount -le 0 -and \$null -ne \$bundleBytesForEstimate -and \$bundleBytesForEstimate -gt 0'
         $script:EraSrc2 | Should -Match 'could not parse a token count from repomix'
+        $script:EraSrc2 | Should -Not -Match '\$bundleBytesForEstimate = 0'
+    }
+
+    It 'refuses the round when the bundle it just wrote cannot be sized' {
+        # $bundleBytes fed Get-EraBundleDeliveryPlan and used to be `else { 0 }`,
+        # and a zero reports that the bundle FITS every channel -- including the
+        # opencode attach cap, above which it is silently truncated. Raised by the
+        # opus seat of the twin-sweep panel as the load-bearing copy of a
+        # fail-open this release had already deleted from two adapters.
+        $script:EraSrc2 | Should -Not -Match '\$bundleBytes = if \(Test-Path -LiteralPath \$bundlePath\) \{ \(Get-Item -LiteralPath \$bundlePath\)\.Length \} else \{ 0 \}'
+        $script:EraSrc2 | Should -Match 'its size cannot be measured'
     }
 }
 

@@ -173,12 +173,41 @@ function Resolve-ModelFromHint {
         }
 
         # --- opencode registry ---
+        # SORTED AND COLLECTED, for the same reason as the two branches above --
+        # and it is the third implementation of that one rule, found after the
+        # first two had each been fixed on their own.
+        #
+        # This branch is NOT a hashtable, so it never varied run to run, which is
+        # why both previous sweeps (v2.4.1, and the `.Keys` sweep that followed
+        # it) walked past it. `_opencode_model_map` is a PSCustomObject from
+        # ConvertFrom-Json, and PSObject.Properties enumerates in FILE ORDER. So
+        # first-match-wins here means the answer is decided by where somebody
+        # happened to paste an entry into backends/_registry.json -- stable until
+        # the registry is edited, and silent in either case.
+        #
+        # Measured against the shipped registry (41 opencode entries, substring
+        # pass): `deepseek` matches 2 models and file order returns
+        # opencode-go/deepseek-v4-PRO, at twice the input price of the -flash
+        # that config/defaults.json puts in the standard panel. `minimax` matches
+        # 8, `flash` 14, `qwen` 3, `glm`/`kimi`/`mimo` 2 each.
+        #
+        # The exact pass runs first, so every hint that names its model is
+        # unaffected by this.
         if (-not $resolvedModelId) {
-            foreach ($providerProp in $Registry._opencode_model_map.PSObject.Properties) {
-                $providerKey = $providerProp.Name
-                $providerEntry = $providerProp.Value
+            $ocCandidates = @()
+            # Iterate the map built at the top of this function, the way the
+            # claude and agy branches do. $opencodeMap was populated there behind
+            # an `if ($Registry._opencode_model_map)` guard and then never read --
+            # dead code that looked live, while this branch reached around it to
+            # the raw registry object. Symmetry is the point: three branches, one
+            # shape. (The null dereference a reviewer predicted here does NOT
+            # reproduce -- pwsh 7 without StrictMode yields nothing from
+            # `$null.PSObject.Properties.Name` and the loop simply does not run,
+            # measured -- so this is consistency, not a bug fix.)
+            foreach ($providerKey in ($opencodeMap.Keys | Sort-Object)) {
+                $providerEntry = $opencodeMap[$providerKey]
                 if ($null -eq $providerEntry) { continue }
-                foreach ($modelKey in $providerEntry.PSObject.Properties.Name) {
+                foreach ($modelKey in (@($providerEntry.PSObject.Properties.Name) | Sort-Object)) {
                     $entry = $providerEntry.$modelKey
                     if ($null -eq $entry) { continue }
                     $entryDisplay = $entry.display
@@ -187,12 +216,21 @@ function Resolve-ModelFromHint {
                     $displayCanon = & $_Canon $entryDisplay
                     $modelKeyCanon = & $_Canon $modelKey
                     if ((& $_CanonMatch $displayCanon $hintCanon) -or (& $_CanonMatch $modelKeyCanon $hintCanon)) {
-                        $resolvedModelId = $entryModelId
-                        $resolvedProvider = $providerKey
-                        break
+                        $ocCandidates += @{ ModelId = $entryModelId; Provider = $providerKey }
                     }
                 }
-                if ($resolvedModelId) { break }
+            }
+            if ($ocCandidates.Count -gt 0) {
+                $ocDistinct = @($ocCandidates | ForEach-Object { $_.ModelId } | Sort-Object -Unique)
+                if ($ocDistinct.Count -gt 1) {
+                    # Say it rather than pick silently -- the half of the v2.4.1
+                    # fix this branch never got. stderr, never stdout: resolve.ps1's
+                    # contract is that stdout carries ONLY the JSON flag object.
+                    [Console]::Error.WriteLine("[era] WARNING: model hint '$Hint' matches $($ocDistinct.Count) opencode models ($($ocDistinct -join ', ')); taking '$($ocDistinct[0])'. Give a more specific hint to pin it.")
+                }
+                $best = @($ocCandidates | Where-Object { $_.ModelId -eq $ocDistinct[0] })[0]
+                $resolvedModelId  = $best.ModelId
+                $resolvedProvider = $best.Provider
             }
         }
     } # end foreach $matchMode

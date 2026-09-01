@@ -56,20 +56,59 @@ function Find-AgyModelFromHint {
     # candidate instead of failing. Measured: '.*' -> '' -> matches everything.
     if (-not $hintNorm.Trim()) { return $null }
 
-    $matches = @()
-    foreach ($familyKey in $map.Keys) {
+    # THE FOURTH IMPLEMENTATION OF ONE RULE, and the only one that never worked.
+    # v2.4.1 fixed resolve-model.ps1's agy branch, v2.7.1 fixed era.ps1's copy,
+    # v2.8 fixed resolve-model.ps1's opencode branch and aligned era.ps1's
+    # tie-break -- and then declared the rule closed. The opus seat of the panel
+    # run on that diff answered "where do two implementations still disagree?"
+    # with this function, which nobody had counted.
+    #
+    # It had all three known defects (unsorted $map.Keys, a STABLE Sort-Object
+    # inheriting that order, no ambiguity warning) plus one nobody had seen: the
+    # accumulator was named $matches, WHICH IS AN AUTOMATIC VARIABLE, and the
+    # loop condition below is a `-match` that overwrites it on every hit.
+    # Measured:
+    #
+    #   $matches = @()
+    #   foreach ($x in @('alpha','beta','gamma')) { if ($x -match 'a') { $matches += @{ N = $x } } }
+    #   => type Hashtable, Count 2, content @{ N = 'gamma'; 0 = 'a' }
+    #
+    # So the list was never a list: it became a hashtable holding the LAST match
+    # plus regex capture group 0, `.Count` counted KEYS, and piping one hashtable
+    # into Sort-Object gave it nothing to sort. Tier preference -- this function's
+    # entire stated purpose -- was dead, and it returned whichever entry the
+    # hashtable enumerated last. Measured over five consecutive processes, hint
+    # 'gemini' gave Gemini 3.5 Flash (High), 3.5 Flash (High), 3.6 Flash (High),
+    # 3.1 Pro (High), 3.1 Pro (High).
+    #
+    # Now: sorted keys, a real list, an explicit tie-break on Settings matching
+    # runtimes/resolve-model.ps1 and runtimes/era.ps1, and an ambiguous hint says
+    # so instead of picking in silence. See tests/AgyHintResolverFourth.Tests.ps1.
+    $candidates = @()
+    foreach ($familyKey in ($map.Keys | Sort-Object)) {
         $family = $map[$familyKey]
         foreach ($tierKey in $family.PSObject.Properties.Name) {
             $entry = $family.$tierKey
             $displayNorm = $entry.display.ToLower() -replace '[^\w\s]', '' -replace '\s+', ' '
             if ($displayNorm -match $hintNorm -or $hintNorm -match $displayNorm) {
-                $matches += @{ Family = $familyKey; Tier = $tierKey; Display = $entry.display; Settings = $entry.settings_value; TierRank = if ($tierKey -eq 'high') { 3 } elseif ($tierKey -eq 'medium') { 2 } else { 1 } }
+                $candidates += @{ Family = $familyKey; Tier = $tierKey; Display = $entry.display; Settings = $entry.settings_value; TierRank = if ($tierKey -eq 'high') { 3 } elseif ($tierKey -eq 'medium') { 2 } else { 1 } }
             }
         }
     }
-    if ($matches.Count -eq 0) { return $null }
-    # Prefer highest tier; if tie, prefer first added (family order)
-    $best = $matches | Sort-Object TierRank -Descending | Select-Object -First 1
+    if (@($candidates).Count -eq 0) { return $null }
+    # Highest tier wins; a tie is broken on Settings, NOT on "family order" --
+    # a hashtable has no insertion order to prefer, so the comment that used to
+    # sit here documented behaviour that could not exist.
+    $best = @($candidates) |
+        Sort-Object @{ Expression = 'TierRank'; Descending = $true }, @{ Expression = 'Settings'; Descending = $false } |
+        Select-Object -First 1
+    $tied = @($candidates | Where-Object { $_.TierRank -eq $best.TierRank })
+    if ($tied.Count -gt 1) {
+        # stderr, not stdout: this adapter's stdout is not a JSON contract, but
+        # era's log convention is that a substitution the caller did not ask for
+        # is announced. Silence is what made the other three copies expensive.
+        Write-Host "[agy] WARNING: model hint '$Hint' matches $($tied.Count) models at the same tier ($((@($tied | ForEach-Object { $_.Display } | Sort-Object)) -join ', ')); taking '$($best.Display)'. Give a more specific hint to pin it."
+    }
     return @{ Family = $best.Family; Tier = $best.Tier; Display = $best.Display; Settings = $best.Settings }
 }
 
@@ -501,6 +540,75 @@ function _SpawnAndCaptureOnce {
     }
 }
 
+function Get-AgyPerReviewerCap {
+    <#
+    .SYNOPSIS
+        This adapter's copy of workflow.ps1's Get-PerReviewerCap ($2 cheap /
+        $10 expensive, split at input_per_m >= 10).
+
+    .DESCRIPTION
+        The duplication is deliberate and cannot be removed: this adapter
+        dot-sources only itself, so it cannot call the plan's function. What CAN
+        be removed is the drift, and that is what
+        tests/PerReviewerCapParity.Tests.ps1 does -- it calls both sides across
+        the pricing range and at the boundary, instead of trusting that two
+        copies of one number stay equal.
+
+        Any number the plan decides and an adapter independently re-decides is a
+        drift candidate; three of this repo's most expensive defects were exactly
+        that. The direction that costs money here is the adapter's cap drifting
+        HIGH: it would re-spawn a reviewer the plan refused to pay for, inside the
+        adapter, after the cost prompt has already been answered.
+
+        It replaced a hardcoded $15, which for a single agy reviewer needed
+        millions of input tokens per attempt to fire -- a gate that read as
+        protection and was dead code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][double]$InputPerM)
+    if ($InputPerM -ge 10.0) { return 10.0 }
+    return 2.0
+}
+
+function Get-AgyBundleBytes {
+    <#
+    .SYNOPSIS
+        The bundle's size, or a refusal. Never 0 for a bundle we could not read.
+
+    .DESCRIPTION
+        FAIL CLOSED. This was `if (Test-Path) { (Get-Item ...).Length } else { 0 }`,
+        and 0 is the value that disarms everything downstream: zero estimated
+        input tokens means zero estimated cost, which means the retry cap cannot
+        fire and the adapter re-spawns a reviewer the cap existed to stop.
+
+        Test-Path is also PowerShell-aware while the cost the number feeds is
+        real money, so "the file is not where I looked" and "the bundle is empty"
+        must not produce the same answer.
+
+        Third instance of that shape in this repo, after the token-count gate and
+        Get-EraBundleLineCounts -- and the same rule: a failed measurement must
+        not be indistinguishable from a real one.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BundlePath)
+    try { return [long](Get-Item -LiteralPath $BundlePath -ErrorAction Stop).Length }
+    catch {
+        # $null, NOT a throw and NOT a zero. The first cut of this fix threw, and
+        # the opus seat of this change's panel pointed out that it refuses in the
+        # expensive direction: agy's delivery mode is disk-read, so the size feeds
+        # only a cost estimate and the retry gate. Killing the reviewer to protect
+        # a few cents of retry is the guard that removes capability while looking
+        # correct -- rule 2 of the review prompt, applied to the fix rather than
+        # to the code it fixed.
+        #
+        # So the failure is scoped to the DECISION the number feeds: unknown size
+        # means the retry cannot be priced, and an unpriceable retry is skipped.
+        # The reviewer still runs.
+        Write-Host "[agy] WARNING: cannot size the bundle at '$BundlePath' ($($_.Exception.Message)); the reviewer still runs, but a retry cannot be priced and will be skipped rather than spent blind."
+        return $null
+    }
+}
+
 function Invoke-AgyReview {
     [CmdletBinding()]
     param(
@@ -555,9 +663,16 @@ function Invoke-AgyReview {
     # hardcoded $15 that for a single agy reviewer would require millions of input
     # tokens per attempt to ever fire -- i.e. dead code. (The adapter can't call
     # Get-PerReviewerCap: it dot-sources only itself, so the threshold is inlined.)
-    $perReviewerCap = if ($inPerM -ge 10.0) { 10.0 } else { 2.0 }
-    $bundleChars = if (Test-Path -LiteralPath $BundlePath) { (Get-Item -LiteralPath $BundlePath).Length } else { 0 }
-    $estInputTokens = [int][Math]::Ceiling($bundleChars / 4)
+    $perReviewerCap = Get-AgyPerReviewerCap -InputPerM $inPerM
+    $bundleChars = Get-AgyBundleBytes -BundlePath $BundlePath   # $null when unmeasurable
+    # 3.369 BYTES PER TOKEN, THE MEASURED NUMBER, not the bytes/4 rule of thumb
+    # that used to be here. Both feed the SAME per-reviewer cap as the plan's own
+    # estimate, and the plan uses 3.369 (measured on a real repomix XML bundle:
+    # 2,396,233 B / 711,253 tok). Two divisors for one purpose is the shape this
+    # release is a sweep for, and bytes/4 under-counted by ~16% in the direction
+    # that makes the cap fire later. Named by the deepseek-flash seat of the
+    # twin-sweep panel.
+    $estInputTokens = if ($null -ne $bundleChars) { [int][Math]::Ceiling($bundleChars / 3.369) } else { $null }
     $costFor = {
         param($inTok, $outTok)
         [Math]::Round(($inTok / 1000000.0) * $inPerM + ($outTok / 1000000.0) * $outPerM, 4)
@@ -615,6 +730,10 @@ function Invoke-AgyReview {
             # Honest cost-cap guard: a retry replays the full bundle input the
             # user already approved 1x for. Skip it (fail honestly) if the first
             # attempt's spend plus a projected retry would breach the cap.
+            if ($null -eq $estInputTokens) {
+                Write-Host "[agy] Skipping retry: the bundle could not be sized, so the replay cannot be priced against this reviewer's `$$perReviewerCap cap. Failing honestly rather than spending blind."
+                break
+            }
             $firstOutTok  = if ($resp) { [int][Math]::Ceiling($resp.Length / 4) } else { 0 }
             $firstCost    = & $costFor $estInputTokens $firstOutTok
             # Project the retry as another full-bundle input + a same-size output.

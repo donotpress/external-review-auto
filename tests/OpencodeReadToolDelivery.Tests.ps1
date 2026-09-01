@@ -104,7 +104,12 @@ Describe 'the Read-tool path carries bundles over the attach cap' -Tag Unit {
         # removes a capability over a failure that is not about size.
         . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
         $script:Src | Should -Match '\$useReadTool\s*=\s*\$forceReadTool\s*-or\s*\(\$overAttachLimit'
-        $script:Src | Should -Match '\$OPENCODE_READ_TOOL_MAX_BYTES\s*=\s*1048576'
+        # The ceiling itself is now a value both sides can be asked for, so the
+        # plan and the adapter are compared to each other in
+        # tests/OpencodeConstantParity.Tests.ps1 rather than each to a literal.
+        (Get-OpencodeDeliveryLimits).ReadToolMaxBytes | Should -Be 1048576
+        74740  | Should -BeLessThan (Get-OpencodeDeliveryLimits).ReadToolMaxBytes
+        109066 | Should -BeLessThan (Get-OpencodeDeliveryLimits).ReadToolMaxBytes
     }
 
     It 'refuses past the verified ceiling, without spawning opencode' {

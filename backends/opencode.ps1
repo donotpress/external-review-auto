@@ -158,6 +158,155 @@ function Resolve-OpencodeStallPlan {
     }
 }
 
+function Resolve-OpencodeRunBudget {
+    <#
+    .SYNOPSIS
+        How much of the dispatcher's budget is still ours, and how long may we
+        block on the run lock and still have time to run? Returns
+        @{ RemainingSec; LockWaitMs; Exhausted }.
+
+    .DESCRIPTION
+        THE SAME RULE Resolve-OpencodeStallPlan enforces, applied to the waits
+        that were added AFTER it. An adapter cannot grant itself time the
+        dispatcher will not wait -- it waits TimeoutSec + 30 and then tree-kills
+        the reviewer -- so every wait in here has to come OUT of TimeoutSec.
+
+        Two waits were escaping that rule, both introduced by the run-mutex
+        change that landed after ae7594c:
+
+          * the run-lock wait was a FIXED 900s, not derived from $TimeoutSec at
+            all. At the dispatcher's 600s default the adapter was willing to
+            block for 270s past the point where it gets killed, having started
+            no opencode process and spent nothing -- and the seat is then
+            reported as "Timed out after 600 seconds (global)", which is the
+            mis-attribution ae7594c exists to prevent.
+
+          * $deadline is started AFTER the lock is acquired, so the adapter's own
+            timeout was (lockWait + TimeoutSec). The DEFAULT panel runs two
+            opencode seats serialised behind that mutex, so the second seat
+            routinely waits out the first one's whole run and then believes it
+            has a further full budget.
+
+        RunFloorSec is what we refuse to give away to the lock: a wait that
+        consumes the entire budget is no better than one that overruns it,
+        because the seat produces nothing either way.
+
+        EffectiveSec is the deadline the run itself gets, and it is EXACTLY what
+        is left. There is no floor, because a floor cannot fix a spent budget --
+        it can only spend somebody else's.
+
+        THIS FUNCTION REINTRODUCED ITS OWN DEFECT TWICE BEFORE IT STOPPED.
+        Cut 1 wrote `[Math]::Max(60, $remaining)`, copied from claude.ps1, which
+        for any TimeoutSec under 60 hands the adapter more time than it was
+        given. Cut 2 capped that floor at $TimeoutSec, and the BLINDED SEAT of
+        the panel run on the diff that introduced it pointed out that the case
+        that matters was still wrong: at elapsed >= TimeoutSec the floor returns
+        60s, so the second serialised opencode seat plans (elapsed + 60) against
+        a dispatcher that waits TimeoutSec + 30 and is already about to tree-kill
+        it -- and the test shipped with cut 2 asserted that 60, so it was green
+        while over budget.
+
+        Viable is the honest answer instead: below RunFloorSec of REMAINING time
+        (when time has actually been spent), a run is not worth launching, and
+        the caller says so rather than starting something nobody will wait for. A
+        caller that simply asks for a short TimeoutSec is not refused -- that is
+        its business, and nothing has been spent.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        # Wall clock already spent inside this adapter, from its own stopwatch.
+        [double]$ElapsedSec = 0,
+        [int]$RunFloorSec = 60
+    )
+    $remaining = $TimeoutSec - [int][Math]::Ceiling($ElapsedSec)
+    if ($remaining -lt 0) { $remaining = 0 }
+    $lockWaitSec = $remaining - $RunFloorSec
+    if ($lockWaitSec -lt 0) { $lockWaitSec = 0 }
+    return @{
+        RemainingSec = [int]$remaining
+        LockWaitMs   = [int]($lockWaitSec * 1000)
+        EffectiveSec = [int]$remaining
+        Viable       = ($remaining -ge [Math]::Min($RunFloorSec, $TimeoutSec))
+        Exhausted    = ($remaining -le 0)
+    }
+}
+
+function Get-OpencodeDeliveryLimits {
+    <#
+    .SYNOPSIS
+        This adapter's copy of what Get-EraBackendDelivery predicts for opencode.
+        Returns @{ AttachLimitBytes; ReadToolMaxBytes }.
+
+    .DESCRIPTION
+        Extracted so the two sides can be compared to EACH OTHER rather than each
+        to its own literal. The comment these constants used to carry claimed
+        "OpencodeConstantParity.Tests.ps1 pins the built-in values against the
+        plan's"; that file did not exist. It does now, and it calls this.
+
+        ATTACH CAP -- opencode silently truncates an attached file at exactly
+        50 KiB. Measured 2026-08-03 (DeepSeek V4 Flash reported its input ending
+        at line 1169 of a 9,234-line bundle; `head -1169` is 51,191 bytes and
+        line 1170 crosses 51,200) and re-confirmed 2026-08-31. It is a property
+        of the TRANSPORT, so no registry key moves it -- the plan prints a NOTE
+        when one tries, and this must not quietly honour what the plan refuses.
+
+        READ-TOOL CEILING -- 668,389 bytes is verified end-to-end with mid-bundle
+        canaries; muse-spark has separately carried 2,396,233. 1 MB sits between
+        "measured" and "known to have worked once", which is the honest place for
+        a default. This one IS a preset tunable, so max_bundle_bytes moves it --
+        the same key, the same direction, as the plan's read-tool limit.
+    #>
+    [CmdletBinding()]
+    param([hashtable]$ModelInfo = @{})
+    $attach = 51200
+    $read   = 1048576
+    if ($ModelInfo) {
+        $raw = $ModelInfo['max_bundle_bytes']
+        if ($null -ne $raw -and "$raw" -ne '') {
+            $parsed = [long]0
+            if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) { $read = $parsed }
+            else { Write-Host "[opencode] WARNING: registry max_bundle_bytes='$raw' is not a non-negative number; keeping $read." }
+        }
+    }
+    return @{ AttachLimitBytes = [long]$attach; ReadToolMaxBytes = [long]$read }
+}
+
+function Test-OpencodeOverAttachLimit {
+    <# The mode crossover, as one expression both sides can be tested against. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][long]$BundleBytes, [Parameter(Mandatory)][long]$AttachLimitBytes)
+    return ($BundleBytes -gt $AttachLimitBytes)
+}
+
+function Get-OpencodeBundleBytes {
+    <#
+    .SYNOPSIS
+        The bundle's size, or a refusal. Never 0 for a bundle we could not read.
+
+    .DESCRIPTION
+        FAIL CLOSED. This was `try { (Get-Item $BundlePath).Length } catch { 0 }`,
+        and 0 is the one value that makes every downstream check say yes: the
+        bundle looks smaller than the attach cap, the adapter attaches it, and
+        opencode truncates at 51,200 bytes -- returning a well-formed review of a
+        fragment, with content_ok true and nothing saying otherwise. That is the
+        silent truncation the cap exists to prevent, reached through a catch that
+        turns a failure into a benign-looking value.
+
+        Third instance of that shape here (the token-count gate, then
+        Get-EraBundleLineCounts, then this), and the same rule applies: a read
+        failure must not be indistinguishable from a real measurement.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BundlePath)
+    try { return [long](Get-Item -LiteralPath $BundlePath -ErrorAction Stop).Length }
+    catch {
+        throw ("opencode cannot size the bundle at '$BundlePath' ($($_.Exception.Message)). Refusing rather than attaching: " +
+               "an attached bundle whose size is unknown is silently truncated at 51,200 bytes and the model returns a " +
+               "well-formed review of the fragment. Nothing was dispatched and nothing was spent.")
+    }
+}
+
 function Invoke-OpencodeReview {
     [CmdletBinding()]
     param(
@@ -284,24 +433,19 @@ function Invoke-OpencodeReview {
     # round is already paid for on the other seats -- a free preflight refusal
     # upgraded into a billed void round (2026-08-31 panel, muse-spark finding 1).
     # OpencodeConstantParity.Tests.ps1 pins the built-in values against the plan's.
-    $OPENCODE_ATTACH_LIMIT_BYTES = 51200
-    # Ceiling for the read-tool path. 668,389 bytes is verified end-to-end above;
-    # muse-spark has separately carried 2,396,233. 1 MB sits between "measured" and
-    # "known to have worked once", which is the honest place for a default.
-    $OPENCODE_READ_TOOL_MAX_BYTES = 1048576
-    foreach ($ovr in @(@{ Key='max_bundle_bytes'; Var='READ' })) {
-        $raw = $ModelInfo[$ovr.Key]
-        if ($null -ne $raw -and "$raw" -ne '') {
-            $parsed = [long]0
-            if ([long]::TryParse("$raw", [ref]$parsed) -and $parsed -ge 0) { $OPENCODE_READ_TOOL_MAX_BYTES = $parsed }
-            else { Write-Host "[opencode] WARNING: registry max_bundle_bytes='$raw' is not a non-negative number; keeping $OPENCODE_READ_TOOL_MAX_BYTES." }
-        }
-    }
+    # The values and the registry override live in Get-OpencodeDeliveryLimits, so
+    # tests/OpencodeConstantParity.Tests.ps1 can compare them to the plan's own
+    # Get-EraBackendDelivery instead of each side to its own literal -- which is
+    # what the comment above has claimed since 2026-08-31 and what did not exist.
+    $ocLimits = Get-OpencodeDeliveryLimits -ModelInfo $ModelInfo
+    $OPENCODE_ATTACH_LIMIT_BYTES  = $ocLimits.AttachLimitBytes
+    $OPENCODE_READ_TOOL_MAX_BYTES = $ocLimits.ReadToolMaxBytes
     $forceReadTool = $env:ERA_OPENCODE_READ_TOOL -and $env:ERA_OPENCODE_READ_TOOL -ne '0' -and $env:ERA_OPENCODE_READ_TOOL -ne 'false'
     $forceAttach = $env:ERA_OPENCODE_READ_TOOL -and ($env:ERA_OPENCODE_READ_TOOL -eq '0' -or $env:ERA_OPENCODE_READ_TOOL -eq 'false')
-    $bundleBytes = 0
-    try { $bundleBytes = (Get-Item -LiteralPath $BundlePath).Length } catch { $bundleBytes = 0 }
-    $overAttachLimit = $bundleBytes -gt $OPENCODE_ATTACH_LIMIT_BYTES
+    # FAIL CLOSED: a size we could not read must not read as "small enough to
+    # attach". See Get-OpencodeBundleBytes.
+    $bundleBytes = Get-OpencodeBundleBytes -BundlePath $BundlePath
+    $overAttachLimit = Test-OpencodeOverAttachLimit -BundleBytes $bundleBytes -AttachLimitBytes $OPENCODE_ATTACH_LIMIT_BYTES
     $useReadTool = $forceReadTool -or ($overAttachLimit -and -not $forceAttach)
 
     if ($overAttachLimit -and $forceAttach) {
@@ -457,9 +601,27 @@ function Invoke-OpencodeReview {
     # Cost: the opencode seats run sequentially. On the round-5 panel that is
     # additive wall clock on two of four reviewers, against losing one outright.
     # Precedent: the variant-state mutex above.
+    #
+    # IT DOES NOT SERIALISE THE CASE THAT MATTERS, and saying otherwise was the
+    # comment's fault rather than the code's. The wait is now bounded by this
+    # seat's own budget (below), so when seat 1 uses its whole 600s, seat 2's
+    # wait expires at 540s and seat 2 starts ANYWAY -- in parallel with seat 1's
+    # tail, which is the collision window this mutex exists to close. That is
+    # deliberate ("a possible collision beats a guaranteed no-show") and it means
+    # THE BOUNDED 'database is locked' RETRY BELOW IS THE REAL COLLISION HANDLER;
+    # the mutex removes the common case, not the worst one. Raised by the
+    # deepseek-flash seat of the twin-sweep panel, which is also the seat that
+    # kept losing rounds to this collision before the mutex existed.
+    #
+    # THE WAIT COMES OUT OF THE BUDGET, it is not added to it. This was a fixed
+    # 15 minutes, which at the dispatcher's 600s default meant the adapter would
+    # block for 300s longer than the dispatcher waits -- so it could be
+    # tree-killed while still queued, having started nothing and spent nothing,
+    # and be recorded as a plain global timeout. See Resolve-OpencodeRunBudget.
     $runMutex = $null
     $runMutexHeld = $false
-    $lockWaitMs = 15 * 60 * 1000
+    $lockBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec -ElapsedSec $sw.Elapsed.TotalSeconds
+    $lockWaitMs = $lockBudget.LockWaitMs
     try {
         $runMutex = [System.Threading.Mutex]::new($false, 'Global\era-opencode-run-mutex')
         try { $runMutexHeld = $runMutex.WaitOne($lockWaitMs) }
@@ -467,10 +629,52 @@ function Invoke-OpencodeReview {
         if (-not $runMutexHeld) {
             # Degrade to the old behaviour rather than drop the reviewer: a
             # possible collision beats a guaranteed no-show.
-            Write-Host "[opencode] WARNING: waited $([int]($lockWaitMs/1000))s for the opencode run lock and did not get it; starting anyway (may hit 'database is locked')."
+            # A zero wait has TWO causes and they are not the same fact: the
+            # budget really is spent, or the budget was small to begin with and
+            # the run floor ate all of it (reachable on the retry path, which
+            # passes RemainingSec straight in as TimeoutSec). Saying "already
+            # spent" to a caller with a fresh 45s budget is a false statement in
+            # a diagnostic -- flagged by the opus seat of this change's panel.
+            $waitedSec = [int]($lockWaitMs / 1000)
+            $why = if ($waitedSec -gt 0) {
+                "waited ${waitedSec}s for the opencode run lock (all this seat's ${TimeoutSec}s budget could fund) and did not get it"
+            } elseif ($lockBudget.Exhausted) {
+                "did not wait for the opencode run lock at all -- the ${TimeoutSec}s budget for this seat is already spent"
+            } else {
+                "did not wait for the opencode run lock -- a ${TimeoutSec}s budget leaves nothing to spend queueing once the run floor is reserved"
+            }
+            Write-Host "[opencode] WARNING: $why; starting anyway (may hit 'database is locked')."
         }
     } catch {
         Write-Host "[opencode] WARNING: could not create the run mutex ($($_.Exception.Message)); starting unserialised."
+    }
+
+    # WHAT IS LEFT AFTER THE QUEUE, not a fresh copy of the original budget.
+    # $deadline below is started at process launch -- i.e. after the wait above --
+    # so measuring it against $TimeoutSec gave this adapter (lockWait +
+    # TimeoutSec) while the dispatcher still waits only TimeoutSec + 30. The
+    # DEFAULT panel serialises two opencode seats behind that mutex, so the
+    # second one hits this every time both seats are slow.
+    #
+    # If the queue ate the budget, REFUSE rather than start a run the dispatcher
+    # will not wait for: it would produce nothing and be recorded as a generic
+    # global timeout, which is the mis-attribution this whole line of fixes
+    # exists to prevent. Nothing has been spent at this point -- no opencode
+    # process has been started.
+    $runBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec -ElapsedSec $sw.Elapsed.TotalSeconds
+    if (-not $runBudget.Viable) {
+        throw ("opencode: this seat's ${TimeoutSec}s budget was spent waiting for the run lock " +
+               "($([int]$sw.Elapsed.TotalSeconds)s in the queue, $($runBudget.RemainingSec)s left). Refusing to start a run the " +
+               "dispatcher will abandon before it finishes -- it would return nothing and be recorded as a plain timeout. " +
+               "Raise the reviewer timeout, or run fewer opencode seats in one panel (they serialise on one SQLite database). " +
+               "Nothing was dispatched and nothing was spent.")
+    }
+    $effectiveTimeoutSec = $runBudget.EffectiveSec
+    # Reported only when the queue actually cost something. Sub-second startup
+    # jitter is not news, and a line on every healthy round trains the reader to
+    # skip the line that matters.
+    if ($effectiveTimeoutSec -le ($TimeoutSec - 5)) {
+        Write-Host "[opencode] Budget after the run queue: ${effectiveTimeoutSec}s of the ${TimeoutSec}s handed to this seat ($([int]$sw.Elapsed.TotalSeconds)s already spent waiting for the run lock)."
     }
 
     try {
@@ -496,19 +700,21 @@ function Invoke-OpencodeReview {
         # first token, so the base scales with the variant; a bundle-size overlay
         # (20ms/token ~ 50 tok/sec) adds headroom for large bundles. Max of the two.
         $pollMs     = 10000
-        $bundleSize = try { (Get-Item -LiteralPath $BundlePath -ErrorAction Stop).Length } catch { 0 }
+        # Already measured above and it fails closed there; reuse it rather than
+        # re-probing into a second `catch { 0 }`.
+        $bundleSize = $bundleBytes
         # The budget is what the dispatcher handed us. We do NOT raise it -- see
         # Resolve-OpencodeStallPlan for the measurement showing that an escalated
         # $TimeoutSec is time the dispatcher never waits, which put BOTH of this
         # adapter's deadlines out of reach on large max-variant bundles.
-        $stallPlan        = Resolve-OpencodeStallPlan -TimeoutSec $TimeoutSec -Variant $chosenVariant -BundleBytes $bundleSize
+        $stallPlan        = Resolve-OpencodeStallPlan -TimeoutSec $effectiveTimeoutSec -Variant $chosenVariant -BundleBytes $bundleSize
         $stallThresholdMs = $stallPlan.StallThresholdMs
         if ($stallPlan.Clamped) {
             Write-Host ("[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok) " +
-                "-- CLAMPED from $($stallPlan.WantedMs/1000)s to fit the ${TimeoutSec}s budget. A silent think longer than " +
+                "-- CLAMPED from $($stallPlan.WantedMs/1000)s to fit the ${effectiveTimeoutSec}s budget. A silent think longer than " +
                 "$($stallThresholdMs/1000)s will be called a stall; raise the reviewer timeout if this variant needs longer.")
         } else {
-            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok); TimeoutSec=${TimeoutSec}s."
+            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok); budget=${effectiveTimeoutSec}s of ${TimeoutSec}s."
         }
 
         # PHASE 1 MUST NOT CONTRADICT THE STALL PLAN. Round-8 (deepseek-flash)
@@ -536,6 +742,19 @@ function Invoke-OpencodeReview {
                 Write-Host "[opencode] First-token deadline raised ${firstTokenSec}s -> ${planSilenceSec}s to match the silence this variant is expected to need (variant=$chosenVariant). Set ERA_OPENCODE_FIRST_TOKEN_SEC to override."
                 $firstTokenSec = $planSilenceSec
             }
+        }
+        # ...AND RECONCILED DOWNWARD TOO. The block above only ever RAISES
+        # $firstTokenSec. A seat that queued behind the run mutex can hold an
+        # $effectiveTimeoutSec smaller than the 120s default, and then the
+        # timeout throw always wins the race and Phase 1 -- the one kill path
+        # that reports "possible limit/popup block" -- becomes unreachable for
+        # exactly the seats the run-budget code exists to handle. Same shape as
+        # the round-8 finding the block above documents, one direction over;
+        # raised by the opus seat of this change's panel.
+        if ($firstTokenSec -ge $effectiveTimeoutSec) {
+            $lowered = [Math]::Max(10, $effectiveTimeoutSec - 10)
+            Write-Host "[opencode] First-token deadline lowered ${firstTokenSec}s -> ${lowered}s to fit this seat's remaining ${effectiveTimeoutSec}s budget; otherwise the timeout fires first and the no-output branch can never report."
+            $firstTokenSec = $lowered
         }
         $lastSize   = $stdoutSink.Length + $stderrSink.Length
         $lastGrowth = [System.Diagnostics.Stopwatch]::StartNew()
@@ -628,10 +847,10 @@ function Invoke-OpencodeReview {
                 $tailInfo = & $snapshotPartialAndDebug 'stall'
                 throw "opencode stalled: no output growth for $($stallThresholdMs/1000)s (model=$modelId, variant=$chosenVariant, total wall=$([math]::Round($deadline.Elapsed.TotalSeconds,1))s, total bytes=$lastSize). $tailInfo"
             }
-            if ($deadline.Elapsed.TotalSeconds -gt $TimeoutSec) {
+            if ($deadline.Elapsed.TotalSeconds -gt $effectiveTimeoutSec) {
                 try { $opencodeProc.Kill($true) } catch {}
                 $tailInfo = & $snapshotPartialAndDebug 'timeout'
-                throw "opencode run exceeded timeout of ${TimeoutSec}s (model=$modelId, variant=$chosenVariant, total bytes=$lastSize). $tailInfo"
+                throw "opencode run exceeded its ${effectiveTimeoutSec}s slice of the ${TimeoutSec}s budget (model=$modelId, variant=$chosenVariant, total bytes=$lastSize). $tailInfo"
             }
         }
         $exitCode = $opencodeProc.ExitCode
@@ -665,10 +884,31 @@ function Invoke-OpencodeReview {
     if ($exitCode -ne 0 -or -not $clean) {
         if ($LockRetries -gt 0 -and $stderr -match '(?i)database is locked') {
             $backoffSec = 10 * (3 - $LockRetries)   # 10s, then 20s
-            Write-Host "[opencode] 'database is locked' (another opencode holds ~/.local/share/opencode/opencode.db). Retrying in ${backoffSec}s, $LockRetries left."
+            # THE RETRY SPENDS OUR BUDGET, it does not get a new one. This used
+            # to recurse with the unchanged $TimeoutSec, so two backoffs plus
+            # three attempts could reach 3 x TimeoutSec + 30s against a
+            # dispatcher that waits TimeoutSec + 30 -- the same "an adapter
+            # cannot grant itself time" defect ae7594c fixed one path over. A
+            # lock failure normally dies at startup in about a second, so this
+            # is cheap in practice; it is the worst case that was unbounded.
+            $retryBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec `
+                -ElapsedSec ($sw.Elapsed.TotalSeconds + $backoffSec)
+            # VIABLE, not merely non-zero. Refusing only on Exhausted let a retry
+            # go out with 1-9s left: the poll loop's first wake is 10s, so the
+            # deadline check fires on the very first poll, opencode is spawned,
+            # the bundle prefill is BILLED, and the child is killed having
+            # produced nothing. Found by the opus seat of the panel run on the
+            # change that introduced this block.
+            if (-not $retryBudget.Viable) {
+                throw ("opencode run failed (exit=$exitCode, model=$modelId) with 'database is locked', and the ${TimeoutSec}s budget " +
+                       "has $($retryBudget.RemainingSec)s left after $([int]$sw.Elapsed.TotalSeconds)s and a ${backoffSec}s backoff -- too little to finish a retry, " +
+                       "which would bill the bundle prefill and then be killed on its first poll: $stderr")
+            }
+            Write-Host "[opencode] 'database is locked' (another opencode holds ~/.local/share/opencode/opencode.db). Retrying in ${backoffSec}s with $($retryBudget.RemainingSec)s of budget left, $LockRetries retries left."
             Start-Sleep -Seconds $backoffSec
             $retryArgs = @{} + $PSBoundParameters
             $retryArgs['LockRetries'] = $LockRetries - 1
+            $retryArgs['TimeoutSec']  = $retryBudget.RemainingSec
             return Invoke-OpencodeReview @retryArgs
         }
         throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr"

@@ -356,7 +356,12 @@ Describe 'the two claims the audit panel made that were not acted on at the time
         # Sort-Object is STABLE, so a tie on TierRank silently takes whatever order
         # the hashtable happened to enumerate.
         $script:EraSrc4 | Should -Match "Expression = 'TierRank'; Descending = \`$true"
-        $script:EraSrc4 | Should -Match "Expression = 'Display'"
+        # The secondary key used to be 'Display' here and 'SettingsValue' in
+        # resolve-model.ps1 -- two copies of one rule, both deterministic, both
+        # able to name a different model on a tie. They now use the same key;
+        # tests/AgyTieBreakParity.Tests.ps1 asserts the pair agrees on the real
+        # registry, which is the behavioural half of this.
+        $script:EraSrc4 | Should -Match "Expression = 'SettingsValue'"
         $script:EraSrc4 | Should -Match 'matches \$\(\$tied\.Count\) models at the same tier'
     }
 
