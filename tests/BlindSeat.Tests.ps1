@@ -143,3 +143,36 @@ Describe '-BlindSeat wiring' -Tag Unit {
         $script:WfSrc | Should -Match 'covers 33 extensions and `\.ps1` is not among them'
     }
 }
+
+Describe 'a block opener with code after the closer is not a comment line' -Tag Unit {
+
+    It 'keeps an inline JSDoc type annotation and the code it annotates' {
+        # FOUND BY USING THE FEATURE. -BlindSeat on a real JS server blanked
+        #     /** @type {*} */ (obj.browserInstance).isConnected()
+        # as a whole-line comment, leaving `x &&` dangling above a `) {`. The
+        # blinded reviewer opened its review by saying the expression was
+        # unreadable. An inline annotation is a block comment whose entire purpose
+        # is to sit in front of code on the same line.
+        $in  = Join-Path ([System.IO.Path]::GetTempPath()) ("bs-in-"  + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        $out = Join-Path ([System.IO.Path]::GetTempPath()) ("bs-out-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        try {
+            @'
+<file path="src/m.js">
+  1: if (
+  2:   a &&
+  3:   /** @type {*} */ (obj.inst).isConnected()
+  4: ) {
+  5: /* a real whole-line block comment */
+  6:   go();
+  7: }
+</file>
+'@ | Set-Content -LiteralPath $in -Encoding utf8
+            $null = Remove-EraBundleComments -BundlePath $in -OutputPath $out
+            $lines = [System.IO.File]::ReadAllLines($out)
+
+            ($lines | Where-Object { $_ -match 'isConnected\(\)' }).Count | Should -Be 1 -Because 'the annotated expression is code'
+            ($lines | Where-Object { $_ -match 'a real whole-line block comment' }).Count | Should -Be 0
+            ($lines | Where-Object { $_ -match 'go\(\);' }).Count | Should -Be 1
+        } finally { Remove-Item -LiteralPath $in, $out -Force -ErrorAction SilentlyContinue }
+    }
+}

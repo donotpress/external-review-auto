@@ -3886,10 +3886,38 @@ function Remove-EraBundleComments {
         if ($lm -and $trim.StartsWith($lm)) { $isComment = $true }
         $bp = $blockPairs[$ext]
         if (-not $isComment -and $bp -and $trim.StartsWith($bp[0])) {
-            $isComment = $true
-            # Same-line open+close (`<# note #>`) does not open a block.
             $after = $trim.Substring($bp[0].Length)
-            if (-not ($after -match [regex]::Escape($bp[1]))) { $inBlock = $true; $blockEnd = $bp[1] }
+            $closeAt = $after.IndexOf($bp[1])
+            if ($closeAt -lt 0) {
+                # Opens a block that runs past this line.
+                $isComment = $true; $inBlock = $true; $blockEnd = $bp[1]
+            }
+            elseif ($after.Substring($closeAt + $bp[1].Length).Trim()) {
+                # OPENS AND CLOSES ON THIS LINE, WITH CODE AFTER THE CLOSER. Not a
+                # comment line at all -- blanking it deletes real code.
+                #
+                # Caught by using the feature: `-BlindSeat` on a real JS server
+                # blanked three lines of the form
+                #
+                #     /** @type {*} */ (this.browserManager.browserInstance).isConnected()
+                #
+                # leaving `x &&` dangling above a `) {`, and the blinded reviewer
+                # opened its review by saying the expression was unreadable. An
+                # inline type annotation is a block comment whose whole purpose is
+                # to sit in front of code on the same line.
+                #
+                # This is the failure the docstring already warned about for the
+                # LINE-marker case (a `#` inside a string) and did not guard for
+                # the BLOCK-opener case. Leaving the line whole keeps a fragment of
+                # narrative in the bundle, which is the safe direction: a surviving
+                # comment weakens the experiment, a deleted expression corrupts the
+                # code under review.
+                $isComment = $false
+            }
+            else {
+                # Opens and closes with nothing after it -- a real comment line.
+                $isComment = $true
+            }
         }
         if (-not $isComment -and $ext -eq '.py' -and ($trim.StartsWith('"""') -or $trim.StartsWith("'''"))) {
             $q = $trim.Substring(0,3); $isComment = $true
