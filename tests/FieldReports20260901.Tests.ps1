@@ -156,3 +156,60 @@ Describe 'a non-review says WHICH kind it was' -Tag Unit {
             Should -BeNullOrEmpty
     }
 }
+
+Describe 'model-hint resolution is deterministic' -Tag Unit {
+
+    BeforeAll {
+        . (Join-Path $script:SkillRoot 'runtimes/resolve-model.ps1')
+        $script:Reg = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/_registry.json') | ConvertFrom-Json
+    }
+
+    It 'iterates the registries in a defined order' {
+        # `$map.Keys` on a HASHTABLE has no defined enumeration order. Measured
+        # across three consecutive processes on one box, the same registry gave
+        # `sonnet, opus, haiku`, then `haiku, sonnet, opus`, then
+        # `sonnet, haiku, opus` -- so with first-match-wins an ambiguous hint
+        # resolved to a DIFFERENT MODEL run to run, and the caller was billed for
+        # a model it had not asked for.
+        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/resolve-model.ps1')
+        $src | Should -Match '\$claudeMap\.Keys \| Sort-Object'
+        $src | Should -Match '\$agyMap\.Keys \| Sort-Object'
+    }
+
+    It 'resolves an ambiguous hint the same way every time' {
+        # The substring matcher is `a.Contains(b) -or b.Contains(a)`, so against
+        # the shipped registry `o` and `s` both match sonnet AND opus, and `u`
+        # matches opus AND haiku.
+        foreach ($hint in @('o', 's', 'u')) {
+            $seen = @(1..5 | ForEach-Object { (Resolve-ModelFromHint -Hint $hint -Registry $script:Reg).ModelId })
+            (@($seen | Sort-Object -Unique)).Count | Should -Be 1 -Because "hint '$hint' must not resolve to different models"
+        }
+    }
+
+    It 'still resolves the ergonomic exact hints correctly' {
+        # The exact pass runs first, so the fix must not disturb normal usage.
+        (Resolve-ModelFromHint -Hint 'opus'   -Registry $script:Reg).ModelId | Should -Be 'claude-opus-5'
+        (Resolve-ModelFromHint -Hint 'sonnet' -Registry $script:Reg).ModelId | Should -Be 'claude-sonnet-5'
+        (Resolve-ModelFromHint -Hint 'gemini 3.1 pro low' -Registry $script:Reg).Provider | Should -Be 'agy'
+    }
+
+    It 'keeps the ambiguity warning off stdout' {
+        # resolve.ps1's contract is that stdout carries ONLY the JSON flag object;
+        # a warning printed there would corrupt what the caller parses.
+        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/resolve-model.ps1')
+        $src | Should -Match '\[Console\]::Error\.WriteLine\("\[era\] WARNING: model hint'
+        $src | Should -Not -Match 'Write-Host "\[era\] WARNING: model hint'
+    }
+}
+
+Describe 'the preflight refusal records why it refuses the whole panel' -Tag Unit {
+
+    It 'explains why doomed seats are not simply dropped' {
+        # era proceeds with a degraded panel at RUNTIME but refuses one at
+        # PREFLIGHT. That looks inconsistent without the reason, and an
+        # undocumented deliberate decision reads as an oversight.
+        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
+        $src | Should -Match 'WHY THE WHOLE ROUND, AND NOT JUST THE DOOMED SEATS'
+        $src | Should -Match 'has spent NOTHING'
+    }
+}

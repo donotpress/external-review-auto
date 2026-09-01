@@ -312,3 +312,22 @@ names which fired:
 Before this split, all three reported the same generic message listing all three
 possibilities, so a `sub-floor` rejection on a strong reviewer read as "the model
 misbehaved" when it had in fact answered correctly and briefly.
+
+---
+
+## "WARNING: model hint '<x>' matches N claude models"
+
+**Cause:** `-Model` hints are resolved by an exact pass first and a **substring**
+pass second, and the substring matcher is `a.Contains(b) -or b.Contains(a)`. A
+short hint can therefore match more than one family — against the shipped
+registry, `o` and `s` each match both `sonnet` and `opus`, and `u` matches both
+`opus` and `haiku`.
+
+era picks the alphabetically-first match, tells you on **stderr** which models
+matched and which it took, and carries on. It used to pick whichever the
+hashtable happened to enumerate first, which varied **between processes** — so the
+same hint could resolve to a different model run to run, and you were billed for a
+model you had not asked for.
+
+**Fix:** give a more specific hint (`opus`, `sonnet 4.6`, `gemini 3.1 pro low`).
+Exact hints never reach the substring pass and are unaffected.

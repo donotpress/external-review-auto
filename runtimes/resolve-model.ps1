@@ -95,19 +95,51 @@ function Resolve-ModelFromHint {
         }
 
         # --- claude registry ---
-        foreach ($familyKey in $claudeMap.Keys) {
+        # SORTED, and every match collected rather than the first one taken.
+        #
+        # `$claudeMap.Keys` is a HASHTABLE key set: .NET does not define its
+        # enumeration order and PowerShell does not impose one. Measured across
+        # three consecutive processes on this box, the same registry gave
+        # `sonnet, opus, haiku`, then `haiku, sonnet, opus`, then
+        # `sonnet, haiku, opus`. With first-match-wins that makes an ambiguous
+        # hint resolve to a DIFFERENT MODEL from run to run, silently -- the
+        # caller is billed for a model it did not ask for and the metadata records
+        # the substitution as if it were intended.
+        #
+        # It bites only in the substring pass (the exact pass runs first, so
+        # `opus` / `sonnet 4.6` are unaffected), but the substring matcher is
+        # `a.Contains(b) -or b.Contains(a)`, so single-letter and short hints
+        # collide across families: measured against the shipped registry,
+        # `o` matches sonnet AND opus, `s` matches sonnet AND opus, `u` matches
+        # opus AND haiku.
+        #
+        # Both panels flagged this and both illustrated it with an example that
+        # does not actually fire (a bare `claude` matches no family), which is why
+        # the triggering hints above are the measured ones.
+        #
+        # The agy branch below already collected candidates and ranked them; this
+        # branch and its sibling now at least agree on being deterministic.
+        $claudeCandidates = @()
+        foreach ($familyKey in ($claudeMap.Keys | Sort-Object)) {
             $family = $claudeMap[$familyKey]
             foreach ($tierKey in $family.PSObject.Properties.Name) {
                 $entry = $family.$tierKey
                 $displayCanon = & $_Canon $entry.display
                 $familyCanon = & $_Canon $familyKey
                 if ((& $_CanonMatch $displayCanon $hintCanon) -or (& $_CanonMatch $familyCanon $hintCanon)) {
-                    $resolvedModelId = $entry.model_id
-                    $resolvedProvider = 'claude'
-                    break
+                    $claudeCandidates += @{ ModelId = $entry.model_id; FamilyKey = $familyKey }
                 }
             }
-            if ($resolvedModelId) { break }
+        }
+        if ($claudeCandidates.Count -gt 0) {
+            $distinct = @($claudeCandidates | ForEach-Object { $_.ModelId } | Sort-Object -Unique)
+            if ($distinct.Count -gt 1) {
+                # Say it rather than pick silently. stderr, never stdout: resolve.ps1's
+                # contract is that stdout carries ONLY the JSON flag object.
+                [Console]::Error.WriteLine("[era] WARNING: model hint '$Hint' matches $($distinct.Count) claude models ($($distinct -join ', ')); taking '$($distinct[0])'. Give a more specific hint to pin it.")
+            }
+            $resolvedModelId = $distinct[0]
+            $resolvedProvider = 'claude'
         }
 
         # --- agy registry ---
@@ -115,7 +147,10 @@ function Resolve-ModelFromHint {
             # Detect explicit tier word in hint so "gemini 3.1 pro low" pins to low, not high.
             $hintExplicitTier = if ($hintCanon -match 'high$') { 'high' } elseif ($hintCanon -match 'medium$') { 'medium' } elseif ($hintCanon -match 'low$') { 'low' } else { $null }
             $agyCandidates = @()
-            foreach ($familyKey in $agyMap.Keys) {
+            # Sorted for the same reason as the claude branch above: Sort-Object is
+            # STABLE, so a tie on TierRank silently inherits hashtable enumeration
+            # order -- two families at the same tier resolved arbitrarily.
+            foreach ($familyKey in ($agyMap.Keys | Sort-Object)) {
                 $family = $agyMap[$familyKey]
                 foreach ($tierKey in $family.PSObject.Properties.Name) {
                     $entry = $family.$tierKey
@@ -131,7 +166,7 @@ function Resolve-ModelFromHint {
                 # If the hint explicitly names a tier, restrict to that tier; otherwise prefer highest.
                 $filtered = if ($hintExplicitTier) { $agyCandidates | Where-Object { $_.TierKey -eq $hintExplicitTier } } else { $null }
                 $pool = if ($filtered -and @($filtered).Count -gt 0) { $filtered } else { $agyCandidates }
-                $best = $pool | Sort-Object TierRank -Descending | Select-Object -First 1
+                $best = $pool | Sort-Object @{ Expression = 'TierRank'; Descending = $true }, @{ Expression = 'SettingsValue'; Descending = $false } | Select-Object -First 1
                 $resolvedModelId = $best.SettingsValue
                 $resolvedProvider = 'agy'
             }

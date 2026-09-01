@@ -1798,6 +1798,28 @@ Be terse. If a section is empty, write "(none)".
             }
         }
         else {
+            # WHY THE WHOLE ROUND, AND NOT JUST THE DOOMED SEATS.
+            #
+            # The plan already knows exactly which seats are fine, so era COULD
+            # drop the ones that cannot carry the bundle and dispatch the rest --
+            # a reviewer argued for precisely that, and pointed at era's own
+            # position ~250 lines below, where a panel that loses a seat AT RUNTIME
+            # proceeds with a warning rather than failing.
+            #
+            # It is deliberately not what happens, and the two cases are not the
+            # same one. A runtime loss has already been paid for and cannot be
+            # undone; continuing is the best outcome still available. A preflight
+            # refusal has spent NOTHING, so the cheaper option is still open: the
+            # caller can curate the bundle and get the panel they actually asked
+            # for. Silently dispatching a smaller panel would spend money on a
+            # different round from the requested one, and "3 of 4 reviewed this"
+            # is a materially weaker result that the caller never agreed to.
+            #
+            # So the choice stays with the caller, and the message names all three
+            # ways forward (curate / drop the seats / -ForceBundleSize). If this is
+            # ever revisited, the thing to add is an explicit opt-in -- not a
+            # change to the default, which would make a degraded panel the silent
+            # outcome of a full-panel request.
             $tightest = if ($null -ne $deliveryPlan.TightestBytes) { "$('{0:N0}' -f [long]$deliveryPlan.TightestBytes) bytes" } else { 'n/a' }
             Stop-EraWithError ("Refusing this round: $($doomed.Count) of $(@($reviewerList).Count) requested reviewer(s) cannot receive a " +
                 "$('{0:N0}' -f $bundleBytes)-byte / $('{0:N0}' -f $tokenCount)-token bundle. $detail. " +
