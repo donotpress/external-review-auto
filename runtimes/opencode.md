@@ -10,9 +10,13 @@
 
 **Terminal condition:** 0 critical issues. **Always bundle source code.**
 
-### opencode `bash` timeout — required
+### Dispatch era in the background — required
 
-The `bash` tool defaults to `timeout: 120000ms`. `era.ps1` scales its own `TimeoutSec` to the bundle (`600s` for a small single, `1800s` for a `~100k`-token 3-4-seat panel at `116k` tokens + `300s` straggler grace). A `120s` outer `bash` timeout `SIGTERM`s `pwsh` while `deepseek-flash`/`muse-spark` are still running, leaving `round-N-*.pid` but no `.md` — measured `bulk-refresh-vpn-headless` round 1 lost `deepseek-flash` at `451s` (still in grace) because `bash` killed it at `120s`. **Always dispatch via `bash` with `timeout: 600000` (single) or `timeout: 1800000` (panel).** See `references/troubleshooting.md#bash-tool-timeout-kills-era-early`.
+era scales its own `TimeoutSec` to the bundle at 20 ms/token: a 600 s floor, an **1800 s ceiling reached at 90,000 tokens**, plus 300 s of straggler grace for the last seat. That is longer than a driving tool waits in the foreground, and raising the timeout does not close the gap — on Claude Code the Bash foreground wait is capped at 600 s and a larger value is silently clamped.
+
+**Dispatch in the background and poll the log.** A timeout message is not evidence the round died: measured 2026-09-02 on Claude Code, an over-running `pwsh` child is moved to the background and runs to completion (200 s child under the 120 s default; 640 s child under the 600 s cap; both `RC=0`, neither `SIGTERM`ed). Re-dispatching because the driver stopped waiting spends the round twice — and both times you pay for the seats.
+
+A finished round has `round-N-metadata.json`; its absence is the signature of an abort. See `references/troubleshooting.md` item 14.
 
 ### Three rules that prevent runaway loops
 
