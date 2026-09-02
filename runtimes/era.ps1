@@ -2267,19 +2267,39 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # Runs BEFORE Write-ReviewMetadata, so the warnings reach the round's own
     # telemetry. It used to run after it, which made the only durable record of a
     # reviewer inventing line numbers a console line nobody keeps.
+    #
+    # A SEAT IS CHECKED AGAINST THE BUNDLE IT ACTUALLY READ, and against BOTH
+    # coordinate frames. A blinded seat reads round-N-bundle-blind.xml, so
+    # checking it against the sighted bundle compares citations to the wrong
+    # artifact; and a read-tool seat opens the bundle with its own Read tool,
+    # which reports BUNDLE-ABSOLUTE line numbers rather than the per-file ones
+    # printed inside it. Measured over 20 real arms: 79% of every citation this
+    # checker has ever called a fabrication was the second frame, pointing at the
+    # right code. See Get-EraBundleFileSpans.
     $citationWarnings = @()
-    $bundleLineCounts = Get-EraBundleLineCounts -BundlePath $bundlePath
-    if ($bundleLineCounts.Count -gt 0) {
-        foreach ($preset in (@($results.Keys) | Sort-Object)) {
-            $rr = $results[$preset]
-            if (-not $rr -or -not $rr.Response) { continue }
-            $cit = Test-EraResponseCitations -Response $rr.Response -LineCounts $bundleLineCounts
-            if ($cit.OutOfRange.Count -gt 0) {
-                Write-Host "[era] WARNING: $preset cited line numbers that do not exist in the bundled files."
-                foreach ($cl in $cit.Lines) { Write-Host $cl }
-                $citationWarnings += "$preset cited $($cit.OutOfRange.Count) of $($cit.Checked) checkable line numbers past the end of the named file: $($cit.OutOfRange -join '; ')"
+    $citCache = @{}
+    foreach ($preset in (@($results.Keys) | Sort-Object)) {
+        $rr = $results[$preset]
+        if (-not $rr -or -not $rr.Response) { continue }
+        $seatBundlePath = Get-EraSeatBundle -Preset $preset -BundleOverrides $bundleOverrides -BundlePath $bundlePath
+        if (-not $citCache.ContainsKey($seatBundlePath)) {
+            $citCache[$seatBundlePath] = @{
+                Counts = Get-EraBundleLineCounts -BundlePath $seatBundlePath
+                Spans  = Get-EraBundleFileSpans  -BundlePath $seatBundlePath
             }
         }
+        $lc = $citCache[$seatBundlePath].Counts
+        if ($lc.Count -eq 0) { continue }
+        $cit = Test-EraResponseCitations -Response $rr.Response -LineCounts $lc -FileSpans $citCache[$seatBundlePath].Spans
+        if ($cit.BundleCoordinate.Count -gt 0) {
+            Write-Host "[era] NOTE: $preset cited BUNDLE line numbers rather than the file's own — resolvable, not invented."
+            $citationWarnings += "$preset used bundle-absolute line numbers for $($cit.BundleCoordinate.Count) of $($cit.Checked) checkable citations (translated, not fabricated): $($cit.BundleCoordinate -join '; ')"
+        }
+        if ($cit.OutOfRange.Count -gt 0) {
+            Write-Host "[era] WARNING: $preset cited line numbers that do not exist in the bundled files, in either coordinate frame."
+            $citationWarnings += "$preset cited $($cit.OutOfRange.Count) of $($cit.Checked) checkable line numbers past the end of the named file: $($cit.OutOfRange -join '; ')"
+        }
+        foreach ($cl in $cit.Lines) { Write-Host $cl }
     }
 
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `

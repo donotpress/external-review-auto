@@ -122,6 +122,47 @@ The Read-tool path is **intermittent, and the cause is unexplained.**
 `deepseek-flash` lost rounds at 74,740 B and 79,294 B — sizes the probes above
 clear comfortably — so it is neither size nor model.
 
+### The forensic instrument is now VERIFIED, not just claimed (2026-09-01)
+
+This document has said since the flush fix that "the next occurrence will leave a
+real artifact". That was an inference from a live .NET repro of the buffering bug,
+not an end-to-end test — and every artifact in `opencode-stall-debug` predating
+the fix is 0 bytes or exactly 4,096, so the instrument's entire track record was
+of producing nothing. Believing an untested claim about an instrument is the
+mistake that retired this path once already.
+
+So it was tested. A real `opencode` read-tool dispatch on the 146,712-byte bundle
+with `TimeoutSec=40`, forcing the stall branch:
+
+    opencode stalled: no output growth for 9s (... total wall=20.6s, total bytes=42)
+    Partial stderr (tail): > build … deepseek-v4-flash
+    Full partial saved under …\opencode-stall-debug\stall-20260901-185415-348-pid58008-*.txt
+
+    stall-…-stderr.txt   42 bytes   <- non-empty
+    stall-…-stdout.txt    0 bytes   <- genuinely no stdout
+
+**42 bytes on disk against `total bytes=42` in the error line.** That equality is
+the whole point: the contradiction that used to be the signature of the broken
+instrument (a non-zero byte count beside an empty artifact) is gone, and the tail
+in the throw message matches the file. The next real occurrence will leave usable
+evidence.
+
+The same probe exercised two other paths in passing — the stall threshold clamped
+from 733.56s to 9s to fit the budget, and the first-token deadline **lowered**
+120s → 29s to fit the remaining budget — so the ordering
+`stall < adapter timeout < dispatcher patience` held on a live run, not only in
+unit tests.
+
+### It did not recur across ~24 dispatches on 2026-09-01
+
+Not a designed experiment, but worth recording as a denominator: the day's work
+put roughly two dozen read-tool dispatches through this path — 12 A/B repeats at
+113,279 and 146,712 B, a 4-seat panel at 371,628 and 614,256 B, four
+second-subject seats at ~185,000 B, and this probe — with **zero unexplained
+stalls**. One seat ran 451s, and the new budget instrumentation showed why: 400s
+of it was the run-lock queue, not a stall. That is the first time a slow
+read-tool seat has been explained rather than filed under this heading.
+
 ### The concurrency hypothesis was tested, and it failed
 
 Two independent reviewers proposed the same experiment, so it was run: one fixed

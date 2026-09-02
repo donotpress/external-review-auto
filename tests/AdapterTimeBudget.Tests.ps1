@@ -148,9 +148,31 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         $ok.EffectiveSec    | Should -Be 500
         $ok.Viable          | Should -BeTrue
 
-        # A budget smaller than the run floor is still viable when nothing has
-        # been spent -- the caller asked for a short run, which is its business.
+        # A budget smaller than the run floor is still viable -- the caller asked
+        # for a short run, which is its business.
         (Resolve-OpencodeRunBudget -TimeoutSec 30).Viable | Should -BeTrue
+    }
+
+    It 'does not refuse a short budget the moment startup costs a second' {
+        # FOUND BY TRYING TO USE IT, not by review. The first cut tested
+        # `remaining >= Min(RunFloorSec, TimeoutSec)`, and for any TimeoutSec at
+        # or under the 60s floor that reduces to `remaining >= TimeoutSec` -- so
+        # ONE SECOND of startup (variant resolution, registry read, temp files)
+        # made every short run non-viable. A probe with TimeoutSec=40 was refused
+        # at 39s remaining, by the guard written to stop refusals that cost
+        # capability. Exactly the direction rule 2 of the review prompt names.
+        #
+        # The floor for "is this worth starting" is not the lock's reservation.
+        # It is mechanical: the poll loop wakes every 10s, so a run with less
+        # than one poll plus margin left is killed on its first wake having
+        # produced nothing and billed the prefill.
+        foreach ($budget in @(15, 20, 30, 40, 59, 60)) {
+            (Resolve-OpencodeRunBudget -TimeoutSec $budget -ElapsedSec 1).Viable |
+                Should -BeTrue -Because "a ${budget}s run is still worth starting one second in"
+        }
+        # ...and the case this guard exists for is unchanged.
+        (Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 592).Viable | Should -BeFalse
+        (Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 560).Viable | Should -BeTrue
     }
 
     It 'composes with Resolve-OpencodeStallPlan so the stall still fires first' {

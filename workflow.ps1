@@ -3949,11 +3949,73 @@ function Get-EraBundleLineCounts {
     return $counts
 }
 
+function Get-EraBundleFileSpans {
+    <#
+    .SYNOPSIS
+        path -> @{ Lines; Start; End } for every file in a repomix XML bundle,
+        where Start/End are BUNDLE-ABSOLUTE line numbers of the `<file>` and
+        `</file>` markers.
+
+    .DESCRIPTION
+        THE SECOND COORDINATE SYSTEM, which nothing in this repo knew existed.
+
+        A bundle prints per-file line numbers (`  471: $x = 1`), and every check
+        era performs assumed a reviewer cites those. A seat on the READ-TOOL
+        delivery path does not read the bundle through era -- it opens the file
+        itself with its own Read tool, and that tool reports BUNDLE-ABSOLUTE line
+        numbers. Some models cite what their tool told them.
+
+        Measured 2026-09-01 across 20 real arms (16 A/B cells and a 4-seat panel),
+        95 citations past the end of the named file: 75 of them -- 79% -- land
+        inside that file's bundle span. They were never inventions. Spot-checked
+        by hand:
+
+            runtimes/resolve-model.ps1:1780   span 1611..1845  -> prints "169:",
+            which is the `Sort-Object TierRank/SettingsValue` line the finding
+            citing it was actually about.
+
+        The translation is exact and needs no heuristic: for a file whose header
+        sits at bundle line Start, bundle line B is in-file line (B - Start).
+
+        This is separate from Get-EraBundleLineCounts rather than folded into it
+        because that function's return shape (path -> int) is consumed in several
+        places and by the -BlindSeat line-preservation test.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BundlePath)
+    $spans = @{}
+    if (-not (Test-Path -LiteralPath $BundlePath)) {
+        Write-Host "[era] WARNING: citation frame check skipped -- no bundle at '$BundlePath'."
+        return $spans
+    }
+    $BundlePath = (Resolve-Path -LiteralPath $BundlePath).Path
+    $current = $null; $n = 0
+    try {
+        foreach ($line in [System.IO.File]::ReadLines($BundlePath)) {
+            $n++
+            if ($line -match '^<file path="([^"]+)">') { $current = $matches[1]; $spans[$current] = @{ Lines = 0; Start = $n; End = 0 }; continue }
+            if ($line -match '^</file>') { if ($current) { $spans[$current].End = $n }; $current = $null; continue }
+            if ($current -and $line -match '^\s*(\d+):') {
+                $k = [int]$matches[1]
+                if ($k -gt $spans[$current].Lines) { $spans[$current].Lines = $k }
+            }
+        }
+    } catch {
+        Write-Host "[era] WARNING: citation frame check skipped -- could not read the bundle ($($_.Exception.Message))."
+        return @{}
+    }
+    return $spans
+}
+
 function Test-EraResponseCitations {
     <#
     .SYNOPSIS
         Check `path:line` citations in a review against the bundle it reviewed.
-        Returns @{ Checked; OutOfRange; Unresolved; Lines }.
+        Returns @{ Checked; OutOfRange; BundleCoordinate; Unresolved; Lines }.
+
+        BundleCoordinate is the citation that names the right file and a line
+        number from the BUNDLE's frame rather than the file's -- resolvable, and
+        reported translated. See Get-EraBundleFileSpans for the measurement.
 
     .DESCRIPTION
         OutOfRange is the load-bearing one: the file IS in the bundle and the
@@ -3971,9 +4033,15 @@ function Test-EraResponseCitations {
     [CmdletBinding()]
     param(
         [AllowNull()][AllowEmptyString()][string]$Response,
-        [Parameter(Mandatory)][hashtable]$LineCounts
+        [Parameter(Mandatory)][hashtable]$LineCounts,
+        # From Get-EraBundleFileSpans. Optional, and everything behaves exactly as
+        # before without it -- but with it, a citation past end-of-file that lands
+        # inside the named file's BUNDLE span is reported as a coordinate-frame
+        # mismatch and translated, instead of being called a fabrication. That was
+        # 79% of every "fabricated" citation this checker has ever reported.
+        [hashtable]$FileSpans = @{}
     )
-    $result = @{ Checked = 0; OutOfRange = @(); Unresolved = @(); Lines = @() }
+    $result = @{ Checked = 0; OutOfRange = @(); BundleCoordinate = @(); Unresolved = @(); Lines = @() }
     if (-not $Response -or $LineCounts.Count -eq 0) { return $result }
 
     # basename -> line count, only where the basename is UNIQUE in the bundle.
@@ -3983,7 +4051,15 @@ function Test-EraResponseCitations {
         if ($byBase.ContainsKey($b)) { $byBase[$b] = $null } else { $byBase[$b] = $LineCounts[$p] }
     }
 
+    # basename -> span, on the same unique-basename rule.
+    $spanByBase = @{}
+    foreach ($p in $FileSpans.Keys) {
+        $b = ($p -split '[\\/]')[-1]
+        if ($spanByBase.ContainsKey($b)) { $spanByBase[$b] = $null } else { $spanByBase[$b] = $FileSpans[$p] }
+    }
+
     $bad = [System.Collections.Generic.List[string]]::new()
+    $frame = [System.Collections.Generic.List[string]]::new()
     $unk = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
     foreach ($m in [regex]::Matches($Response, '(?<path>[A-Za-z0-9_.\-/\\]+\.[A-Za-z0-9]{1,8}):(?<line>\d{1,7})\b')) {
@@ -3997,12 +4073,32 @@ function Test-EraResponseCitations {
         $max = $byBase[$base]
         if ($null -eq $max) { continue }   # ambiguous basename -- do not guess
         $result.Checked++
-        if ($lineNo -gt $max) { $bad.Add("$key (file has $max lines)") }
+        if ($lineNo -le $max) { continue }
+        # Past end-of-file. Before calling it invented, ask whether it is the
+        # bundle's own frame: the read-tool delivery path hands the model a file
+        # whose line numbers ARE bundle-absolute, and some models cite those.
+        $sp = if ($spanByBase.ContainsKey($base)) { $spanByBase[$base] } else { $null }
+        if ($sp -and $sp.Start -gt 0 -and $sp.End -gt 0 -and $lineNo -gt $sp.Start -and $lineNo -lt $sp.End) {
+            $inFile = $lineNo - $sp.Start
+            # Echo the path the reviewer wrote, so the translated citation can be
+            # pasted straight into an editor.
+            $frame.Add("$key -> $cited`:$inFile (bundle line $lineNo; the file has $max lines)")
+        } else {
+            $bad.Add("$key (file has $max lines)")
+        }
     }
-    $result.OutOfRange = @($bad)
-    $result.Unresolved = @($unk)
+    $result.OutOfRange       = @($bad)
+    $result.BundleCoordinate = @($frame)
+    $result.Unresolved       = @($unk)
 
     $lines = [System.Collections.Generic.List[string]]::new()
+    if ($result.BundleCoordinate.Count -gt 0) {
+        # NOT a fabrication, and saying so matters: the seat this used to accuse
+        # most loudly was pointing at the right code in the bundle's own frame.
+        $lines.Add("  $($result.BundleCoordinate.Count) of $($result.Checked) citation(s) use BUNDLE line numbers rather than the file's own — resolvable, not invented (a read-tool seat cites what its Read tool reported). Translated:")
+        foreach ($f in ($result.BundleCoordinate | Select-Object -First 6)) { $lines.Add("    $f") }
+        if ($result.BundleCoordinate.Count -gt 6) { $lines.Add("    ... and $($result.BundleCoordinate.Count - 6) more") }
+    }
     if ($result.OutOfRange.Count -gt 0) {
         $lines.Add("  $($result.OutOfRange.Count) of $($result.Checked) checkable citation(s) point past the end of the cited file:")
         foreach ($b in ($result.OutOfRange | Select-Object -First 6)) { $lines.Add("    $b") }

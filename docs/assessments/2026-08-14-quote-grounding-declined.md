@@ -147,6 +147,24 @@ bundle, in either form.
   detector *and* no proposed detector that survives measurement. A future
   proposal should be tested against the three confounds above before it is
   built: agentic filesystem access, `-Diff` subsets, and citation convention.
+
+  > **THAT INSTRUCTION WAS NOT FOLLOWED, AND CONFOUND 3 SHIPPED AS A FEATURE.**
+  > Eighteen days later v2.4 built `Test-EraResponseCitations` — a line-grounding
+  > check in exactly this family — and reported every citation past end-of-file
+  > as one the reviewer *invented*. None of the three confounds above was tested
+  > against it.
+  >
+  > Confound 3 is the one that bit, and this page had already named the example:
+  > `backends/opencode.ps1:3021`, "not a per-file line number in any tree; it is
+  > a position in the merged document." Measured 2026-09-01 across 20 arms,
+  > **75 of 95 flagged citations (79%) were exactly that** — including
+  > `backends/opencode.ps1:3156`, the same file, three weeks later.
+  >
+  > Fixed in v2.8.1: the two conventions are classified separately and the
+  > merged-document ones are translated back. **Confounds 1 and 2 are still not
+  > handled** — an agentic seat citing the file on disk, and a `-Diff` subset
+  > bundle, can both still produce a citation this checker calls unresolvable.
+  > If that verdict is ever used for anything but an advisory line, start here.
 - **Do not reuse `Get-EraPromptEchoRatio` against the bundle** for any variant of
   this without re-running the split above. The engine works; the population it
   would be pointed at is the problem.

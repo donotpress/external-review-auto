@@ -165,7 +165,39 @@ cell, against ~$0.006 for `deepseek-flash` and ~$0.004 for `muse-spark`. Its two
 original cells stand at n=1 and are reported as such. **The 1-vs-0 margin that
 carried half of the original claim therefore has no replication at all.**
 
-## Citation grounding across all 16 arms (exploratory, not pre-registered)
+## Citation grounding across all 16 arms — RETRACTED AND REPLACED
+
+> **Everything in this section as first written was wrong, and the error was in
+> era, not in the reviewers.** It is kept, struck through by this note, because
+> the correction is more useful than a tidy deletion. The replacement is below it.
+>
+> `Test-EraResponseCitations` assumed one coordinate system: the per-file line
+> numbers a repomix bundle prints on every content line. A seat on the READ-TOOL
+> delivery path does not read the bundle through era — it opens the file with its
+> own Read tool, and that tool reports **bundle-absolute** line numbers. Measured
+> across these 16 arms plus a 4-seat panel, 95 citations past end-of-file:
+> **75 of them (79%) land inside the named file's own span in the bundle.** They
+> were real pointers at real code, counted from the top of the wrong file.
+>
+> Spot-checked by hand: `runtimes/resolve-model.ps1:1780` — reported as a
+> fabrication — is bundle line 1780, which is in-file line 169, which is the
+> `Sort-Object TierRank/SettingsValue` line the finding citing it was about.
+>
+> So "muse-spark invents four in ten of its citations" is **withdrawn**. The
+> corrected figures are below. era now classifies the two frames separately and
+> translates the bundle-absolute ones, and the read-tool prompt says which
+> numbering to cite.
+>
+> **And this was already known.** `docs/assessments/2026-08-14-quote-grounding-declined.md`
+> declined line-grounding as a metric and listed three confounds, the third being
+> "reviewers do not share a citation convention… `backends/opencode.ps1:3021` is
+> not a per-file line number in any tree; it is a position in the merged
+> document." It closed with: *"A future proposal should be tested against the
+> three confounds above before it is built."* Eighteen days later v2.4 built one
+> and did not. The measurement above is that confound, at scale, on the same file
+> — `backends/opencode.ps1:3156`.
+
+## Citation grounding, corrected (exploratory, not pre-registered)
 
 The "Incidental" section above reported 5 fabricated citations from one arm and 0
 from three others, at n=1, and correctly declined to claim anything from it. With
@@ -186,24 +218,35 @@ the citation cannot be real.
 | muse-spark | blind (n=3) | 63 | 26 | 41.3% |
 | muse-spark | sighted (n=3) | 55 | 21 | 38.2% |
 
-Two things fall out, and only one of them is about blinding.
+Re-classified into the two frames (same arms, same responses, same checker with
+the frame test added):
 
-1. **Fabrication rate is mostly a property of the model.** `muse-spark` — a seat in
-   the shipped default panel — invents roughly **four in ten** of its `file:line`
-   citations, in both conditions. One arm (`muse-spark-sighted-r3`) had **15 of 15**
-   citations out of range. `deepseek-flash` is an order of magnitude better and
-   `opus` produced none at all here. That is a bigger effect than anything else in
-   this document and it has nothing to do with `-BlindSeat`.
-2. **The one arm-linked signal is `deepseek-flash`'s**, and it is in the direction
-   the incidental note guessed: 0 of 79 blind against 9 of 69 sighted. It does
-   **not** generalise — `muse-spark` shows no such split. So it is a
-   model-and-condition interaction at n=4, not a property of blinding.
+| model | past end-of-file | of which BUNDLE-ABSOLUTE | genuinely unresolvable |
+|---|---:|---:|---:|
+| `opus` (2 arms) | 0 | 0 | 0 |
+| `deepseek-flash` (8 arms) | 9 | 9 | **0** |
+| `muse-spark` (6 arms) | 50 | 37 | 13 |
 
-None of this changes what a reviewer's prose is worth: the assessment's own
-finding, unchanged, is that the reported reviewer was "often CORRECT and twice
-novel" while its citations were not. It does mean the citation checker (v2.4) is
-doing considerably more work on the default panel than the single confirmation
-above suggested.
+Three things fall out, and none of them is about blinding.
+
+1. **`deepseek-flash` fabricated nothing at all.** All nine of its "fabrications"
+   across eight arms are bundle-absolute coordinates. The incidental note's
+   0-blind-vs-9-sighted split, which looked like a condition effect, is the same
+   artifact.
+2. **`muse-spark` uses the bundle frame most of the time** (37 of 50), and its
+   genuinely unresolvable citations — 13 across six arms — are concentrated in a
+   single arm (`muse-spark-sighted-r3`, 10 of them). That arm is also the one that
+   spent 400s queued on the opencode run mutex before it ran.
+3. **The failure this checker was built for is much rarer than it reported.** The
+   v2.4 field report that motivated it — "a reviewer cited line 5,891 of a
+   2,834-line file, in two separate rounds" — has exactly the shape of a
+   bundle-absolute citation, and the same reviewer's prose was recorded at the
+   time as "often CORRECT and twice novel". That is not proof about that round,
+   whose bundle is not on this machine, and it is a specific thing to re-check
+   before the fabrication story is repeated.
+
+The prose finding stands unchanged: the reviewers were often right. What changes
+is that their pointers were mostly right too, and era was discarding them.
 
 ## How the arms were scored this time
 

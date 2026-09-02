@@ -206,18 +206,34 @@ function Resolve-OpencodeRunBudget {
         it -- and the test shipped with cut 2 asserted that 60, so it was green
         while over budget.
 
-        Viable is the honest answer instead: below RunFloorSec of REMAINING time
-        (when time has actually been spent), a run is not worth launching, and
-        the caller says so rather than starting something nobody will wait for. A
-        caller that simply asks for a short TimeoutSec is not refused -- that is
-        its business, and nothing has been spent.
+        Viable is the honest answer instead: with too little time left, a run is
+        not worth launching, and the caller says so rather than starting
+        something nobody will wait for.
+
+        VIABILITY IS NOT MEASURED AGAINST RunFloorSec. That was the first cut and
+        it was wrong in the expensive direction: for any TimeoutSec at or under
+        the 60s floor, `remaining >= Min(RunFloorSec, TimeoutSec)` reduces to
+        `remaining >= TimeoutSec`, so ONE SECOND of startup made every short run
+        non-viable. Found by trying to use it -- a 40s probe was refused at 39s
+        remaining by the guard written to stop refusals that cost capability.
+
+        MinRunSec is mechanical instead of copied: the poll loop wakes every 10s,
+        so a run with less than one poll plus margin left is killed on its first
+        wake having produced nothing and billed the bundle prefill. That is the
+        case opus's finding named, and it is the only case worth refusing. A
+        caller that deliberately asks for a tiny TimeoutSec is still served --
+        that is its business, and nothing has been spent.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][int]$TimeoutSec,
         # Wall clock already spent inside this adapter, from its own stopwatch.
         [double]$ElapsedSec = 0,
-        [int]$RunFloorSec = 60
+        # Reserved OUT OF THE LOCK WAIT so there is time left to run.
+        [int]$RunFloorSec = 60,
+        # The least time in which a run can produce anything: one 10s poll of the
+        # output loop, plus margin. Governs Viable, and nothing else.
+        [int]$MinRunSec = 15
     )
     $remaining = $TimeoutSec - [int][Math]::Ceiling($ElapsedSec)
     if ($remaining -lt 0) { $remaining = 0 }
@@ -227,7 +243,11 @@ function Resolve-OpencodeRunBudget {
         RemainingSec = [int]$remaining
         LockWaitMs   = [int]($lockWaitSec * 1000)
         EffectiveSec = [int]$remaining
-        Viable       = ($remaining -ge [Math]::Min($RunFloorSec, $TimeoutSec))
+        # "You need one poll's worth of time left, unless you asked for less than
+        # that to begin with." The second clause is what keeps a deliberately
+        # short run from being refused by its own startup cost; the first is the
+        # only case worth refusing.
+        Viable       = ($remaining -ge $MinRunSec) -or ($TimeoutSec -le $MinRunSec -and $remaining -gt 0)
         Exhausted    = ($remaining -le 0)
     }
 }
@@ -461,7 +481,18 @@ function Invoke-OpencodeReview {
         Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
     }
     $prompt = if ($useReadTool) {
-        "Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. Output your structured review."
+        # THE CITATION FRAME, said once, where the mismatch is created. Your Read
+        # tool reports line numbers counted from the top of the BUNDLE; the bundle
+        # itself prints each file's own line numbers on every content line. A
+        # model that cites the former is pointing at real code that era then
+        # scores as a fabrication -- measured at 79% of every "fabricated"
+        # citation across 20 arms, and worst on this delivery path because it is
+        # the only one where a model reads the file with its own tooling.
+        # era now translates them either way; this stops them being produced.
+        ("Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. " +
+         "CITATIONS: every content line in that bundle begins with the file's OWN line number (`  471: <code>`). Cite THAT number, " +
+         "not the line number your Read tool reports — the tool counts from the top of the whole bundle, and those numbers do not " +
+         "exist in the file you are naming. Output your structured review.")
     } else {
         "Review the attached bundle file. Every file under review and the review instructions are INSIDE the attached bundle. Output your structured review directly; do not call any tools."
     }

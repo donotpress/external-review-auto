@@ -550,7 +550,39 @@ It also records **which seat was blinded**: `blind_seat` at round level (always
 present, `null` when none was), and `blinded` / `delivery_bundle` per reviewer.
 Before v2.8 that fact existed only in a console line, so the arm label of a
 `-BlindSeat` A/B could not be recovered from the round's own artifacts — the same
-gap the citation warnings had before they were recorded.
+gap the citation warnings had before they were recorded — plus
+`delivery_bundle_sha256`, so "both arms read the same code" is checkable rather
+than asserted (the manifest is written before the blind bundle exists, so that
+file was never hashed anywhere).
+
+### `file:line` citations come in two coordinate systems
+
+A repomix bundle prints each file's **own** line number on every content line
+(`  471: $x = 1`). A seat on the **read-tool** delivery path does not read the
+bundle through era — it opens the file with its own Read tool, which reports
+**bundle-absolute** line numbers. A model that cites what its tool told it names
+the right file and a line that does not exist in it.
+
+era knew only the first frame until v2.8.1 and called the second one fabrication.
+Measured across 20 real arms, **75 of 95 citations past end-of-file (79%) were
+bundle-absolute coordinates inside the correct file** — real pointers at real
+code. One reported as invented, `runtimes/resolve-model.ps1:1780`, is in-file line
+169: the exact line its finding was about.
+
+This confound was documented before the feature was built:
+`docs/assessments/2026-08-14-quote-grounding-declined.md` declined line-grounding
+as a metric, named this exact case (`backends/opencode.ps1:3021` — "a position in
+the merged document"), and said to test any future proposal against it. v2.4 did
+not. Two of that page's three confounds — an agentic seat citing the file on disk,
+and a `-Diff` subset bundle — are **still unhandled**, so an unresolvable verdict
+stays advisory and must not be used to gate anything.
+
+Now: the two are reported separately, the bundle-absolute ones are **translated**
+(`opencode.ps1:3156 -> opencode.ps1:471`) so the pointer is usable, each seat is
+checked against the bundle **it actually read** (a blinded seat was being checked
+against the sighted one), and the read-tool prompt tells the model which numbering
+to cite. Only what fits neither frame is reported as a line number that cannot be
+real — and that verdict still says the finding may be.
 
 ### Environment variables
 

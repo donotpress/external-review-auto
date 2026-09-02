@@ -281,7 +281,27 @@ cookies and auth tokens, and era uploads the bundle to a third party.
 
 ---
 
-## "WARNING: <reviewer> cited line numbers that do not exist in the bundled files"
+## "NOTE: <reviewer> cited BUNDLE line numbers rather than the file's own"
+
+**Not a fabrication, and era translates it for you.** A repomix bundle prints each
+file's OWN line number on every content line (`  471: $x = 1`), and that is what
+era checks citations against. But a seat on the **read-tool** delivery path does
+not read the bundle through era — it opens the file with its own Read tool, and
+that tool counts lines from the top of the whole bundle. A model that cites what
+its tool told it names the right file and a line number that does not exist in it.
+
+Measured across 20 real arms: **75 of 95 citations past end-of-file (79%) were
+this**, not invention. One of them, reported as fabricated, was
+`runtimes/resolve-model.ps1:1780` — bundle line 1780 is in-file line 169, which is
+exactly the line that finding was about.
+
+era now prints the translation (`opencode.ps1:3156 -> opencode.ps1:471`), so the
+pointer is usable. The read-tool prompt also tells the model which numbering to
+cite, so this should get rarer.
+
+---
+
+## "WARNING: <reviewer> cited line numbers that do not exist in the bundled files, in either coordinate frame"
 
 **Cause:** the reviewer invented `file:line` references. Measured on one model
 across two separate rounds: lines 5891, 5360 and 3612 cited in a 2,834-line file.
