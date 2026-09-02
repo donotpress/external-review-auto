@@ -161,10 +161,33 @@ bundle, in either form.
   > `backends/opencode.ps1:3156`, the same file, three weeks later.
   >
   > Fixed in v2.8.1: the two conventions are classified separately and the
-  > merged-document ones are translated back. **Confounds 1 and 2 are still not
-  > handled** — an agentic seat citing the file on disk, and a `-Diff` subset
-  > bundle, can both still produce a citation this checker calls unresolvable.
-  > If that verdict is ever used for anything but an advisory line, start here.
+  > merged-document ones are translated back.
+  >
+  > **MEASURED OVER THE WHOLE ARCHIVE (v2.8.2), 62 reviewer-rounds and 1,570
+  > citations spanning months and five models** — not the 20 arms of one
+  > afternoon that the fix was built on:
+  >
+  > | | citations | share |
+  > |---|---:|---:|
+  > | resolve in the file's own frame | 1,415 | 90.1% |
+  > | resolve in the BUNDLE's frame — *reported as fabrication* | 128 | 8.2% |
+  > | resolve in neither | **27** | **1.7%** |
+  >
+  > **83% of everything this checker has ever flagged was the wrong frame.** Per
+  > model, four of the five that get flagged are flagged *entirely* by it:
+  > `deepseek` 50 of 50, `deepseek-flash` 9 of 9, `gemini` 11 of 11, `muse-spark`
+  > 47 of 57. Only `opus` never uses the bundle frame — and its 12 unresolvable
+  > citations plus muse-spark's 10 are, between them, most of the genuine
+  > fabrication in the project's entire history: **22 citations out of 1,570.**
+  >
+  > Two independent implementations (a standalone analysis and the shipped
+  > `Test-EraResponseCitations`) agree to the citation on those numbers.
+  >
+  > **Confounds 1 and 2 are still not handled, and are now DECLINED on the same
+  > evidence.** An agentic seat citing the file on disk, and a `-Diff` subset
+  > bundle, can still produce an unresolvable verdict — but everything they could
+  > explain lives inside that 1.7%. Machinery to chase it would cost more than
+  > the error it removes. Reported advisory, and left alone.
 - **Do not reuse `Get-EraPromptEchoRatio` against the bundle** for any variant of
   this without re-running the split above. The engine works; the population it
   would be pointed at is the problem.

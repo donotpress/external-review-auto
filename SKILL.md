@@ -564,7 +564,7 @@ bundle through era — it opens the file with its own Read tool, which reports
 the right file and a line that does not exist in it.
 
 era knew only the first frame until v2.8.1 and called the second one fabrication.
-Measured across 20 real arms, **75 of 95 citations past end-of-file (79%) were
+Measured across 62 archived rounds, **128 of 155 flagged citations (83%), out of 1,570 checked, were
 bundle-absolute coordinates inside the correct file** — real pointers at real
 code. One reported as invented, `runtimes/resolve-model.ps1:1780`, is in-file line
 169: the exact line its finding was about.
