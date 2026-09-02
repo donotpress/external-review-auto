@@ -290,8 +290,9 @@ not read the bundle through era — it opens the file with its own Read tool, an
 that tool counts lines from the top of the whole bundle. A model that cites what
 its tool told it names the right file and a line number that does not exist in it.
 
-Measured across 20 real arms: **75 of 95 citations past end-of-file (79%) were
-this**, not invention. One of them, reported as fabricated, was
+Measured across 62 archived seat-responses (25 rounds): **128 of 155 citations past end-of-file
+(83%) were this**, not invention — out of 1,570 checked. A further 203 (12.9%)
+sit where the two frames OVERLAP, and those cannot be told apart at all. One of them, reported as fabricated, was
 `runtimes/resolve-model.ps1:1780` — bundle line 1780 is in-file line 169, which is
 exactly the line that finding was about.
 

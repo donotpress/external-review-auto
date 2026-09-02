@@ -6,12 +6,20 @@
 # the project's stated view of its own panel -- "a correct mechanism wrapped in a
 # fabricated example" -- rests partly on that number.
 #
-# MEASURED 2026-09-01 over 20 real arms (16 A/B cells + a 4-seat panel), 95
-# citations past end-of-file:
+# MEASURED over the ARCHIVE of every round this skill has run against itself --
+# 62 reviewer-rounds, 1,570 citations, months, five models:
 #
-#     75 of 95 (79%) land INSIDE the named file's span in BUNDLE-ABSOLUTE
-#     coordinates -- the line numbers the model's own Read tool reported when it
-#     opened the bundle from disk.
+#     128 of 155 citations past end-of-file (83%) land INSIDE the named file's
+#     span in BUNDLE-ABSOLUTE coordinates -- the line numbers the model's own
+#     Read tool reported when it opened the bundle from disk. Only 27 resolve in
+#     neither frame.
+#
+# (The fix was built on a 20-arm slice of one afternoon giving 79%. The archive
+# figure supersedes it; a stale number in code is the thing this release is about.)
+#
+# AND THE TWO FRAMES OVERLAP, which this cannot see: 203 of those 1,570 (12.9%)
+# are numbers valid in BOTH frames for the same file. 83% is a rate over the
+# FLAGGED set, not over frame errors.
 #
 # They are not inventions. They are the right file and the right place, counted
 # from the top of the bundle instead of the top of the file, and the translation
@@ -105,7 +113,11 @@ Describe 'Test-EraResponseCitations separates a wrong FRAME from a wrong NUMBER'
         $r = Test-EraResponseCitations -LineCounts $script:Counts -FileSpans $script:Spans `
                 -Response 'see src/second.js:700'
         ($r.Lines -join ' ') | Should -Match 'bundle line numbers'
-        ($r.Lines -join ' ') | Should -Not -Match 'cannot be real'
+        # WAS `Should -Not -Match 'cannot be real'`, which guarded nothing: that
+        # string appears nowhere in Test-EraResponseCitations and never has, so it
+        # could not fail for any implementation (opus, v2.8.2 panel). Assert the
+        # words the function DOES emit for a real fabrication are absent here.
+        ($r.Lines -join ' ') | Should -Not -Match 'point past the end of the cited file'
     }
 
     It 'still catches a genuine fabrication, and still says the finding may be real' {
@@ -124,11 +136,83 @@ Describe 'Test-EraResponseCitations separates a wrong FRAME from a wrong NUMBER'
         $r.BundleCoordinate.Count | Should -Be 0
     }
 
+    It 'CANNOT see a frame error where the two frames overlap — the known blind spot' {
+        # THE LIMIT OF THIS WHOLE FEATURE, pinned so nobody reads the 83% as
+        # "83% of frame errors are handled". Raised by the opus seat of the
+        # v2.8.2 panel, which called that figure "a coincidence rate over an
+        # already-flagged set". It is right.
+        #
+        # For a file whose span starts at S with N printed lines, every bundle
+        # coordinate in S+1..min(End,N) is ALSO a valid in-file line for the same
+        # file. Nothing distinguishes them without reading the cited line's
+        # content. Measured over the 62-round archive: 203 of 1,570 citations
+        # (12.9%) sit in that overlap.
+        #
+        # first.js spans 1..602 with 600 lines, so bundle line 250 is also
+        # in-file line 250. A read-tool seat meaning bundle 250 (= in-file 249)
+        # is accepted silently and points one line off.
+        $r = Test-EraResponseCitations -LineCounts $script:Counts -FileSpans $script:Spans `
+                -Response 'src/first.js:250'
+        $r.Checked                | Should -Be 1
+        $r.BundleCoordinate.Count | Should -Be 0 -Because 'the overlap is invisible; this documents it rather than claiming otherwise'
+        $r.OutOfRange.Count       | Should -Be 0
+
+        # The overlap is a property of the geometry, so it is computed, not guessed.
+        $sp = $script:Spans['src/first.js']
+        $overlap = [Math]::Max(0, [Math]::Min($sp.End, $sp.Lines) - $sp.Start)
+        $overlap | Should -BeGreaterThan 0 -Because 'a file whose span starts before its own length has an ambiguous window'
+    }
+
     It 'behaves exactly as before when no spans are supplied' {
         # Back-compat: every existing caller and test passes -LineCounts alone.
         $r = Test-EraResponseCitations -LineCounts $script:Counts -Response 'src/second.js:700'
         $r.OutOfRange.Count       | Should -Be 1
         $r.BundleCoordinate.Count | Should -Be 0
+    }
+}
+
+Describe 'every adapter that hands the bundle to a TOOL says which frame to cite' -Tag Unit {
+
+    # ONE RULE, THREE ADAPTERS -- the shape this project keeps getting wrong.
+    #
+    # The frame mismatch is created wherever a model opens the bundle with its
+    # own tooling, because that tooling counts from the top of the merged file.
+    # v2.8.1 fixed the instruction on the opencode read-tool path only, on
+    # evidence from one afternoon. The archive says that was half the job:
+    #
+    #     gemini (agy, disk-read)   11 of 11 flagged citations were the frame
+    #     deepseek (opencode)       50 of 50
+    #     deepseek-flash            9 of 9
+    #     muse-spark                47 of 57
+    #     opus (claude, stdin)      0 of 12          <- never uses it
+    #
+    # agy hands the model a PATH and lets it read the file, exactly like the
+    # read-tool path, and nobody had told it which numbers to cite.
+    #
+    # claude is deliberately excluded and that is the measurement above, not an
+    # oversight: the bundle IS its prompt, so it only ever sees the per-file
+    # numbers printed in the text, and 755 opus citations produced zero frame
+    # drift. An instruction there would be noise about a problem it cannot have.
+
+    BeforeAll {
+        $script:AgySrc      = Get-Content -Raw (Join-Path $script:Root 'backends/agy.ps1')
+        $script:OpencodeSrc = Get-Content -Raw (Join-Path $script:Root 'backends/opencode.ps1')
+        $script:ClaudeSrc   = Get-Content -Raw (Join-Path $script:Root 'backends/claude.ps1')
+    }
+
+    It 'tells the opencode read-tool seat' {
+        $script:OpencodeSrc | Should -Match 'CITATIONS:'
+        $script:OpencodeSrc | Should -Match 'not the line number your Read tool reports'
+    }
+
+    It 'tells the agy disk-read seat, which reads the bundle the same way' {
+        $script:AgySrc | Should -Match 'CITATIONS:'
+        $script:AgySrc | Should -Match "file's OWN line number"
+    }
+
+    It 'does NOT tell the claude stdin seat, and records why' {
+        $script:ClaudeSrc | Should -Not -Match 'CITATIONS:'
+        $script:ClaudeSrc | Should -Match 'the bundle IS the prompt'
     }
 }
 
@@ -172,8 +256,9 @@ Describe 'the shape the measurement was taken on' -Tag Unit {
         $r.Checked                | Should -Be 4
         $r.BundleCoordinate.Count | Should -Be 3 -Because 'three of the four land inside their own file''s span'
         $r.OutOfRange.Count       | Should -Be 1 -Because 'only 99999 is nowhere in either frame'
-        # The translations, hand-verified against the original bundle before it was
-        # lost: bundle line 3156 printed "471:", bundle line 1780 printed "169:".
+        # The translations, hand-verified against the original bundle -- which is
+        # still on this machine under the moved archive and can be re-checked:
+        # bundle line 3156 printed "471:", bundle line 1780 printed "169:".
         ($r.BundleCoordinate -join ' ') | Should -Match 'opencode\.ps1:471'
         ($r.BundleCoordinate -join ' ') | Should -Match 'resolve-model\.ps1:169'
         ($r.BundleCoordinate -join ' ') | Should -Match 'AdapterTimeBudget\.Tests\.ps1:113'

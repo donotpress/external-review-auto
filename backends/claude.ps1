@@ -101,6 +101,13 @@ function Invoke-ClaudeReview {
         # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
         [string]$PidFile
     )
+    # NO CITATION-FRAME INSTRUCTION HERE, deliberately. The other two adapters
+    # carry one because they hand the model a PATH and its own reader reports
+    # bundle-absolute line numbers. Here the bundle IS the prompt: the model only
+    # ever sees the per-file numbers printed in the text, and it cannot observe a
+    # bundle offset to cite. Measured over 62 archived rounds -- 755 opus
+    # citations, zero frame drift, against 11 of 11 for the agy seat. An
+    # instruction would be noise about a problem this channel cannot have.
     $prompt = "Review the codebase XML provided. Instructions are at the bottom of the content."
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdFile = [System.IO.Path]::GetTempFileName()

@@ -564,9 +564,9 @@ bundle through era — it opens the file with its own Read tool, which reports
 the right file and a line that does not exist in it.
 
 era knew only the first frame until v2.8.1 and called the second one fabrication.
-Measured across 62 archived rounds, **128 of 155 flagged citations (83%), out of 1,570 checked, were
+Measured across 62 archived seat-responses (25 rounds), **128 of 155 flagged citations (83%), out of 1,570 checked, were
 bundle-absolute coordinates inside the correct file** — real pointers at real
-code. One reported as invented, `runtimes/resolve-model.ps1:1780`, is in-file line
+code. **The two frames OVERLAP and that half is invisible:** where a bundle coordinate is also a valid in-file line for the same file, nothing resolves it — 203 of those 1,570 citations (12.9%). So 83% is a rate over the *flagged* set, not over frame errors, and the prompt instruction below is the only thing that touches the half era cannot see. One reported as invented, `runtimes/resolve-model.ps1:1780`, is in-file line
 169: the exact line its finding was about.
 
 This confound was documented before the feature was built:

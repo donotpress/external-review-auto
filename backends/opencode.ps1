@@ -187,9 +187,16 @@ function Resolve-OpencodeRunBudget {
             routinely waits out the first one's whole run and then believes it
             has a further full budget.
 
-        RunFloorSec is what we refuse to give away to the lock: a wait that
-        consumes the entire budget is no better than one that overruns it,
-        because the seat produces nothing either way.
+        ONE FLOOR, MinRunSec, for both questions it answers: how much the lock
+        wait must leave behind, and how little is too little to launch. It used
+        to reserve RunFloorSec=60 for the wait while viability needed only 15,
+        and opus (v2.8.2 panel) showed what that gap did -- for any TimeoutSec at
+        or under 60 the lock wait computed to ZERO, so `WaitOne(0)`. The
+        LOCK-RETRY path passes RemainingSec in as TimeoutSec, which after a
+        backoff on a 600s seat is routinely under 60, so the one call that exists
+        because of a lock collision was the one call that never queued for the
+        lock. Two numbers for one question, the shape this repository sweeps for,
+        inside the function written to fix the previous instance of it.
 
         EffectiveSec is the deadline the run itself gets, and it is EXACTLY what
         is left. There is no floor, because a floor cannot fix a spent budget --
@@ -210,9 +217,9 @@ function Resolve-OpencodeRunBudget {
         not worth launching, and the caller says so rather than starting
         something nobody will wait for.
 
-        VIABILITY IS NOT MEASURED AGAINST RunFloorSec. That was the first cut and
-        it was wrong in the expensive direction: for any TimeoutSec at or under
-        the 60s floor, `remaining >= Min(RunFloorSec, TimeoutSec)` reduces to
+        VIABILITY WAS ONCE MEASURED AGAINST A SEPARATE 60s FLOOR. That was the
+        first cut and it was wrong in the expensive direction: for any TimeoutSec
+        at or under that floor, `remaining >= Min(floor, TimeoutSec)` reduces to
         `remaining >= TimeoutSec`, so ONE SECOND of startup made every short run
         non-viable. Found by trying to use it -- a 40s probe was refused at 39s
         remaining by the guard written to stop refusals that cost capability.
@@ -220,34 +227,47 @@ function Resolve-OpencodeRunBudget {
         MinRunSec is mechanical instead of copied: the poll loop wakes every 10s,
         so a run with less than one poll plus margin left is killed on its first
         wake having produced nothing and billed the bundle prefill. That is the
-        case opus's finding named, and it is the only case worth refusing. A
-        caller that deliberately asks for a tiny TimeoutSec is still served --
-        that is its business, and nothing has been spent.
+        case opus's finding named, and it is the only case worth refusing.
+
+        THE EXEMPTION KEYS ON TIME SPENT, NOT ON THE BUDGET ASKED FOR. It first
+        read `$TimeoutSec -le $MinRunSec`, and gemini pointed out on the next
+        panel that this makes the verdict depend on the original budget rather
+        than on what is left:
+
+            TimeoutSec 15, elapsed 1  -> 14s left -> viable
+            TimeoutSec 20, elapsed 6  -> 14s left -> refused
+
+        Same seat, same fourteen seconds, opposite answers. The exemption exists
+        so that STARTUP COST does not refuse a deliberately short run, so it asks
+        how much has been spent. A caller that wants a tiny TimeoutSec is served;
+        a seat that lost its budget in the queue is not.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][int]$TimeoutSec,
         # Wall clock already spent inside this adapter, from its own stopwatch.
         [double]$ElapsedSec = 0,
-        # Reserved OUT OF THE LOCK WAIT so there is time left to run.
-        [int]$RunFloorSec = 60,
         # The least time in which a run can produce anything: one 10s poll of the
-        # output loop, plus margin. Governs Viable, and nothing else.
-        [int]$MinRunSec = 15
+        # output loop, plus margin. Governs BOTH what the lock wait reserves and
+        # what counts as viable -- see the docstring on why that is one number.
+        [int]$MinRunSec = 15,
+        # How much wall clock counts as "has not really started yet". Below this,
+        # a run is viable on any time at all, because what it lost was startup
+        # rather than the queue.
+        [double]$StartupGraceSec = 2
     )
     $remaining = $TimeoutSec - [int][Math]::Ceiling($ElapsedSec)
     if ($remaining -lt 0) { $remaining = 0 }
-    $lockWaitSec = $remaining - $RunFloorSec
+    $lockWaitSec = $remaining - $MinRunSec
     if ($lockWaitSec -lt 0) { $lockWaitSec = 0 }
     return @{
         RemainingSec = [int]$remaining
         LockWaitMs   = [int]($lockWaitSec * 1000)
         EffectiveSec = [int]$remaining
-        # "You need one poll's worth of time left, unless you asked for less than
-        # that to begin with." The second clause is what keeps a deliberately
-        # short run from being refused by its own startup cost; the first is the
-        # only case worth refusing.
-        Viable       = ($remaining -ge $MinRunSec) -or ($TimeoutSec -le $MinRunSec -and $remaining -gt 0)
+        # "You need one poll's worth of time left, unless you have barely started."
+        # The second clause keeps startup cost from refusing a deliberately short
+        # run; the first is the only case worth refusing.
+        Viable       = ($remaining -ge $MinRunSec) -or ($ElapsedSec -le $StartupGraceSec -and $remaining -gt 0)
         Exhausted    = ($remaining -le 0)
     }
 }
@@ -486,11 +506,15 @@ function Invoke-OpencodeReview {
         # itself prints each file's own line numbers on every content line. A
         # model that cites the former is pointing at real code that era then
         # scores as a fabrication -- measured at 79% of every "fabricated"
-        # citation across 20 arms, and worst on this delivery path because it is
+        # citation across 62 archived seat-responses, and worst on this path because it is
         # the only one where a model reads the file with its own tooling.
-        # era now translates them either way; this stops them being produced.
+        # era translates the UNAMBIGUOUS half (a citation past the named file's
+        # end); where the two frames overlap it cannot tell, and 12.9% of archived
+        # citations sit in that overlap. So this instruction is not a nicety on
+        # top of a fix -- it is the only thing that addresses the half era cannot
+        # see. Stop them being produced.
         ("Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. " +
-         "CITATIONS: every content line in that bundle begins with the file's OWN line number (`  471: <code>`). Cite THAT number, " +
+         "CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. Cite THAT number, " +
          "not the line number your Read tool reports — the tool counts from the top of the whole bundle, and those numbers do not " +
          "exist in the file you are naming. Output your structured review.")
     } else {
@@ -782,8 +806,16 @@ function Invoke-OpencodeReview {
         # exactly the seats the run-budget code exists to handle. Same shape as
         # the round-8 finding the block above documents, one direction over;
         # raised by the opus seat of this change's panel.
+        # LOWERED PROPORTIONALLY, not to a fixed floor. `Max(10, $eff - 10)` was
+        # the first cut, and gemini pointed out on the v2.8.2 panel that it
+        # defeats itself at the small end: for any $eff at or under 15s it
+        # returns 10, the poll loop's first wake is at 10s, and `-gt` is strict --
+        # so Phase 1 cannot fire at t=10, the next wake at t=20 is already past
+        # the deadline, and the timeout wins every time. The comment above would
+        # then be claiming a reconciliation that does not happen, which is the
+        # category-E defect this file has been audited for twice.
         if ($firstTokenSec -ge $effectiveTimeoutSec) {
-            $lowered = [Math]::Max(10, $effectiveTimeoutSec - 10)
+            $lowered = [Math]::Max(1, [int]($effectiveTimeoutSec * 0.6))
             Write-Host "[opencode] First-token deadline lowered ${firstTokenSec}s -> ${lowered}s to fit this seat's remaining ${effectiveTimeoutSec}s budget; otherwise the timeout fires first and the no-output branch can never report."
             $firstTokenSec = $lowered
         }

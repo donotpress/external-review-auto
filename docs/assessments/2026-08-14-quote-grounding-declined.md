@@ -163,8 +163,10 @@ bundle, in either form.
   > Fixed in v2.8.1: the two conventions are classified separately and the
   > merged-document ones are translated back.
   >
-  > **MEASURED OVER THE WHOLE ARCHIVE (v2.8.2), 62 reviewer-rounds and 1,570
-  > citations spanning months and five models** — not the 20 arms of one
+  > **MEASURED OVER THE WHOLE ARCHIVE (v2.8.2): 1,570 citations from 62
+  > SEAT-RESPONSES across 25 rounds** — every per-preset response whose round
+  > still has a bundle, each `file:line` counted once per response,
+  > basename-unique files only; months, five models — not the 20 arms of one
   > afternoon that the fix was built on:
   >
   > | | citations | share |

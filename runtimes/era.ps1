@@ -2269,13 +2269,23 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # reviewer inventing line numbers a console line nobody keeps.
     #
     # A SEAT IS CHECKED AGAINST THE BUNDLE IT ACTUALLY READ, and against BOTH
-    # coordinate frames. A blinded seat reads round-N-bundle-blind.xml, so
-    # checking it against the sighted bundle compares citations to the wrong
-    # artifact; and a read-tool seat opens the bundle with its own Read tool,
+    # coordinate frames.
+    #
+    # The per-seat part is HARDENING, not a live-defect fix, and saying otherwise
+    # was the claim the v2.8.2 panel's opus seat took apart: Remove-EraBundleComments
+    # emits exactly one output line per input line on every branch and keeps the
+    # `  <n>:` prefix, so the blind and sighted bundles have IDENTICAL spans and
+    # counts and no seat's classification changes today. It is correct to check a
+    # seat against its own artifact, and it costs nothing; it is not currently
+    # fixing anything, and a comment that implies otherwise is the shape this
+    # repository keeps auditing itself for.
+    #
+    # A read-tool seat opens the bundle with its own Read tool,
     # which reports BUNDLE-ABSOLUTE line numbers rather than the per-file ones
-    # printed inside it. Measured over 20 real arms: 79% of every citation this
-    # checker has ever called a fabrication was the second frame, pointing at the
-    # right code. See Get-EraBundleFileSpans.
+    # printed inside it. Measured over 62 archived seat-responses: 83% of every citation
+    # this checker has ever flagged was the second frame, pointing at the right
+    # code -- and a further 12.9% of all citations sit where the two frames
+    # OVERLAP and cannot be told apart at all. See Get-EraBundleFileSpans.
     $citationWarnings = @()
     $citCache = @{}
     foreach ($preset in (@($results.Keys) | Sort-Object)) {

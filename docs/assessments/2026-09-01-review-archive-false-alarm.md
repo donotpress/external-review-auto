@@ -86,6 +86,21 @@ one is not silly — but "it could happen" is the justification this project
 rejects from its reviewers, and it does not get a pass because the author is the
 one making it.
 
+**The strongest argument against this decision, and it is not answered.** Both
+the gemini and deepseek-flash seats of the v2.8.2 panel attacked it, and
+deepseek-flash put it best: *the measurement bounds the CURRENT suite, not future
+code.* Every one of the 142 targets is temp-rooted today; nothing makes the 143rd
+so. A guard is the only thing that converts "we checked" into "it cannot happen",
+and the cost of being wrong is asymmetric — an unnecessary guard wastes a few
+lines, a missing one loses artifacts that cannot be regenerated.
+
+gemini's specific route (`Join-Path ""` yielding a relative path) is **measured
+false** — that call throws too. But the general point stands on its own without
+that route, and it is recorded here rather than argued away. The decision to
+decline rests on: no occurrence, no current capability, and a project rule about
+unmeasured mechanisms. If a future session prefers the seatbelt, this paragraph
+is the argument for it and nothing here contradicts it.
+
 ## What genuinely changed
 
 Nothing in the code. Two things worth knowing:

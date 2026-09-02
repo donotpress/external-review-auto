@@ -362,7 +362,17 @@ function _SpawnAndCaptureOnce {
     # telling it to "review the code at <path>" invited it to open/run files and
     # emit tool-intent narration instead of a review. Forbid all tool use and the
     # bundle (with its embedded review instructions) is the only thing to review.
-    $prompt = "[Run ID: $dispatchId] All files are in the attached bundle at $BundlePath. Do NOT open, read, fetch, list, or run anything. Review ONLY the bundle content and output the review directly. (Citing file:line locations in your findings is fine.)"
+    # CITATIONS: SAY WHICH FRAME. This adapter hands the model a PATH and lets it
+    # read the file, so its tooling reports line numbers counted from the top of
+    # the merged bundle -- not the per-file numbers printed on every content line.
+    # era translates those either way now, but they are better not produced.
+    #
+    # Measured over 62 archived rounds: gemini's flagged citations were the wrong
+    # frame 11 times out of 11. The v2.8.1 fix put this instruction on opencode's
+    # read-tool path only, on one afternoon's evidence, and missed the other
+    # adapter that reads from disk -- one rule, two implementations, one of them
+    # fixed, which is the shape this project keeps finding.
+    $prompt = "[Run ID: $dispatchId] All files are in the attached bundle at $BundlePath. Do NOT open, read, fetch, list, or run anything. Review ONLY the bundle content and output the review directly. CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. Cite THAT number, not the line number your file reader reports -- the reader counts from the top of the whole bundle, and those numbers do not exist in the file you are naming."
 
     # Snapshot brain session directories that exist BEFORE we spawn.
     $preExistingSessionDirs = @{}

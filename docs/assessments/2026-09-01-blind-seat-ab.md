@@ -176,7 +176,9 @@ carried half of the original claim therefore has no replication at all.**
 > delivery path does not read the bundle through era — it opens the file with its
 > own Read tool, and that tool reports **bundle-absolute** line numbers. Measured
 > across these 16 arms plus a 4-seat panel, 95 citations past end-of-file:
-> **75 of them (79%) land inside the named file's own span in the bundle.** They
+> **75 of them (79%) land inside the named file's own span in the bundle** — a
+> figure since superseded by the whole-archive measurement (62 rounds, 1,570
+> citations, 128 of 155 flagged = 83%). They
 > were real pointers at real code, counted from the top of the wrong file.
 >
 > Spot-checked by hand: `runtimes/resolve-model.ps1:1780` — reported as a

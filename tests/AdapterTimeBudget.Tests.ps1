@@ -55,12 +55,31 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         }
     }
 
-    It 'leaves room to actually run after the wait' {
+    It 'leaves room to actually run after the wait, reserving ONE floor' {
         # A lock wait that consumes the whole budget is not better than one that
-        # overruns it: the seat still produces nothing. Reserve a run floor.
-        $b = Resolve-OpencodeRunBudget -TimeoutSec 600 -RunFloorSec 60
-        ($b.LockWaitMs / 1000) | Should -Be 540
+        # overruns it: the seat still produces nothing.
+        #
+        # ONE floor, not two. It reserved RunFloorSec=60 while viability needed
+        # only MinRunSec=15, and opus (v2.8.2 panel) showed what the gap did: for
+        # any TimeoutSec at or under 60 the lock wait computed to ZERO, so
+        # `WaitOne(0)` -- and the LOCK-RETRY path passes RemainingSec straight in
+        # as TimeoutSec, which after a 10s backoff on a 600s seat is routinely
+        # under 60. The one call that exists because of a lock collision was the
+        # one call that never queued for the lock.
+        $b = Resolve-OpencodeRunBudget -TimeoutSec 600
+        ($b.LockWaitMs / 1000) | Should -Be 585
         $b.RemainingSec        | Should -Be 600
+    }
+
+    It 'still queues for the lock on a retry-sized budget' {
+        # The regression opus named, stated as the assertion it needs.
+        foreach ($t in @(20, 30, 45, 59, 60, 90)) {
+            $b = Resolve-OpencodeRunBudget -TimeoutSec $t
+            ($b.LockWaitMs / 1000) | Should -BeGreaterThan 0 -Because "a ${t}s seat must still wait for the run lock"
+            ($b.LockWaitMs / 1000) | Should -BeLessOrEqual $t
+        }
+        # ...and only stops queueing when there is not even a minimum run left.
+        (Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 590).LockWaitMs | Should -Be 0
     }
 
     It 'charges time already spent against the remaining budget' {
@@ -69,7 +88,7 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         # be what is LEFT, not a fresh copy of the original.
         $b = Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 500
         $b.RemainingSec  | Should -Be 100
-        ($b.LockWaitMs / 1000) | Should -Be 40
+        ($b.LockWaitMs / 1000) | Should -Be 85   # 100 left, minus the one MinRunSec floor
         $b.Exhausted     | Should -BeFalse
     }
 
@@ -148,9 +167,68 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         $ok.EffectiveSec    | Should -Be 500
         $ok.Viable          | Should -BeTrue
 
-        # A budget smaller than the run floor is still viable -- the caller asked
-        # for a short run, which is its business.
+        # A budget smaller than the run floor is still viable at the start -- the
+        # caller asked for a short run, which is its business.
         (Resolve-OpencodeRunBudget -TimeoutSec 30).Viable | Should -BeTrue
+        (Resolve-OpencodeRunBudget -TimeoutSec 5).Viable  | Should -BeTrue
+    }
+
+    It 'decides viability on TIME LEFT, not on the budget it started from' {
+        # gemini, v2.8.2 panel: the previous rule exempted short runs with
+        # `$TimeoutSec -le $MinRunSec`, which made the verdict depend on the
+        # ORIGINAL budget rather than on what is left --
+        #
+        #   TimeoutSec 15, elapsed 1  -> 14s left -> VIABLE
+        #   TimeoutSec 20, elapsed 6  -> 14s left -> REFUSED
+        #
+        # Same seat, same 14 seconds, opposite answers. The exemption exists to
+        # stop startup cost refusing a deliberately short run; it should therefore
+        # key on how much has been SPENT, not on what was asked for.
+        # The rule is now a function of (remaining, elapsed) and NOTHING else, so
+        # holding elapsed fixed, a bigger budget is never worse:
+        foreach ($t in @(15, 16, 20, 30, 60, 600)) {
+            (Resolve-OpencodeRunBudget -TimeoutSec $t -ElapsedSec 1).Viable |
+                Should -BeTrue -Because "a ${t}s seat one second in has barely started"
+        }
+
+        # gemini's pair, kept because the ANSWER changed rather than the framing:
+        # these two do still differ, and now for a stated reason. 14s left one
+        # second into a 15s budget is startup; 14s left six seconds into a 20s
+        # budget is a seat losing time it will keep losing. The distinction is
+        # elapsed, which is observable, not TimeoutSec, which is just what was
+        # asked for.
+        $a = Resolve-OpencodeRunBudget -TimeoutSec 15 -ElapsedSec 1
+        $b = Resolve-OpencodeRunBudget -TimeoutSec 20 -ElapsedSec 6
+        $a.RemainingSec | Should -Be 14
+        $b.RemainingSec | Should -Be 14
+        $a.Viable       | Should -BeTrue
+        $b.Viable       | Should -BeFalse
+    }
+
+    It 'is monotone: more time left never hurts, more time spent never helps' {
+        # The property that makes the rule defensible without arguing about any
+        # single boundary.
+        foreach ($e in @(0, 1, 2, 3, 10, 100)) {
+            $prev = $false
+            foreach ($rem in @(0, 5, 14, 15, 16, 100)) {
+                $v = (Resolve-OpencodeRunBudget -TimeoutSec ($rem + [int]$e) -ElapsedSec $e).Viable
+                if ($prev) { $v | Should -BeTrue -Because "at elapsed ${e}s, ${rem}s left cannot be worse than less" }
+                $prev = $v
+            }
+        }
+        foreach ($rem in @(5, 14, 30)) {
+            $seen = @(0, 1, 2, 3, 10, 100 | ForEach-Object {
+                (Resolve-OpencodeRunBudget -TimeoutSec ($rem + $_) -ElapsedSec $_).Viable })
+            # once false, never true again as elapsed grows
+            $i = [array]::IndexOf($seen, $false)
+            if ($i -ge 0) { @($seen[$i..($seen.Count-1)]) | Should -Not -Contain $true }
+        }
+    }
+
+    It 'still refuses when the QUEUE ate the budget, which is the case it exists for' {
+        (Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 592).Viable | Should -BeFalse
+        (Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 560).Viable | Should -BeTrue
+        (Resolve-OpencodeRunBudget -TimeoutSec 20  -ElapsedSec 12).Viable  | Should -BeFalse
     }
 
     It 'does not refuse a short budget the moment startup costs a second' {
@@ -205,6 +283,23 @@ Describe 'the opencode adapter spends the budget it was handed' -Tag Unit {
 
     It 'checks its own deadline against the remaining budget' {
         $script:Src | Should -Match '\$deadline\.Elapsed\.TotalSeconds -gt \$effectiveTimeoutSec'
+    }
+
+    It 'lowers the first-token deadline to somewhere the poll loop can reach' {
+        # gemini, v2.8.2 panel. The lowering exists so the no-output branch can
+        # still fire on a queued seat; a floor of 10 against a <=15s budget puts
+        # it exactly on the first poll (which `-gt` misses) or past it, so the
+        # timeout always wins and the branch is unreachable -- the opposite of
+        # what the comment claims.
+        #
+        # The poll interval is 10s, so the deadline must sit strictly below
+        # $effectiveTimeoutSec AND be reachable by a wake. Proportional does both.
+        $script:Src | Should -Not -Match '\$lowered = \[Math\]::Max\(10, \$effectiveTimeoutSec - 10\)'
+        $script:Src | Should -Match '\$lowered = \[Math\]::Max\(1, \[int\]\(\$effectiveTimeoutSec \* 0\.6\)\)'
+        foreach ($eff in @(10, 15, 20, 60, 600)) {
+            $lowered = [Math]::Max(1, [int]($eff * 0.6))
+            $lowered | Should -BeLessThan $eff -Because "a deadline at or past the timeout can never fire (eff=$eff)"
+        }
     }
 
     It 'refuses to launch a run the dispatcher will not wait for' {

@@ -3965,10 +3965,18 @@ function Get-EraBundleFileSpans {
         itself with its own Read tool, and that tool reports BUNDLE-ABSOLUTE line
         numbers. Some models cite what their tool told them.
 
-        Measured 2026-09-01 across 20 real arms (16 A/B cells and a 4-seat panel),
-        95 citations past the end of the named file: 75 of them -- 79% -- land
-        inside that file's bundle span. They were never inventions. Spot-checked
-        by hand:
+        Measured over the ARCHIVE: 1,570 citations from 62 SEAT-RESPONSES across
+        25 rounds -- every per-preset response whose round still has a bundle,
+        each distinct `file:line` counted once per response, basename-unique
+        files only. Months, five models. 128 of the 155 past end-of-file (83%)
+        land inside that file's bundle span; 27 resolve in neither frame.
+
+        THE POPULATION IS PART OF THE NUMBER. The blinded seat of the v2.8.2
+        panel re-ran this against the same archive and got 498/67 -- because it
+        counted rounds rather than seat-responses. Neither is wrong; a bare
+        "1,570 citations" is. They were
+        never inventions. (The fix was built on a 20-arm slice of one afternoon
+        giving 79%; the archive figure supersedes it.) Spot-checked by hand:
 
             runtimes/resolve-model.ps1:1780   span 1611..1845  -> prints "169:",
             which is the `Sort-Object TierRank/SettingsValue` line the finding
@@ -3980,6 +3988,25 @@ function Get-EraBundleFileSpans {
         This is separate from Get-EraBundleLineCounts rather than folded into it
         because that function's return shape (path -> int) is consumed in several
         places and by the -BlindSeat line-preservation test.
+
+        WHAT THIS CANNOT SEE, AND IT IS NOT SMALL. The two frames OVERLAP. For a
+        file whose span starts at S with N printed lines, every bundle coordinate
+        in S+1..min(End,N) is also a valid in-file line number for the same file,
+        so a citation there is ambiguous and no arithmetic resolves it -- the
+        classifier accepts it as in-file and it silently points at the wrong line.
+        Only citations PAST end-of-file are unambiguous, and those are the only
+        ones this ever sees.
+
+        Measured over the same 62-round archive: 203 of 1,570 citations (12.9%)
+        sit in that overlap. So "83% of flagged citations were the wrong frame"
+        is a rate over the FLAGGED set and must not be read as "83% of frame
+        errors are now handled" -- the in-range half is invisible, to this code
+        and to the measurement that motivated it.
+
+        Raised by the opus seat of the v2.8.2 panel, which called the 83% "a
+        coincidence rate over an already-flagged set". It is right. Resolving the
+        overlap would need the cited line's CONTENT checked against what the
+        finding says about it, which is a different and much larger instrument.
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$BundlePath)
