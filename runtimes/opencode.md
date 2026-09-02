@@ -10,6 +10,10 @@
 
 **Terminal condition:** 0 critical issues. **Always bundle source code.**
 
+### opencode `bash` timeout — required
+
+The `bash` tool defaults to `timeout: 120000ms`. `era.ps1` scales its own `TimeoutSec` to the bundle (`600s` for a small single, `1800s` for a `~100k`-token 3-4-seat panel at `116k` tokens + `300s` straggler grace). A `120s` outer `bash` timeout `SIGTERM`s `pwsh` while `deepseek-flash`/`muse-spark` are still running, leaving `round-N-*.pid` but no `.md` — measured `bulk-refresh-vpn-headless` round 1 lost `deepseek-flash` at `451s` (still in grace) because `bash` killed it at `120s`. **Always dispatch via `bash` with `timeout: 600000` (single) or `timeout: 1800000` (panel).** See `references/troubleshooting.md#bash-tool-timeout-kills-era-early`.
+
 ### Three rules that prevent runaway loops
 
 **1. Reuse the same topic slug across all rounds.**

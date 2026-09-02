@@ -119,6 +119,7 @@ This skill follows a **single-entry-point** architecture. When the slash command
 3. **Curate files** — see File Curation below
 4. **Write or select prompt** — `-SpecReview` for spec reviews; `-PromptOverrideFile` for custom; omit for generic
 5. **Dispatch** — `pwsh <skill-root>/runtimes/era.ps1 <flags> -Force`
+   - **opencode `bash` tool timeout (measured 2026-09-02):** the `bash` tool defaults to `timeout: 120000ms`. `era.ps1` scales its own `TimeoutSec` to the bundle (`600s` base → `1800s` for a `116k`-token panel, plus `300s` straggler grace). A `120s` outer timeout `SIGTERM`s `pwsh` while `deepseek-flash`/`muse-spark` are still running, leaving `round-N-*.pid` but no `.md` — the exact failure that lost `deepseek-flash` on `bulk-refresh-vpn-headless` round 1. **When dispatching via `bash`, always pass `timeout: 600000` (10 min) for a single reviewer or small bundle, `timeout: 1800000` (30 min) for a 3-4-seat `~100k`-token panel.** See `references/troubleshooting.md#bash-tool-timeout-kills-era-early`.
 6. **Wait for completion** — era.ps1 handles polling/capture internally. If era.ps1 exits non-zero, report the error message to the user verbatim — do not retry or attempt recovery.
    - **Exit 0** — a reviewer produced a readable review. Proceed to triage.
    - **Exit 1** — preflight refusal (bad `-IncludeFiles`, empty bundle, dirty tree). Nothing was dispatched and nothing was spent, so fixing the named problem and re-running is free.
