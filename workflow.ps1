@@ -4007,6 +4007,23 @@ function Get-EraBundleFileSpans {
         coincidence rate over an already-flagged set". It is right. Resolving the
         overlap would need the cited line's CONTENT checked against what the
         finding says about it, which is a different and much larger instrument.
+
+        HOW BIG IS THE BLIND SPOT, REALLY: SMALLER THAN 12.9%. The frame is a
+        property of the SEAT, not of the citation, so the overlap can be bounded
+        by asking whether a response uses the bundle frame anywhere it IS
+        visible. Measured over the same archive:
+
+            203 ambiguous citations in 62 seat-responses
+             40 in the 17 responses that demonstrably use the bundle frame   <- suspect
+            163 in the 45 responses that never use it                        <- almost certainly in-file
+
+        So the at-risk population is ~40 of 1,570 (2.5%), not 203 (12.9%), and
+        even those are suspect rather than known wrong. That is why no inference
+        machinery was built: it would resolve at most a fifth of an already small
+        blind spot, into an advisory on an advisory. (The bound is itself inferred
+        from the visible half -- a response that used the frame ONLY inside the
+        overlap is undetectable by construction -- so 12.9% remains the honest
+        ceiling and 2.5% the honest estimate.)
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$BundlePath)

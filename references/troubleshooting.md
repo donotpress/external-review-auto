@@ -292,7 +292,9 @@ its tool told it names the right file and a line number that does not exist in i
 
 Measured across 62 archived seat-responses (25 rounds): **128 of 155 citations past end-of-file
 (83%) were this**, not invention — out of 1,570 checked. A further 203 (12.9%)
-sit where the two frames OVERLAP, and those cannot be told apart at all. One of them, reported as fabricated, was
+sit where the two frames OVERLAP and cannot be told apart — though only ~40 of
+those are in responses that use the bundle frame anywhere else, so the real
+exposure is nearer 2.5%. One of them, reported as fabricated, was
 `runtimes/resolve-model.ps1:1780` — bundle line 1780 is in-file line 169, which is
 exactly the line that finding was about.
 
