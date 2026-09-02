@@ -325,6 +325,86 @@ function Get-AgyTranscriptResponse {
     return @{ Response = $null; TranscriptPath = $null; FromFallback = $false; Strategy = $null }
 }
 
+function Get-AgyReviewPrompt {
+    <#
+    .SYNOPSIS
+        The one prompt this adapter sends. Extracted so it can be asserted on
+        without spawning agy.
+
+    .DESCRIPTION
+        THE PROMPT USED TO FORBID THE ONLY THING THAT MAKES IT WORK. It read:
+
+            "All files are in the attached bundle at <path>. Do NOT open, read,
+             fetch, list, or run anything. Review ONLY the bundle content..."
+
+        Nothing is attached. This adapter passes a PATH as an argv string and
+        nothing else -- no stdin (it is closed immediately), no attachment
+        mechanism, no inlining. The bundle's bytes never reach the model except
+        by the model opening the file. A model that obeyed that sentence
+        literally would have had nothing whatsoever to review, and the sentence
+        contradicted the one two clauses later that reasons about "the line
+        number your file reader reports".
+
+        MEASURED, 2026-09-02, with a 418-byte bundle whose only content was a
+        random sentinel appearing nowhere in the prompt:
+
+            SENTINEL=ZQ7X-39CEB86379E6
+            HOW=I obtained the bundle content by viewing sentinel-bundle.xml on
+                disk using the view_file tool.
+
+        The seat returned the sentinel and named the tool it used to get it,
+        under the instruction not to use one. That settles the contradiction opus
+        raised (F12) in favour of the delivery classification: workflow.ps1's
+        Get-EraBackendDelivery is right that agy's mode is 'disk-read',
+        delivery_mode has never lied for this seat, and it is the PROMPT that was
+        wrong. It agrees with the independent evidence from the archive: across
+        62 archived seat-responses, this preset's flagged citations were in the
+        merged-bundle frame 11 times out of 11 -- 28 of 28 once the checker could
+        see anchor-form citations at all -- which only its own reader could
+        produce. (11 of 11 is that PRESET; `gemini-pro-high`, same backend, same
+        delivery mode, is 11 of 16. See the table in the assessment.)
+
+        WHAT THE OLD SENTENCE WAS ACTUALLY FOR is worth keeping: agy is an
+        agentic agent, and "review the code at <path>" invited it to go exploring
+        the repository and to emit tool-intent narration instead of a review.
+        That is a restriction on WHICH file and on the OUTPUT, not a ban on
+        reading, so it is now written that way -- one file, nothing else, and the
+        review itself rather than a plan to produce one.
+
+        See tests/AgyPromptHonesty.Tests.ps1.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$BundlePath,
+        [Parameter(Mandatory)][string]$DispatchId
+    )
+    # CITATIONS: SAY WHICH FRAME. This adapter hands the model a PATH and lets it
+    # read the file, so its tooling reports line numbers counted from the top of
+    # the merged bundle -- not the per-file numbers printed on every content line.
+    # era translates those either way now, but they are better not produced.
+    #
+    # Measured over 62 archived seat-responses: the `gemini` preset's flagged
+    # citations were the wrong frame 11 times out of 11. THAT IS A FACT ABOUT ONE
+    # PRESET, not about this backend -- re-derived 2026-09-02, the other agy
+    # preset in the corpus, `gemini-pro-high`, is 11 of 16, leaving five flagged
+    # citations the frame does not explain. (Both counts are also low: the
+    # checker could not see `path:L207` at all until 2026-09-02, and every
+    # L-form citation in the archive came from an agy seat. With it accepted,
+    # `gemini` is 28 of 28 and `gemini-pro-high` 17 of 22.)
+    #
+    # The v2.8.1 fix put this instruction on opencode's read-tool path only, on
+    # one afternoon's evidence, and missed the other adapter that reads from
+    # disk -- one rule, two implementations, one of them fixed, which is the
+    # shape this project keeps finding.
+    return "[Run ID: $DispatchId] The review bundle is the file at $BundlePath. " +
+           "It is NOT attached: open THAT ONE FILE with your file reader and review what is inside it. " +
+           "Read nothing else -- do not open any other file, do not list directories, do not fetch anything, " +
+           "and do not run any command. Output the review itself, not a description of what you are about to do. " +
+           "CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. " +
+           "Cite THAT number, not the line number your file reader reports -- the reader counts from the top of the " +
+           "whole merged bundle, and those numbers do not exist in the file you are naming."
+}
+
 function _SpawnAndCaptureOnce {
     <#
     Spawn agy --print ONCE, poll the transcript for liveness, and capture the
@@ -358,21 +438,7 @@ function _SpawnAndCaptureOnce {
     # truncation. agy echoes it verbatim into the USER_EXPLICIT/USER_INPUT
     # transcript entry (probe-confirmed), enabling concurrent-safe capture.
     $dispatchId = [guid]::NewGuid().ToString()
-    # Tool-forbidding prompt hardening (Fix 3 "prevent"): agy is an agentic agent;
-    # telling it to "review the code at <path>" invited it to open/run files and
-    # emit tool-intent narration instead of a review. Forbid all tool use and the
-    # bundle (with its embedded review instructions) is the only thing to review.
-    # CITATIONS: SAY WHICH FRAME. This adapter hands the model a PATH and lets it
-    # read the file, so its tooling reports line numbers counted from the top of
-    # the merged bundle -- not the per-file numbers printed on every content line.
-    # era translates those either way now, but they are better not produced.
-    #
-    # Measured over 62 archived rounds: gemini's flagged citations were the wrong
-    # frame 11 times out of 11. The v2.8.1 fix put this instruction on opencode's
-    # read-tool path only, on one afternoon's evidence, and missed the other
-    # adapter that reads from disk -- one rule, two implementations, one of them
-    # fixed, which is the shape this project keeps finding.
-    $prompt = "[Run ID: $dispatchId] All files are in the attached bundle at $BundlePath. Do NOT open, read, fetch, list, or run anything. Review ONLY the bundle content and output the review directly. CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. Cite THAT number, not the line number your file reader reports -- the reader counts from the top of the whole bundle, and those numbers do not exist in the file you are naming."
+    $prompt = Get-AgyReviewPrompt -BundlePath $BundlePath -DispatchId $dispatchId
 
     # Snapshot brain session directories that exist BEFORE we spawn.
     $preExistingSessionDirs = @{}

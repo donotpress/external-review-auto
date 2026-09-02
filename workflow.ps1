@@ -3581,6 +3581,15 @@ function Get-EraBackendDelivery {
           stdin      claude `--print`: the bytes are piped in as the prompt.
           inline-api the REST adapters: the bytes go in the request body.
           disk-read  agy: the model opens the file itself with its own tools.
+                     VERIFIED 2026-09-02, because for two releases the adapter's
+                     own prompt contradicted this line by telling the model "Do
+                     NOT open, read, fetch, list, or run anything" (opus F12).
+                     A bundle whose only content was a random sentinel absent
+                     from the prompt came back as "SENTINEL=ZQ7X-39CEB86379E6 /
+                     HOW=... viewing sentinel-bundle.xml on disk using the
+                     view_file tool". This classification was right; the prompt
+                     was wrong, and has been fixed. See
+                     docs/assessments/2026-09-02-agy-disk-read-contradiction.md.
 
         A preset may override either limit via `max_bundle_bytes` /
         `max_bundle_tokens` in backends/_registry.json, so a newly measured
@@ -3674,7 +3683,7 @@ function Get-EraBackendDelivery {
         }
         'agy' {
             @{ Mode = 'disk-read'; LimitBytes = $null; LimitTokens = $null; Kind = 'none'
-               Basis = 'agy opens the bundle from disk with its own tools; the channel imposes no size limit' }
+               Basis = 'agy opens the bundle from disk with its own tools (verified 2026-09-02 by sentinel probe); the channel imposes no size limit' }
         }
         default {
             # geminiapi / openaicompat and anything added later. The bytes go in a
@@ -3997,6 +4006,22 @@ function Get-EraBundleFileSpans {
         Only citations PAST end-of-file are unambiguous, and those are the only
         ones this ever sees.
 
+        RE-DERIVED 2026-09-02, BOTH WAYS, because the `L?` above changed what
+        this function can see and every figure below was measured without it.
+        Same scanner, same archive, the only difference the regex:
+
+                              checked   flagged   frame   frame/flagged   overlap
+          without `L?`          1,578       155     128           82.6%   211 (13.4%)
+          with    `L?`          1,642       178     151           84.8%   218 (13.3%)
+
+        The first row reproduces the published v2.8.2 figures (1,570 / 155 / 128
+        / 83% / 203 / 12.9%) to within eight citations, which is the corpus
+        boundary and not a disagreement. The second row is what the checker sees
+        now. THE CONCLUSIONS DO NOT MOVE: the share of flagged citations that are
+        a coordinate frame rather than a fabrication goes 83% -> 85%, and the
+        blind spot stays at 13%. What moves is the absolute counts, upward, and
+        every "N of 1,570" written before this date is a pre-`L?` number.
+
         Measured over the same 62-round archive: 203 of 1,570 citations (12.9%)
         sit in that overlap. So "83% of flagged citations were the wrong frame"
         is a rate over the FLAGGED set and must not be read as "83% of frame
@@ -4106,7 +4131,48 @@ function Test-EraResponseCitations {
     $frame = [System.Collections.Generic.List[string]]::new()
     $unk = [System.Collections.Generic.List[string]]::new()
     $seen = @{}
-    foreach ($m in [regex]::Matches($Response, '(?<path>[A-Za-z0-9_.\-/\\]+\.[A-Za-z0-9]{1,8}):(?<line>\d{1,7})\b')) {
+    # `:L207` AS WELL AS `:207`. Some models write GitHub anchor form -- and it is
+    # not a random preference: EVERY L-form citation in the 108-response archive
+    # came from an agy seat (`gemini`, `gemini-pro-high`), the seats on the
+    # disk-read path, which are the ones most prone to the coordinate-frame error
+    # in the first place. So the checker was blindest exactly where it was needed.
+    #
+    # MEASURED over the whole archive, accepting `L?`:
+    #
+    #   seat              checked          flagged past-EOF   of those, frame
+    #   gemini            190 -> 248       11 -> 28           11 -> 28
+    #   gemini-pro-high    16 ->  22       16 -> 22           11 -> 17
+    #
+    # 138 citations were invisible; 7 distinct responses scored Checked=0 and were
+    # indistinguishable from a clean review. Every newly flagged citation on the
+    # `gemini` seat is a frame error (28 of 28) and NOT ONE is a new fabrication
+    # report -- gemini-pro-high's non-frame residue stays at 5 either way. So the
+    # v2.8.2 measurement that established the frame problem was undercounting
+    # the `gemini` seat's FLAGGED citations by ~61% (11 of the 28 that exist),
+    # through the checker's own regex rather than through the models. SCOPED
+    # PROPERLY, which the first cut of this comment was not: 61% is that ONE
+    # seat. Both agy seats together go 27 -> 50, an undercount of ~46%. Citations
+    # CHECKED were low by ~23% on `gemini` (190 of 248).
+    #
+    # WHAT THIS WIDENING COSTS, stated because both the gemini and muse-spark
+    # seats of the 2026-09-02 panel raised it and neither could name an instance:
+    # `L?` makes prose like "see notes.md:L10 for the permalink" a citation. That
+    # class is NOT new -- `notes.md:10` was already matched -- but the anchor form
+    # is a second spelling of it, and a bundled file cited that way past its end
+    # would be reported as out-of-range. Zero such cases exist in the 108-response
+    # archive (no seat gained a single new non-frame flag), which is evidence
+    # about this corpus and not a proof about the next one. The checker is
+    # advisory by design and an Unresolved path is reported quietly, so the cost
+    # of the failure it can now make is bounded at one advisory line.
+    #
+    # THE DEDUPE KEY IS path + line NUMBER, so `only.js:L12` and `only.js:12`
+    # collapse to one citation. Both seats flagged that as potentially conflating
+    # two coordinate frames. Measured across the archive: 4 collisions, in one
+    # distinct response, and all four are the link-text/anchor pair carrying the
+    # SAME number (`workflow.ps1:146` beside `workflow.ps1:L146`) -- exactly the
+    # case where merging is correct. Where the two frames genuinely differ, the
+    # numbers differ and no collision occurs. Left as is, with the count.
+    foreach ($m in [regex]::Matches($Response, '(?<path>[A-Za-z0-9_.\-/\\]+\.[A-Za-z0-9]{1,8}):L?(?<line>\d{1,7})\b')) {
         $cited = $m.Groups['path'].Value
         $lineNo = [int]$m.Groups['line'].Value
         $key = "$cited`:$lineNo"

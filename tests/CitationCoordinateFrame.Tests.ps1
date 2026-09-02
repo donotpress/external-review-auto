@@ -171,6 +171,87 @@ Describe 'Test-EraResponseCitations separates a wrong FRAME from a wrong NUMBER'
     }
 }
 
+Describe 'a citation the checker cannot see is not a clean review' -Tag Unit {
+
+    # THE CHECKER'S OWN BLIND SPOT, and it sat on the seat the frame problem is
+    # about. `Test-EraResponseCitations` matched `path:207` and not `path:L207`.
+    # Across the 108-response archive, 138 citations were in the L form, EVERY
+    # one of them from an agy seat (`gemini`, `gemini-pro-high`) -- the disk-read
+    # path, i.e. the seats whose own reader produces bundle-frame numbers. Seven
+    # distinct responses scored `Checked=0`, which era reports identically to a
+    # review with nothing wrong in it.
+    #
+    # MEASURED, re-scoring the whole archive with `L?` accepted:
+    #
+    #     seat              checked        flagged past-EOF   of those, frame
+    #     gemini            190 -> 248     11 -> 28           11 -> 28
+    #     gemini-pro-high    16 ->  22     16 -> 22           11 -> 17
+    #     (every other seat unchanged)
+    #
+    # Every newly visible flag on `gemini` is a frame error, 28 of 28, and no seat
+    # gained a single new NON-frame flag: gemini-pro-high's residue is 5 before
+    # and 5 after. So this widens coverage without inventing fabrications -- and
+    # it means the v2.8.2 archive measurement undercounted the `gemini` seat's
+    # FLAGGED citations by ~61% (11 of the 28 that exist; checked was low by ~23%,
+    # 190 of 248) and both agy seats together by ~46% (27 of 50) -- the wider
+    # number for the wider claim, which the first cut of this comment mixed up
+    # because of the checker's regex rather than because of the models.
+
+    BeforeAll {
+        $script:LBundle = Join-Path ([System.IO.Path]::GetTempPath()) ("era-lf-" + [guid]::NewGuid().ToString('N').Substring(0,8) + '.xml')
+        $sb = [System.Text.StringBuilder]::new()
+        $null = $sb.AppendLine('<file path="src/only.js">')
+        for ($i = 1; $i -le 40; $i++) { $null = $sb.AppendLine("${i}: line $i") }
+        $null = $sb.AppendLine('</file>')
+        [System.IO.File]::WriteAllText($script:LBundle, $sb.ToString())
+        $script:LCounts = Get-EraBundleLineCounts -BundlePath $script:LBundle
+    }
+
+    AfterAll { Remove-Item -LiteralPath $script:LBundle -Force -ErrorAction SilentlyContinue }
+
+    It 'counts a GitHub-anchor citation' {
+        $r = Test-EraResponseCitations -Response 'see [only.js:L12](x#L12)' -LineCounts $script:LCounts
+        $r.Checked | Should -Be 1
+    }
+
+    It 'counts the plain form exactly as before' {
+        $r = Test-EraResponseCitations -Response 'see only.js:12' -LineCounts $script:LCounts
+        $r.Checked | Should -Be 1
+    }
+
+    It 'does not count the same line twice when both forms appear' {
+        # The dedupe key is path + line NUMBER, so `only.js:L12` and `only.js:12`
+        # are one citation. They have to be: a model that writes the anchor form
+        # writes the same number in the link text.
+        $r = Test-EraResponseCitations -Response '[only.js:12](x#only.js:L12)' -LineCounts $script:LCounts
+        $r.Checked | Should -Be 1
+    }
+
+    It 'still flags an anchor-form citation past end of file' {
+        $r = Test-EraResponseCitations -Response 'only.js:L999' -LineCounts $script:LCounts
+        $r.Checked                | Should -Be 1
+        @($r.OutOfRange).Count    | Should -Be 1
+    }
+
+    It 'does not invent a citation out of an L that is not a line number' {
+        # `L?` must not turn arbitrary text into a citation. The digits are still
+        # required, and so is the file extension in front of the colon.
+        $r = Test-EraResponseCitations -Response 'only.js:Lorem ipsum, and Ltd:L4' -LineCounts $script:LCounts
+        $r.Checked             | Should -Be 0
+        @($r.Unresolved).Count | Should -Be 0
+    }
+
+    It 'reports Checked=0 for a response era would otherwise call clean' {
+        # The failure this closes: a review whose every citation is invisible
+        # scores zero checked and zero flagged, which is the same output as a
+        # review with nothing wrong in it. Pinned against a file NOT in the
+        # bundle so the count is the only signal.
+        $r = Test-EraResponseCitations -Response 'nowhere.js:L12' -LineCounts $script:LCounts
+        $r.Checked             | Should -Be 0
+        @($r.Unresolved).Count | Should -Be 1 -Because 'an unknown path is reported quietly, not silently'
+    }
+}
+
 Describe 'every adapter that hands the bundle to a TOOL says which frame to cite' -Tag Unit {
 
     # ONE RULE, THREE ADAPTERS -- the shape this project keeps getting wrong.
@@ -181,10 +262,17 @@ Describe 'every adapter that hands the bundle to a TOOL says which frame to cite
     # evidence from one afternoon. The archive says that was half the job:
     #
     #     gemini (agy, disk-read)   11 of 11 flagged citations were the frame
+    #     gemini-pro-high (agy)     11 of 16         <- ADDED 2026-09-02
     #     deepseek (opencode)       50 of 50
     #     deepseek-flash            9 of 9
     #     muse-spark                47 of 57
     #     opus (claude, stdin)      0 of 12          <- never uses it
+    #
+    # The gemini-pro-high row was missing, and it is the same backend on the same
+    # delivery mode. Re-derived over all 62 archived seat-responses on 2026-09-02;
+    # every other row reproduced exactly. "The agy seat is 11 of 11" is a fact
+    # about ONE PRESET, not about the backend: the other agy preset in the corpus
+    # leaves five flagged citations the frame does not explain.
     #
     # agy hands the model a PATH and lets it read the file, exactly like the
     # read-tool path, and nobody had told it which numbers to cite.
@@ -195,19 +283,50 @@ Describe 'every adapter that hands the bundle to a TOOL says which frame to cite
     # drift. An instruction there would be noise about a problem it cannot have.
 
     BeforeAll {
-        $script:AgySrc      = Get-Content -Raw (Join-Path $script:Root 'backends/agy.ps1')
-        $script:OpencodeSrc = Get-Content -Raw (Join-Path $script:Root 'backends/opencode.ps1')
-        $script:ClaudeSrc   = Get-Content -Raw (Join-Path $script:Root 'backends/claude.ps1')
+        . (Join-Path $script:Root 'backends/agy.ps1')
+        . (Join-Path $script:Root 'backends/opencode.ps1')
+        $script:ClaudeSrc = Get-Content -Raw (Join-Path $script:Root 'backends/claude.ps1')
     }
 
     It 'tells the opencode read-tool seat' {
-        $script:OpencodeSrc | Should -Match 'CITATIONS:'
-        $script:OpencodeSrc | Should -Match 'not the line number your Read tool reports'
+        # CALLED, NOT GREPPED -- and it took a second panel to finish the job.
+        # The 2026-09-02 commit moved agy's prompt behind Get-AgyReviewPrompt so
+        # the assertion below could stop grepping source, wrote down exactly why
+        # ("a grep would pass on a comment while the live prompt said anything at
+        # all"), and then left THIS assertion grepping backends/opencode.ps1 five
+        # lines above it. One rule, two adapters, one of them fixed, inside the
+        # commit whose subject was that shape. Named by the opus seat of the panel
+        # on it; opencode's prompts now live in Get-OpencodeReviewPrompt.
+        $p = Get-OpencodeReviewPrompt -Mode 'read-tool' -BundlePath 'C:\tmp\b.xml'
+        $p | Should -Match 'CITATIONS:'
+        $p | Should -Match 'not the line number your Read tool reports'
+        $p | Should -Match ([regex]::Escape('C:\tmp\b.xml'))
+    }
+
+    It 'does NOT give the read-tool instruction to the attach seat' {
+        # The prompt has to track the delivery mode. On the attach path opencode
+        # has already inlined the file, so "use the Read tool" would be an
+        # instruction to go and re-open something the model was handed -- the
+        # prompt/delivery contradiction F12 was about, one adapter over.
+        $a = Get-OpencodeReviewPrompt -Mode 'attach'
+        $a | Should -Not -Match 'Use the Read tool'
+        $a | Should -Match '(?i)do not call any tools'
+        # ...and the read-tool prompt must not tell the model to avoid tools.
+        $r = Get-OpencodeReviewPrompt -Mode 'read-tool' -BundlePath 'C:\tmp\b.xml'
+        $r | Should -Not -Match '(?i)do not call any tools'
+        $r | Should -Match '(?i)Use the Read tool'
     }
 
     It 'tells the agy disk-read seat, which reads the bundle the same way' {
-        $script:AgySrc | Should -Match 'CITATIONS:'
-        $script:AgySrc | Should -Match "file's OWN line number"
+        # ASSERTED ON THE PROMPT, NOT ON THE SOURCE TEXT. This used to grep
+        # agy.ps1 for the words, which was already weak and became actively
+        # misleading the moment the adapter's docstring started QUOTING the old
+        # prompt to explain why it was replaced: the grep would then pass on a
+        # comment while the live prompt said anything at all. Call the function.
+        $p = Get-AgyReviewPrompt -BundlePath 'C:\tmp\b.xml' -DispatchId 'd1'
+        $p | Should -Match 'CITATIONS:'
+        $p | Should -Match "file's OWN line number"
+        $p | Should -Match 'not the line number your file reader reports'
     }
 
     It 'does NOT tell the claude stdin seat, and records why' {

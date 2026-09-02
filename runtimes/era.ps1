@@ -593,11 +593,11 @@ if ($SpecReview) {
     $specPromptContent = @"
 # External Review Prompt — $specTitle
 
-You are reviewing a design spec. The spec is included in the attached bundle.
+You are reviewing a design spec. The spec is included in the bundle.
 
 Every other file in the bundle is **existing code** the implementation will touch or that provides necessary context for the design decisions.
 
-The spec and all source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+The spec and all source files are fully included in the bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 ## What to review
 
@@ -939,9 +939,9 @@ You are reviewing {{TOPIC_TITLE}}.
 
 ## Context
 
-The attached bundle contains the subject under review along with surrounding context files.
+The bundle contains the subject under review along with surrounding context files.
 
-All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+All source files are fully included in the bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 ## What to review
 
@@ -983,7 +983,7 @@ Be terse. If a section is empty, write "(none)".
 
 You are reviewing the attached codebase bundle. Provide structured feedback.
 
-All source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
+All source files are fully included in the bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle.
 
 Cite locations as file:line using the line numbers shown in the bundle; if unsure of a number, cite the function/symbol name instead of guessing.
 

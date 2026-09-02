@@ -292,7 +292,7 @@ When round N's response contains critical issues:
 | Don't run repomix manually then paste | era.ps1 handles bundling, round numbering, metadata, and capture | Always dispatch via era.ps1 |
 | Don't guess the reviewer preset name | Typos fail silently or route to wrong backend | Use resolve.ps1 for natural language, or check the preset table in the Supported backends section |
 | Don't skip triage on round 3+ | Auto-pilot mode kicks in; you stop verifying claims | Validate at least one empirical claim per round |
-| Don't tell agy-backend reviewers to "read the files" | Triggers tool-use mode; response is a ~120-char planner preamble | Say "review ONLY what is in the attached bundle" (already in the -SpecReview template) |
+| Don't tell agy-backend reviewers to "read the files" | Triggers repo exploration; the response can be a ~120-char planner preamble instead of a review | Scope it to the bundle: "Review ONLY what is in the bundle. Do NOT open, view, fetch, or read any file **outside** the bundle" (already in the -SpecReview template). The word that matters is *outside* — agy's own delivery mode is `disk-read`, so a blanket ban on reading forbids the only way it ever sees the bundle (that is what the adapter's own prompt used to say; see `docs/assessments/2026-09-02-agy-disk-read-contradiction.md`) |
 | Don't re-bundle everything on round 2+ | 4x more expensive; reviewer re-reads unchanged code | Use `--diff` + curated `-IncludeFiles` |
 | Don't pass absolute paths or paths outside the repo to `-IncludeFiles` | era.ps1 resolves relative to repo root; external paths fail with "not found" | Copy external files into the repo, or reference them in prompt text only |
 | Don't call `resolve.ps1` or `era.ps1` from the `/era` shim directory | The shim is a pointer; the runtime lives at the canonical skill root | Locate skill root first (Step 0 of the workflow) |
@@ -416,7 +416,7 @@ checks it against each selected seat:
 | `opencode` | `attach` (`-f`) at/under 51,200 B, `read-tool` above | **1,048,576 bytes** | Measured. Attaching truncates silently at exactly 50 KiB, so above that the model reads the bundle itself — verified to 668,389 B (see below). |
 | `claude` | `stdin` (inlined as the prompt) | **550,000 tokens** | **Measured 2026-08-31** (see below). |
 | `anthropic` | `inline-api` | not measured | Reported as unknown and **never refused** — the 1M API window is real but the adapter's practical ceiling has never been measured here. |
-| `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. |
+| `agy` | `disk-read` (the model opens the file itself) | none | The channel imposes no limit. **Verified 2026-09-02**: given a bundle whose only content was a random sentinel absent from the prompt, the seat returned the sentinel and named the tool (`view_file`) it opened the file with. |
 | `geminiapi`, `openaicompat` | `inline-api` | not measured | Reported as unknown and never refused — inventing a ceiling would refuse rounds that work. |
 
 Each ceiling is classified by **how it was arrived at** — `measured` (someone ran
@@ -569,6 +569,19 @@ bundle-absolute coordinates inside the correct file** — real pointers at real
 code. **The two frames OVERLAP and that half is invisible:** where a bundle coordinate is also a valid in-file line for the same file, nothing resolves it — at most 203 of those 1,570 (12.9%), and measurably ~40 (2.5%): the other 163 are in responses that never use the bundle frame anywhere visible. So 83% is a rate over the *flagged* set, not over frame errors, and the prompt instruction below is the only thing that touches the half era cannot see. One reported as invented, `runtimes/resolve-model.ps1:1780`, is in-file line
 169: the exact line its finding was about.
 
+**Those counts are low, and the cause was era's own regex (fixed 2026-09-02).**
+The checker matched `path:207` but not `path:L207`, the GitHub-anchor form. 138
+citations in the 108-response archive are in that form and **every one of them is
+from an agy seat** (`gemini`, `gemini-pro-high`) — the `disk-read` path, whose own
+reader is what produces bundle-absolute numbers, so the checker was blindest at
+the seat the whole frame problem is about. Seven responses scored `Checked=0`,
+which era prints identically to a review with nothing wrong in it. Re-scored with
+`:L?` accepted: `gemini` goes 190 → 248 checked and 11 → **28** flagged, of which
+**28 of 28** are the frame; `gemini-pro-high` 16 → 22 and 16 → 22, of which 17 are
+the frame. No seat gained a single new *non*-frame flag, so the widening costs no
+false fabrication reports on this corpus. See
+`docs/assessments/2026-09-02-agy-disk-read-contradiction.md`.
+
 This confound was documented before the feature was built:
 `docs/assessments/2026-08-14-quote-grounding-declined.md` declined line-grounding
 as a metric, named this exact case (`backends/opencode.ps1:3021` — "a position in
@@ -616,7 +629,7 @@ Use these when writing custom prompts via `-PromptOverrideFile`.
 >
 > The `agy` backend (Gemini via Antigravity) is an **agentic planner**, not a single-shot completion model. Its response is captured from agy's transcript (`PLANNER_RESPONSE` entries). If your override prompt instructs the model to *"read the bundled source files,"* *"cite the file/function you read,"* or otherwise invites file access, agy will try to **use its own tools to open files** — emitting a planner preamble like `"I will view <file> from line X to Y…"` (often a file **not even in the bundle**). The capture grabs only that ~120-char preamble and you get a truncated non-review. Wall-clock looks normal (~300s); `response_chars` is ~110–130.
 >
-> **The bundle is already self-contained — say so.** Open every override with: *"The spec and all source files are fully included in the attached bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle."* You may still ask the reviewer to **reference** `file:line` *in its findings* (the spec-review template does) — that's about citing, not opening. The distinction is "cite what's attached" (safe) vs. "go read the source" (triggers tool-use).
+> **The bundle is already self-contained — say so.** Open every override with: *"The spec and all source files are fully included in the bundle. Review ONLY what is in the bundle. Do NOT attempt to open, view, fetch, or read any file outside the bundle."* You may still ask the reviewer to **reference** `file:line` *in its findings* (the spec-review template does) — that's about citing, not opening. The distinction is "cite what's attached" (safe) vs. "go read the source" (triggers tool-use).
 >
 > This only bites the `-PromptOverrideFile` path; the default `-SpecReview` template is already worded safely. Non-agentic backends (Claude CLI `opus`/`sonnet`, `geminiapi`, `opencode`/`deepseek`/`minimax`) are immune — they return a single completion regardless — so a truncating agy run can be re-dispatched to one of those as a fallback. See `references/troubleshooting.md`.
 
@@ -627,7 +640,7 @@ Use these when writing custom prompts via `-PromptOverrideFile`.
 
 You are reviewing a design spec for {{ONE_SENTENCE_PROJECT_DESCRIPTION}}.
 
-The spec is `{{SPEC_PATH}}` (included in the attached bundle). Every other file in the bundle is **existing code** the implementation will touch or that provides necessary context for the design decisions.
+The spec is `{{SPEC_PATH}}` (included in the bundle). Every other file in the bundle is **existing code** the implementation will touch or that provides necessary context for the design decisions.
 
 ## Background
 

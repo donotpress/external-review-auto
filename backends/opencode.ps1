@@ -132,6 +132,37 @@ function Resolve-OpencodeStallPlan {
         'high'   { 300000 }
         default  { 120000 }
     }
+    # THE 20ms/TOKEN RULE IS IMPLEMENTED TWICE, and this is the copy that has to
+    # guess. Get-EraDispatchPlan (workflow.ps1, `$bundleScaledSec = [int]($BundleTokens
+    # * 0.02)`) applies the same 20ms/token to the REAL repomix token count; this
+    # adapter is handed only -BundleBytes, so it re-derives tokens from a ratio.
+    # Named independently by the gemini and muse-spark seats of the 2026-09-02
+    # panel, both of which framed it as "bytes/4 here vs the measured 3.369
+    # elsewhere".
+    #
+    # SWAPPING THE CONSTANT IS NOT THE FIX, and that is a measurement, not an
+    # opinion. The ratio is not a property of repomix, it is a property of the
+    # bundle: 2,396,233 B / 711,253 tok = 3.369 on the bundle 3.369 was measured
+    # on, and 532,112 B / 146,167 tok = 3.640 on the bundle the panel that raised
+    # this ran over. Eight percent apart. Either literal is wrong for some bundle.
+    #
+    # WHAT IT COSTS TODAY, measured on that same round: the adapter estimated
+    # 133,028 tokens where repomix counted 146,167, so `wantedMs` differed by 10%
+    # -- and the stall threshold was IDENTICAL, because at 532 KB both values are
+    # far above $ceilingMs and both clamp. The divergence only reaches the
+    # threshold in the unclamped regime (small bundle, large budget): 60,000 B at
+    # any budget gives 300s here against 356s from the real count. So the live
+    # cost is a stall window up to ~16% tighter than the dispatcher's own model of
+    # the same bundle, plus a token count in the "[opencode] Stall threshold:"
+    # line that disagrees with the round's own "Bundle ready. Tokens:" by 10%.
+    #
+    # THE FIX IS TO PASS THE REAL COUNT DOWN, not to pick a better constant --
+    # the dispatcher already has it. That means a new parameter on every adapter
+    # (the dispatch ScriptBlock passes its arguments uniformly; see the
+    # accepted-and-ignored -OpencodeProvider in agy.ps1), which is a change to
+    # live dispatch for a heuristic whose measured effect on the round that found
+    # it was zero. Left deliberately, with the numbers, rather than done in
+    # passing.
     $bundleTokenEst = [int]($BundleBytes / 4)
     $bundleScaledMs = [long]$bundleTokenEst * 20
     $wantedMs       = [Math]::Max([long]$variantBaseMs, $bundleScaledMs)
@@ -156,6 +187,108 @@ function Resolve-OpencodeStallPlan {
         Clamped          = $clamped
         BundleTokenEst   = $bundleTokenEst
     }
+}
+
+function Get-OpencodePollIntervalMs {
+    <#
+    .SYNOPSIS
+        How often the run loop wakes to check on the child. THE one definition.
+
+    .DESCRIPTION
+        This was a bare `$pollMs = 10000` local, ~500 lines down inside
+        Invoke-OpencodeReview's run loop, and Resolve-OpencodeRunBudget's
+        MinRunSec default was the literal 15 -- "one 10s poll plus margin" --
+        derived from it by a comment and by nothing else.
+
+        WHAT COUPLES THEM, precisely. The run loop is
+
+            while (-not $exited) {
+                $exited = $opencodeProc.WaitForExit($pollMs)
+                ...
+                if ($deadline.Elapsed.TotalSeconds -gt $effectiveTimeoutSec) { kill }
+            }
+
+        and $effectiveTimeoutSec is $runBudget.EffectiveSec, which is exactly the
+        time left. So the deadline is only ever CHECKED at a multiple of $pollMs.
+        A run launched with less than one poll's worth of budget cannot be
+        stopped before its first wake, and at that wake the deadline has already
+        passed: it is killed there, having overrun the dispatcher on the way, for
+        nothing but the bundle prefill it billed on the way in. MinRunSec is what
+        refuses to launch that run.
+
+        Raise the poll interval to 30s while the floor stays 15 and every seat
+        between 15s and 35s left is called viable and lands in exactly that case.
+        Silently wrong in the direction that spends money, from a change made
+        five hundred lines away with no reason to look here.
+
+        Named by the v2.8.2 panel; nothing closed it until now. The fix is the
+        one this repository keeps arriving at: make it ONE number that both
+        sites call, and pin the RULE (the floor covers at least one poll, with
+        margin) in tests/OpencodeConstantParity.Tests.ps1 so re-hardcoding either
+        side fails a test instead of a round. Measured with the decoupling
+        restored (poll 30000, MinRunSec default back to the literal 15): 3 of the
+        32 assertions across AdapterTimeBudget and OpencodeConstantParity fail,
+        and all 3 are new. Before this change, none would have.
+    #>
+    return 10000
+}
+
+function Get-OpencodeMinRunSec {
+    <#
+    .SYNOPSIS
+        The least wall clock in which an opencode run can produce anything:
+        one poll wake, plus margin. Derived from Get-OpencodePollIntervalMs.
+
+    .DESCRIPTION
+        The margin exists because a run with EXACTLY one poll of budget is woken
+        for the first time at the instant that budget ends, and the deadline test
+        at that wake is `-gt`, so it is a coin-flip on scheduler jitter whether
+        the run is killed there having been given no second chance to grow. The
+        margin buys the second wake.
+
+        AND THE FLOOR HAS A SECOND CONSTRAINT the first cut did not encode: the
+        lowered first-token deadline, int(effective * 0.6), must itself be at
+        least one poll or the first wake kills the run under Phase 1's headline
+        instead of the timeout's. That is why the return is a Max of two
+        derivations rather than one sum; see the sweep in the body.
+
+        FIVE SECONDS IS NOT MEASURED. It is what the original literal 15 encoded
+        against a 10s poll, kept because changing it was not this change's
+        subject; it is a policy number, and Get-EraBackendDelivery's vocabulary
+        for it would be 'chosen'. What IS enforced is the relationship -- that
+        the floor exceeds one poll -- which is the half that broke silently.
+    #>
+    $pollSec = [Math]::Ceiling((Get-OpencodePollIntervalMs) / 1000.0)
+    # TWO constraints, and the first cut of this function only had the first one.
+    #
+    #   (a) one poll wake, plus margin -- the run must survive its first wake.
+    #   (b) the FIRST-TOKEN deadline must be reachable by a poll wake. Phase 1
+    #       lowers that deadline to int(effective * 0.6) when it would otherwise
+    #       exceed the budget, and Phase 1 is CHECKED BEFORE the timeout branch,
+    #       so a lowered value below one poll means the first wake kills the run
+    #       under the wrong headline.
+    #
+    # (b) was missing, and the opus seat of the 2026-09-02 panel found it in the
+    # very test that had just declared this rule closed. MEASURED, sweeping
+    # Resolve-OpencodeRunBudget and Resolve-OpencodeStallPlan for real:
+    #
+    #   remaining  Viable  lowered first-token  first wake  killed at first wake
+    #          15    True                    9         10s   YES
+    #          16    True                   10         10s   no
+    #          17+   True                  >=10        10s   no
+    #
+    # ONE value, and it was exactly the old floor -- the boundary
+    # OpencodeConstantParity.Tests.ps1 pins as Viable. A seat handed precisely
+    # MinRunSec was killed at its first wake with "no response within 9s --
+    # possible limit/popup block", which is the mis-attribution this whole line
+    # of fixes exists to prevent, having billed the bundle prefill on the way in.
+    #
+    # (opus stated the exposure as "every seat under ~50s of effective budget".
+    # That is not what the sweep says: at 16 the lowering returns 10 and the
+    # `-gt` at the wake is false, so 15 is the only exposed value. The mechanism
+    # was right and the range was not; the number here comes from the sweep.)
+    $reachable = [Math]::Ceiling($pollSec / 0.6)
+    return [int][Math]::Max($pollSec + 5, $reachable)
 }
 
 function Resolve-OpencodeRunBudget {
@@ -224,10 +357,18 @@ function Resolve-OpencodeRunBudget {
         non-viable. Found by trying to use it -- a 40s probe was refused at 39s
         remaining by the guard written to stop refusals that cost capability.
 
-        MinRunSec is mechanical instead of copied: the poll loop wakes every 10s,
-        so a run with less than one poll plus margin left is killed on its first
-        wake having produced nothing and billed the bundle prefill. That is the
-        case opus's finding named, and it is the only case worth refusing.
+        MinRunSec is mechanical instead of copied: the poll loop wakes every
+        Get-OpencodePollIntervalMs milliseconds, so a run with less than one poll
+        plus margin left is killed on its first wake having produced nothing and
+        billed the bundle prefill. That is the case opus's finding named, and it
+        is the only case worth refusing.
+
+        IT USED TO BE MECHANICAL ONLY IN THE COMMENT. The default was the literal
+        15 and the poll interval was a separate literal 10000 five hundred lines
+        away inside the run loop; "one poll plus margin" was a sentence, not a
+        dependency. Both now come from Get-OpencodePollIntervalMs, and
+        OpencodeConstantParity.Tests.ps1 asserts the RULE -- the floor covers at
+        least one poll -- so re-hardcoding either side fails a test.
 
         THE EXEMPTION KEYS ON TIME SPENT, NOT ON THE BUDGET ASKED FOR. It first
         read `$TimeoutSec -le $MinRunSec`, and gemini pointed out on the next
@@ -247,10 +388,11 @@ function Resolve-OpencodeRunBudget {
         [Parameter(Mandatory)][int]$TimeoutSec,
         # Wall clock already spent inside this adapter, from its own stopwatch.
         [double]$ElapsedSec = 0,
-        # The least time in which a run can produce anything: one 10s poll of the
+        # The least time in which a run can produce anything: one poll of the
         # output loop, plus margin. Governs BOTH what the lock wait reserves and
         # what counts as viable -- see the docstring on why that is one number.
-        [int]$MinRunSec = 15,
+        # Derived from Get-OpencodePollIntervalMs, NOT copied from it.
+        [int]$MinRunSec = (Get-OpencodeMinRunSec),
         # How much wall clock counts as "has not really started yet". Below this,
         # a run is viable on any time at all, because what it lost was startup
         # rather than the queue.
@@ -345,6 +487,62 @@ function Get-OpencodeBundleBytes {
                "an attached bundle whose size is unknown is silently truncated at 51,200 bytes and the model returns a " +
                "well-formed review of the fragment. Nothing was dispatched and nothing was spent.")
     }
+}
+
+function Get-OpencodeReviewPrompt {
+    <#
+    .SYNOPSIS
+        The two prompts this adapter sends -- one per delivery mode. Extracted so
+        they can be asserted on without spawning opencode.
+
+    .DESCRIPTION
+        ONE RULE, TWO ADAPTERS, ONE OF THEM FIXED -- AGAIN, AND BY THE COMMIT
+        THAT SAID SO. On 2026-09-02 agy's prompt moved into Get-AgyReviewPrompt
+        precisely so CitationCoordinateFrame.Tests.ps1 could stop grepping source
+        text, with the stated reason that a grep "would pass on a comment while
+        the live prompt said anything at all". Five lines above that assertion,
+        the same test file went on grepping THIS adapter's prompt out of
+        backends/opencode.ps1, which was still inline. It passed only because
+        those strings happen to appear nowhere else in the file -- the same
+        accident that held for agy until its docstring quoted the old prompt.
+
+        Found by the opus seat of the panel run on that commit. Extracted here
+        for the same reason, and the test now calls both.
+
+        The two prompts are NOT interchangeable and must track the delivery mode:
+        'read-tool' tells the model to open the file and which line-number frame
+        to cite from, because on that path its own reader reports bundle-absolute
+        numbers; 'attach' tells it not to call tools at all, because on that path
+        opencode has already inlined the file. Handing either prompt to the other
+        mode is the delivery/prompt contradiction that F12 was about, one adapter
+        over.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('read-tool','attach')][string]$Mode,
+        [string]$BundlePath
+    )
+    $useReadTool = ($Mode -eq 'read-tool')
+    return $(if ($useReadTool) {
+        # THE CITATION FRAME, said once, where the mismatch is created. Your Read
+        # tool reports line numbers counted from the top of the BUNDLE; the bundle
+        # itself prints each file's own line numbers on every content line. A
+        # model that cites the former is pointing at real code that era then
+        # scores as a fabrication -- measured at 79% of every "fabricated"
+        # citation across 62 archived seat-responses, and worst on this path because it is
+        # the only one where a model reads the file with its own tooling.
+        # era translates the UNAMBIGUOUS half (a citation past the named file's
+        # end); where the two frames overlap it cannot tell, and 12.9% of archived
+        # citations sit in that overlap. So this instruction is not a nicety on
+        # top of a fix -- it is the only thing that addresses the half era cannot
+        # see. Stop them being produced.
+        ("Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. " +
+         "CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. Cite THAT number, " +
+         "not the line number your Read tool reports — the tool counts from the top of the whole bundle, and those numbers do not " +
+         "exist in the file you are naming. Output your structured review.")
+    } else {
+        "Review the attached bundle file. Every file under review and the review instructions are INSIDE the attached bundle. Output your structured review directly; do not call any tools."
+    })
 }
 
 function Invoke-OpencodeReview {
@@ -500,26 +698,7 @@ function Invoke-OpencodeReview {
     elseif ($overAttachLimit) {
         Write-Host "[opencode] bundle is $bundleBytes bytes (> $OPENCODE_ATTACH_LIMIT_BYTES attach cap) - using the Read tool so the model sees ALL of it, not the first 50 KiB."
     }
-    $prompt = if ($useReadTool) {
-        # THE CITATION FRAME, said once, where the mismatch is created. Your Read
-        # tool reports line numbers counted from the top of the BUNDLE; the bundle
-        # itself prints each file's own line numbers on every content line. A
-        # model that cites the former is pointing at real code that era then
-        # scores as a fabrication -- measured at 79% of every "fabricated"
-        # citation across 62 archived seat-responses, and worst on this path because it is
-        # the only one where a model reads the file with its own tooling.
-        # era translates the UNAMBIGUOUS half (a citation past the named file's
-        # end); where the two frames overlap it cannot tell, and 12.9% of archived
-        # citations sit in that overlap. So this instruction is not a nicety on
-        # top of a fix -- it is the only thing that addresses the half era cannot
-        # see. Stop them being produced.
-        ("Use the Read tool to read the bundle at '$BundlePath'. Review instructions are embedded at the bottom of that file. " +
-         "CITATIONS: every content line in that bundle begins with the file's OWN line number, like ``  471: <code>``. Cite THAT number, " +
-         "not the line number your Read tool reports — the tool counts from the top of the whole bundle, and those numbers do not " +
-         "exist in the file you are naming. Output your structured review.")
-    } else {
-        "Review the attached bundle file. Every file under review and the review instructions are INSIDE the attached bundle. Output your structured review directly; do not call any tools."
-    }
+    $prompt = Get-OpencodeReviewPrompt -Mode $(if ($useReadTool) { 'read-tool' } else { 'attach' }) -BundlePath $BundlePath
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $stdFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
@@ -754,7 +933,10 @@ function Invoke-OpencodeReview {
         # Reasoning-heavy variants ('max') can think silently for minutes before the
         # first token, so the base scales with the variant; a bundle-size overlay
         # (20ms/token ~ 50 tok/sec) adds headroom for large bundles. Max of the two.
-        $pollMs     = 10000
+        # ONE definition of the poll interval, shared with the MinRunSec floor
+        # that is derived from it (Get-OpencodeMinRunSec). It was a bare literal
+        # here while the floor was a bare literal 15 in Resolve-OpencodeRunBudget.
+        $pollMs     = Get-OpencodePollIntervalMs
         # Already measured above and it fails closed there; reuse it rather than
         # re-probing into a second `catch { 0 }`.
         $bundleSize = $bundleBytes

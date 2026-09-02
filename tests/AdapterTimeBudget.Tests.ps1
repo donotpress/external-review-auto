@@ -66,8 +66,17 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         # as TimeoutSec, which after a 10s backoff on a 600s seat is routinely
         # under 60. The one call that exists because of a lock collision was the
         # one call that never queued for the lock.
+        #
+        # The two numbers here were the literals 585 and 600, which silently
+        # encoded MinRunSec=15. When the floor moved to 17 (the first-token
+        # reachability constraint, opus, 2026-09-02 panel) they failed -- which is
+        # the RIGHT failure, and it is why they now derive: what this test is for
+        # is "the wait is everything above ONE floor", not the digit 585.
+        # OpencodeConstantParity.Tests.ps1 is where the floor's own value is
+        # pinned; duplicating it here is what made two tests need editing for one
+        # deliberate change.
         $b = Resolve-OpencodeRunBudget -TimeoutSec 600
-        ($b.LockWaitMs / 1000) | Should -Be 585
+        ($b.LockWaitMs / 1000) | Should -Be (600 - (Get-OpencodeMinRunSec))
         $b.RemainingSec        | Should -Be 600
     }
 
@@ -88,7 +97,9 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         # be what is LEFT, not a fresh copy of the original.
         $b = Resolve-OpencodeRunBudget -TimeoutSec 600 -ElapsedSec 500
         $b.RemainingSec  | Should -Be 100
-        ($b.LockWaitMs / 1000) | Should -Be 85   # 100 left, minus the one MinRunSec floor
+        # 100 left, minus the one MinRunSec floor. Derived, not the literal 85 --
+        # see the note in 'leaves room to actually run after the wait'.
+        ($b.LockWaitMs / 1000) | Should -Be (100 - (Get-OpencodeMinRunSec))
         $b.Exhausted     | Should -BeFalse
     }
 
@@ -108,14 +119,51 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
                 $b = Resolve-OpencodeRunBudget -TimeoutSec $budget -ElapsedSec $elapsed
                 $b.RemainingSec        | Should -BeGreaterOrEqual 0
                 $b.RemainingSec        | Should -BeLessOrEqual $budget
-                ($b.LockWaitMs / 1000) | Should -BeLessOrEqual $b.RemainingSec
-                # NOT `($elapsed + $b.RemainingSec) -le max($budget,$elapsed)`.
-                # That was here, and the opus seat of the twin-sweep panel showed
-                # it is an identity for every possible implementation of
-                # RemainingSec -- it cannot fail, so it guards nothing. The
-                # assertion that CAN fail is that the lock wait leaves a run
-                # floor, which is the line above.
-                ($b.RemainingSec - ($b.LockWaitMs / 1000)) | Should -BeGreaterOrEqual 0
+
+                # THE FLOOR, WHICH IS THE WHOLE POINT, AND WHICH THIS SWEEP DID
+                # NOT ASSERT FOR TWO RELEASES.
+                #
+                # What used to be here was `LockWaitMs/1000 -le RemainingSec`
+                # followed by `RemainingSec - LockWaitMs/1000 -ge 0` -- the same
+                # inequality written twice, once rearranged, under a comment
+                # congratulating itself for having replaced an identity with
+                # "the assertion that CAN fail". It can fail, but only on a lock
+                # wait LONGER than the budget. It says nothing about the thing
+                # the lock wait exists to protect: that something is left over to
+                # run in.
+                #
+                # MEASURED, against a decoy whose lock wait consumes the entire
+                # remaining budget (`LockWaitMs = remaining * 1000`, floor zero):
+                # the old pair passed 35 of 35 budget/elapsed pairs. The
+                # assertion below fails 23 of those 35 -- the twelve it lets
+                # through are the exhausted ones, where zero left over is the
+                # honest answer.
+                $floor = [Math]::Min((Get-OpencodeMinRunSec), $b.RemainingSec)
+                ($b.RemainingSec - ($b.LockWaitMs / 1000)) | Should -BeGreaterOrEqual $floor `
+                    -Because ("a ${budget}s seat ${elapsed}s in must keep ${floor}s to run in, " +
+                              "not hand all $($b.RemainingSec)s of it to the lock wait")
+
+                # AND THE OTHER END OF IT. The floor assertion alone is satisfied
+                # by LockWaitMs = 0, which is not a safe default: `WaitOne(0)` on
+                # the run mutex is the exact defect Resolve-OpencodeRunBudget was
+                # written to remove -- the one call that exists because of a lock
+                # collision was the one call that never queued for the lock. So
+                # the wait is pinned as MAXIMAL, not merely bounded. Raised by the
+                # muse-spark seat of the panel on the change that added the floor
+                # assertion above, which had closed one direction and left this
+                # one open.
+                $b.LockWaitMs | Should -Be ([int]([Math]::Max(0, $b.RemainingSec - (Get-OpencodeMinRunSec)) * 1000)) `
+                    -Because "a ${budget}s seat ${elapsed}s in must queue for the lock with everything above the floor"
+                #
+                # `LockWaitMs/1000 -le RemainingSec` is NOT kept alongside it.
+                # With the default MinRunSec the floor above is >= 0, so
+                # `remaining - lockWait >= floor` already entails
+                # `lockWait <= remaining`: writing both back would re-commit the
+                # duplication this change exists to remove. (It stops being
+                # entailed only if a caller passes a NEGATIVE MinRunSec, which
+                # nothing does and which would be a different bug.) The point
+                # assertions above -- 600/585, 100/85, the 590-elapsed zero --
+                # pin the exact arithmetic; the sweep pins the rule.
             }
         }
     }
