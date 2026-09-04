@@ -236,13 +236,54 @@ stalls that do not occur at floor bundle sizes. Buying unused headroom costs +25
 on every wedged seat instead of +100s, and 11.8% of floor-regime seat-runs are
 non-productive.
 
-**And the bundle-size scaling is the wrong model at the small end, which this
-made obvious.** A live round on 2026-09-04 took **430 seconds on a 1,229-token
-bundle**; `bundleTokens × 0.02` would have granted it 24s. Only the floor stands
-between that round and a false timeout. The scaling term is not wrong for large
-bundles, but below ~35k tokens it predicts nothing — the same category error the
-stall overlay had, one level up. Left as it is, with the floor doing the work and
-this note recording why.
+**And the bundle-size scaling was the same category error, one level up — fixed
+the same day.** A live round took **430 seconds on a 1,229-token bundle**;
+`bundleTokens × 0.02` would have granted it 24s. Measured across the 978
+productive seat-runs, the coefficient is charging for the wrong thing entirely:
+
+| | correlation with a seat's wall clock |
+|---|---|
+| bundle tokens (what it **reads**) | **r = +0.083** |
+| response characters (what it **writes**) | **r = +0.506** (claude +0.799) |
+
+Bundle size explains under 1% of the variance. The median wall clock barely moves
+across a fifty-fold range of it — 42s at <10k tokens, 157s at 10–25k, 167s at
+25–50k, 188s at 50–100k, 240s at 100–200k — while the old rule swung the budget
+from 700s to 1800s over that same range.
+
+The tail *does* grow with size, because a bigger bundle earns a longer review, so
+the term stays and gets a measured coefficient. The budget has to envelope the
+longest run seen at each size:
+
+| bundle tokens | longest productive seat-run |
+|---|---|
+| 4,628 | 590.1s |
+| 21,133 | 597.1s |
+| 47,266 | 882.1s |
+| 81,333 | 1005.5s |
+| **122,547** | **1426.0s** ← sets the slope |
+| 258,461 | 1051.9s |
+
+The minimum slope that envelopes those from a 700s intercept is 0.00592 s/token,
+set by the 122,547-token run; times the same 1.175 margin the floor carries gives
+**0.008**. Evaluated against every candidate on all 978 productive seat-runs:
+
+| rule | kills | tightest margin | mean budget |
+|---|---|---|---|
+| `max(700, 0.020t)` (old) | 0 | **36.6s** | 1072s |
+| flat 1100s | **1** | −326.0s | 1100s |
+| `700 + 0.006t` | 0 | 9.0s | 1017s |
+| **`700 + 0.008t`** (new) | **0** | **146.9s** | 1102s |
+
+Four times the margin for 2.8% more patience — and the *shape* changes as much as
+the size: more generous in the middle where every near-miss lives, less at the top
+where the old rule handed 1800s to rounds whose worst observed run was 1005.5s.
+A wedged seat costs 40s more on average.
+
+Live-verified: a 27,300-token bundle now gets 918s where the old rule gave 700s,
+and the stall threshold comes out at 887s against an appetite of 899.5s — the
+budget and the measured appetite finally almost agree, instead of one silently
+truncating the other.
 
 ## What this corrects in the record
 

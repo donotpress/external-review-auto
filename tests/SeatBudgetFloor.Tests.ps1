@@ -105,3 +105,78 @@ Describe 'the seat budget floor' -Tag Unit {
         }
     }
 }
+
+Describe 'the bundle-size term' -Tag Unit {
+
+    BeforeAll {
+        $tokens = $null; $errors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1'), [ref]$tokens, [ref]$errors)
+        $script:SlopeAssign = $ast.FindAll({
+            param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                      $n.Left.Extent.Text -eq '$bundleTokenSlopeSec' }, $true) | Select-Object -First 1
+        # era's rule, read off the source rather than reimplemented.
+        function script:Budget { param([int]$Tok, [int]$Ask = 600)
+            $floor = 700; $slope = [double]$script:SlopeAssign.Right.Extent.Text
+            [Math]::Min([Math]::Max([Math]::Max($Ask, $floor), [int]($floor + $Tok * $slope)), 1800)
+        }
+    }
+
+    It 'is a named constant carrying its measurement' {
+        $script:SlopeAssign | Should -Not -BeNullOrEmpty
+        [double]$script:SlopeAssign.Right.Extent.Text | Should -Be 0.008
+    }
+
+    It 'envelopes the longest productive seat-run at every observed size' {
+        # The six bucket maxima from era's own round archive, 978 productive
+        # seat-runs. The budget must dominate each with real margin -- the old
+        # rule's tightest was 36.6s.
+        $observed = @(
+            @{ tok =   4628; wall =  590.1 },
+            @{ tok =  21133; wall =  597.1 },
+            @{ tok =  47266; wall =  882.1 },
+            @{ tok =  81333; wall = 1005.5 },
+            @{ tok = 122547; wall = 1426.0 },   # this one sets the slope
+            @{ tok = 258461; wall = 1051.9 }
+        )
+        foreach ($o in $observed) {
+            $b = script:Budget -Tok $o.tok
+            $b | Should -BeGreaterThan $o.wall -Because "a $($o.tok)-token round has run $($o.wall)s"
+            ($b - $o.wall) | Should -BeGreaterThan 100 `
+                -Because "…and 100s of margin is the point; the old rule's tightest was 36.6s"
+        }
+    }
+
+    It 'the slope it replaced was an order of magnitude off' {
+        # 0.020 s/token charged for READING. Measured correlation of wall clock
+        # with bundle tokens is +0.083; with response characters, +0.506.
+        # Non-vacuity for the change: the old rule really was tighter where it
+        # mattered, at the 32,798-token round that ran 663.4s.
+        $oldBudget = [Math]::Min([Math]::Max(700, [int](32798 * 0.020)), 1800)
+        $oldBudget | Should -Be 700
+        ($oldBudget - 663.4) | Should -BeLessThan 40 -Because 'this is the 36.6s margin the old rule gave'
+        (script:Budget -Tok 32798) | Should -BeGreaterThan 900 `
+            -Because 'the measured rule is generous exactly where the old one was thin'
+    }
+
+    It 'is less generous at the top, where the old rule over-provisioned' {
+        # 90,000 tokens: old 1800s, worst observed run in that band 1005.5s.
+        $old = [Math]::Min([Math]::Max(700, [int](90000 * 0.020)), 1800)
+        $old | Should -Be 1800
+        (script:Budget -Tok 90000) | Should -BeLessThan $old `
+            -Because 'patience nobody has used is patience a wedged seat burns'
+        (script:Budget -Tok 90000) | Should -BeGreaterThan 1005.5
+    }
+
+    It 'still honours the 1800s ceiling and a caller asking for more' {
+        (script:Budget -Tok 500000) | Should -Be 1800
+        (script:Budget -Tok 1000 -Ask 1500) | Should -Be 1500
+    }
+
+    It 'does not announce itself on a round where the bundle bought nothing' {
+        # Additive means every bundle raises the number, so an unconditional line
+        # would print on every round.
+        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $src | Should -Match 'if \(\$effectiveTimeoutSec -ge \(\$TimeoutSec \+ 60\)\)'
+    }
+}

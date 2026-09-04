@@ -1914,12 +1914,68 @@ function Invoke-ReviewerDispatch {
     # bundle burns 700s instead of 600s before the dispatcher abandons it. No
     # productive seat-run pays anything -- 1 of 977 in the archive ever exceeded
     # its budget at all, and only 19 of them reached even 80% of it.
+    #
+    # AND THE SLOPE WAS THE SAME CATEGORY ERROR AS THE FLOOR, one line down.
+    # `BundleTokens * 0.02` charges 20ms per token of BUNDLE -- i.e. it predicts
+    # how long a seat takes from how much it READS. Measured across 978 productive
+    # seat-runs in era's own round archive:
+    #
+    #     r(wall clock, bundle tokens)   = +0.083
+    #     r(wall clock, response chars)  = +0.506   (claude +0.799, opencode +0.536)
+    #
+    # Bundle size explains under 1% of the variance. What a seat spends its time
+    # on is what it WRITES. The median wall clock barely moves across a fifty-fold
+    # range of bundle size -- 42s at <10k tokens, 157s at 10-25k, 167s at 25-50k,
+    # 188s at 50-100k, 240s at 100-200k -- while the old rule swung the budget
+    # from 700s to 1800s over the same range. Same mistake the stall overlay made
+    # (a generation rate applied to an input count), one level up.
+    #
+    # It is not zero, though: the TAIL grows with size, because a bigger bundle
+    # gets a longer review. So the term stays and gets a measured coefficient.
+    # The budget has to dominate the largest wall clock seen at each size:
+    #
+    #     bundle tokens      longest productive seat-run
+    #          4,628                590.1s
+    #         21,133                597.1s
+    #         47,266                882.1s
+    #         81,333               1005.5s
+    #        122,547               1426.0s   <- this one sets the slope
+    #        258,461               1051.9s
+    #
+    # The minimum slope that envelopes those from a 700s intercept is 0.00592
+    # s/token, set by the 122,547-token run. Times the same 1.175 margin the floor
+    # carries gives 0.008 -- so the budget clears the worst run at every size by
+    # ~18% or better, where the old rule's tightest productive margin was 36.6s
+    # (a 32,798-token round that ran 663.4s against 700s).
+    #
+    # MEASURED AGAINST EVERY CANDIDATE, on all 978 productive seat-runs:
+    #
+    #     rule                        kills   tightest margin   mean budget
+    #     max(700, 0.020t)  [old]         0             36.6s         1072s
+    #     flat 1100s                      1           -326.0s         1100s
+    #     700 + 0.006t                    0              9.0s         1017s
+    #     700 + 0.008t      [new]         0            146.9s         1102s
+    #
+    # Four times the margin for 2.8% more patience. The shape changes as well as
+    # the size: the new rule is MORE generous in the middle, where every near-miss
+    # is, and LESS at the top, where the old one granted 1800s to rounds whose
+    # worst observed run was 1005.5s. A wedged seat costs 40s more on average.
     $seatBudgetFloorSec = 700
-    $bundleScaledSec  = [int]($BundleTokens * 0.02)  # 20ms per token
+    $bundleTokenSlopeSec = 0.008
+    $bundleScaledSec  = [int]($seatBudgetFloorSec + $BundleTokens * $bundleTokenSlopeSec)
     $TimeoutSec       = [Math]::Max($TimeoutSec, $seatBudgetFloorSec)
     $effectiveTimeoutSec = [Math]::Min([Math]::Max($TimeoutSec, $bundleScaledSec), 1800)
     if ($effectiveTimeoutSec -gt $TimeoutSec) {
-        Write-Host "[dispatch] Scaled TimeoutSec ${TimeoutSec}s -> ${effectiveTimeoutSec}s for ${BundleTokens}-token bundle."
+        # REPORTED ONLY WHEN THE BUNDLE BOUGHT SOMETHING WORTH KNOWING. The rule is
+        # additive now, so any bundle at all makes $effectiveTimeoutSec exceed the
+        # floor and the old unconditional line would print on every single round --
+        # the same "a line on every healthy round trains the reader to skip the
+        # line that matters" trap the stall warning had to be pulled out of. One
+        # minute of extra patience is the threshold: below that the number has not
+        # meaningfully moved.
+        if ($effectiveTimeoutSec -ge ($TimeoutSec + 60)) {
+            Write-Host "[dispatch] Bundle-scaled TimeoutSec ${TimeoutSec}s -> ${effectiveTimeoutSec}s for ${BundleTokens}-token bundle (${seatBudgetFloorSec}s floor + ${bundleTokenSlopeSec}s/token)."
+        }
         $TimeoutSec = $effectiveTimeoutSec
     }
     $skillRoot = if ($SkillRootOverride) { $SkillRootOverride } else { $PSScriptRoot }

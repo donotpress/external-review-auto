@@ -410,14 +410,22 @@ Describe 'Invoke-ReviewerDispatch — what actually reaches the adapter' -Tag Un
     }
 
     It 'scales TimeoutSec by bundle size and the adapter sees the scaled value' {
-        # 20ms/token. The adapter uses this for its own stall/timeout checks, so
-        # if the scaling never reached it the whole feature would be inert.
+        # THE POINT OF THIS TEST IS THE WIRING, not the coefficient: the adapter
+        # uses the scaled value for its own stall and timeout checks, so if the
+        # scaling never reached it the whole feature would be inert. The
+        # coefficient moved on 2026-09-04 (20ms/token of BUNDLE was predicting
+        # wall clock from what a seat READS -- measured r = +0.083; it is now a
+        # 700s floor plus 8ms/token, see tests/SeatBudgetFloor.Tests.ps1), so the
+        # number is derived here from the rule rather than restated, and what is
+        # asserted is that the adapter got the scaled figure and not the caller's.
         $d = script:New-FakeSkillRoot
         try {
             $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{ a = @{ backend = 'fake' } }
             $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('a') `
                 -TimeoutSec 600 -BundleTokens 50000
-            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 1000
+            $got = (script:Get-Record -RootDir $d -Preset 'a').timeoutSec
+            $got | Should -Be 1100 -Because '700s floor + 50,000 x 0.008'
+            $got | Should -Not -Be 600 -Because 'the caller value must not survive unscaled'
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
@@ -461,7 +469,12 @@ Describe 'Invoke-ReviewerDispatch — what actually reaches the adapter' -Tag Un
             $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{ a = @{ backend = 'fake' } }
             $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('a') `
                 -TimeoutSec 600 -BundleTokens 1000
-            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 700
+            # 700s floor + 1,000 x 0.008. The rule became ADDITIVE the same day, so
+            # even a trivially small bundle moves the number off the bare floor --
+            # which is the whole point: era measured a real round taking 430s on a
+            # 1,229-token bundle, where the old max(floor, 0.02t) shape granted
+            # nothing above the floor at all.
+            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 708
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
