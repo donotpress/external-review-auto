@@ -1234,8 +1234,31 @@ function Reserve-ReviewRound {
             }
             # We own round $candidate
             return [int]$candidate
+        } catch [System.IO.DirectoryNotFoundException] {
+            # NOT A COLLISION, AND IT WILL NOT BECOME ONE ON THE 50TH ATTEMPT.
+            # DirectoryNotFoundException derives from IOException, so the clause
+            # below used to swallow it and spin the loop 50 times before throwing
+            # "Directory may be in an inconsistent state" -- a message about
+            # contention, for a path problem. That is how f33705a shipped: era
+            # could not claim a round at all on a repo whose review dir did not
+            # exist yet. THE PATH BUG WAS FIXED THERE (the dir is created above)
+            # AND THIS CATCH WAS NOT, so the swallow was still live for every
+            # other way the open can fail without contention. Measured on Windows
+            # PowerShell 2026-09-04, all three arrive as this one type: parent
+            # directory missing (the dir deleted under a running dispatch), the
+            # drive not existing, and a path over the length limit.
+            #
+            # Ordered FIRST on purpose: PowerShell takes the first clause whose
+            # type matches and the base type matches the derived one, so placed
+            # after the IOException clause this would be dead code.
+            throw ("Reserve-ReviewRound: cannot create the claim file '$claimPath' -- " +
+                   "the path is not reachable ($($_.Exception.Message)). This is not a " +
+                   "collision with another dispatch; retrying will not help.")
         } catch [System.IO.IOException] {
-            # Another process claimed this round concurrently; retry immediately
+            # Another process claimed this round concurrently; retry immediately.
+            # A BARE IOException is the only thing that means that -- verified by
+            # execution in tests/RoundClaimRetryScope.Tests.ps1, which reproduces
+            # both branches against the real filesystem.
             $attempt++
         }
     }
