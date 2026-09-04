@@ -431,13 +431,48 @@ Describe 'Invoke-ReviewerDispatch — what actually reaches the adapter' -Tag Un
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    It 'leaves TimeoutSec alone for a small bundle' {
+    It 'does not let the bundle-size scaling fire for a small bundle' {
+        # THIS TEST WAS OVER-SPECIFIED, the same shape this repo keeps finding: it
+        # is named for one rule (the scaling must not fire on a small bundle) and
+        # asserted another alongside it (the exact budget), so when the measured
+        # 700s floor replaced the guessed 600s one on 2026-09-04 it failed on a
+        # deliberate change rather than on a regression. Both rules are now
+        # asserted, separately, and each says which one it is.
         $d = script:New-FakeSkillRoot
         try {
             $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{ a = @{ backend = 'fake' } }
             $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('a') `
                 -TimeoutSec 600 -BundleTokens 1000
-            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 600
+            $got = (script:Get-Record -RootDir $d -Preset 'a').timeoutSec
+            # 1,000 tokens x 0.02 = 20s. If the scaling had decided, this is what
+            # the seat would have got.
+            $got | Should -Not -Be 20 -Because 'the scaling must not fire on a small bundle'
+            $got | Should -BeGreaterThan 20
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'applies the measured seat-budget floor to a small bundle' {
+        # The floor is what a small bundle gets, and it is 700s since 2026-09-04:
+        # at 600s the opencode stall clamp is 569s, and a productive deepseek run
+        # in opencode.db went silent for 570.2s on a floor-sized input.
+        # See tests/SeatBudgetFloor.Tests.ps1 for the derivation.
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{ a = @{ backend = 'fake' } }
+            $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('a') `
+                -TimeoutSec 600 -BundleTokens 1000
+            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 700
+        } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'still respects a caller who asks for more than the floor' {
+        # The floor raises, it never lowers.
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{ a = @{ backend = 'fake' } }
+            $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('a') `
+                -TimeoutSec 1200 -BundleTokens 1000
+            (script:Get-Record -RootDir $d -Preset 'a').timeoutSec | Should -Be 1200
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

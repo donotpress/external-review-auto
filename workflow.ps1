@@ -1878,15 +1878,45 @@ function Invoke-ReviewerDispatch {
     )
     Test-ThreadJobAvailable
 
-    # Bundle-size-aware TimeoutSec scaling. Keeps the default 600s for small
-    # bundles but grows linearly past ~30k tokens. The adapter sees this scaled
-    # value and uses it for both stall and timeout checks; Wait-Job below uses
-    # it + 30s margin so the adapter has room to throw cleanly before the
-    # dispatcher kills the ThreadJob (which would leak native subprocesses).
-    # Cap at 1800s (30 min) so a very large bundle doesn't tie up a threadpool
-    # slot for an unbounded period — the adapter's own stall detector kills
-    # stuck processes much earlier.
+    # Bundle-size-aware TimeoutSec scaling. Grows linearly past ~35k tokens. The
+    # adapter sees this scaled value and uses it for both stall and timeout
+    # checks; Wait-Job below uses it + 30s margin so the adapter has room to throw
+    # cleanly before the dispatcher kills the ThreadJob (which would leak native
+    # subprocesses). Cap at 1800s (30 min) so a very large bundle doesn't tie up a
+    # threadpool slot for an unbounded period.
+    #
+    # THE FLOOR WAS 600s AND IT WAS A GUESS, like the four stall constants that
+    # went the same way on 2026-09-04. What it had to be measured against is the
+    # CLAMP: the opencode adapter's stall threshold is min(appetite, budget - 30),
+    # so for any bundle small enough to sit on the floor, the BUDGET decided how
+    # long a seat could think, not the measurement. At a 600s floor that clamp is
+    # 569s, and one productive run in the local opencode.db is on the wrong side
+    # of it:
+    #
+    #   7,794 input tokens (squarely on the floor), 26,525 output tokens,
+    #   11,520 characters of finished review -- and 570.2s of silence.
+    #   The 569s clamp would have killed it 1.2 SECONDS before it delivered.
+    #
+    # 570.2s is the largest silence any productive deepseek-v4-flash turn has
+    # taken. A 700s floor puts the clamp at 670s, clearing it by 99.8s (17.5%),
+    # and kills 0 of the 404 productive floor-regime seat-runs in the 628-round
+    # archive -- against 3 at the old 570s clamp.
+    #
+    # NOT RAISED TO 854s, which is what it would take for the stall threshold to
+    # stop clamping at all (824s appetite + 30s margin). That appetite is a GLOBAL
+    # bound: it includes big-output runs and free-tier queue stalls that do not
+    # happen at floor bundle sizes, where the worst observed silence is 570.2s.
+    # Buying headroom nobody has used costs +254s on every wedged seat instead of
+    # +100s, and 11.8% of floor-regime seat-runs are non-productive. Apply the
+    # measurement for the regime, not the largest one available.
+    #
+    # WHAT THIS COSTS, measured rather than asserted: a wedged seat on a small
+    # bundle burns 700s instead of 600s before the dispatcher abandons it. No
+    # productive seat-run pays anything -- 1 of 977 in the archive ever exceeded
+    # its budget at all, and only 19 of them reached even 80% of it.
+    $seatBudgetFloorSec = 700
     $bundleScaledSec  = [int]($BundleTokens * 0.02)  # 20ms per token
+    $TimeoutSec       = [Math]::Max($TimeoutSec, $seatBudgetFloorSec)
     $effectiveTimeoutSec = [Math]::Min([Math]::Max($TimeoutSec, $bundleScaledSec), 1800)
     if ($effectiveTimeoutSec -gt $TimeoutSec) {
         Write-Host "[dispatch] Scaled TimeoutSec ${TimeoutSec}s -> ${effectiveTimeoutSec}s for ${BundleTokens}-token bundle."

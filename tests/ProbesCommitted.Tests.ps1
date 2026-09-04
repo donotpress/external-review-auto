@@ -109,9 +109,20 @@ Describe 'the same guarantees for a probe that is not PowerShell' -Tag Unit {
     }
 
     It 'resolves its own inputs instead of hardcoding a user path' {
-        foreach ($f in $script:PyProbes) {
-            (Get-Content -Raw -LiteralPath $f.FullName) |
-                Should -Not -Match 'C:\\Users\\[A-Za-z]' -Because "$($f.Name) must not hardcode a home directory"
+        # BOTH SPELLINGS, AND EVERY PROBE, because the Windows-only check above did
+        # not catch a real leak. era-seat-budget.py was written with eight absolute
+        # archive paths naming a home directory AND the private repositories era
+        # had been pointed at -- in a repository that is public. The identifier
+        # sweep caught it; this test did not, because it only knew C:\Users\<name>.
+        # A probe reads a corpus that is never in the repo, so "where is the
+        # corpus" is the one question every probe must answer, and the wrong answer
+        # to it is exactly the one that leaks.
+        foreach ($f in $script:AllProbes) {
+            $src = Get-Content -Raw -LiteralPath $f.FullName
+            $src | Should -Not -Match '[A-Za-z]:\\Users\\[A-Za-z]' `
+                -Because "$($f.Name) must not hardcode a Windows home directory"
+            $src | Should -Not -Match '/(?:home|Users)/[A-Za-z][A-Za-z0-9._-]*/' `
+                -Because "$($f.Name) must not hardcode a POSIX home directory"
         }
     }
 

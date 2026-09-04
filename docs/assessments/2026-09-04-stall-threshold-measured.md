@@ -212,11 +212,37 @@ under 120s. There is no cut that keeps the failures and lets the work through. S
 the defensible choice is the one that never kills work, and leaves the failures to
 the checks that actually identify them: the exit code, and the empty-capture test.
 
-**The corollary worth acting on later.** If the stall detector is to do anything
-other than pre-empt the timeout by 30s, seat budgets have to exceed ~854s. That is
-`Get-EraDispatchPlan`'s `bundleTokens × 0.02` with its 600s floor, and it is a
-change to the dispatcher rather than the adapter. Not done here; recorded so it is
-not rediscovered.
+**The corollary, followed up the same day — and it was half wrong.** This section
+originally said the budget question was only about letting the stall fire on its
+own terms, needing budgets past ~854s, and left it. Measured against era's own
+round archive (629 rounds, 1,175 seat-runs, `tools/probes/era-seat-budget.py`),
+that framing missed the part that mattered:
+
+- The budget essentially **never binds on work that succeeds** — 1 of 978
+  productive seat-runs ever exceeded it, and only 19 reached 80% of it. So the
+  "raise budgets so the stall can fire" argument buys nothing on its own.
+- But the floor is not only a timeout. **It is the clamp on the stall threshold.**
+  At a 600s floor the clamp is 569s, and a productive `deepseek-v4-flash` turn in
+  `opencode.db` went silent for **570.2s on a 7,794-token input** — squarely on
+  the floor — before delivering 11,520 characters of review. The clamp would have
+  killed it 1.2 seconds early. So the guessed floor was silently overriding the
+  measured appetite on the most common round shape.
+
+Floor raised **600s → 700s**, putting the clamp at 670s: clears 570.2s by 99.8s
+(17.5%), and kills 0 of the 404 productive floor-regime seat-runs against 3 at the
+old clamp. **Not** raised to 854s — that would stop the clamping entirely, but the
+824s appetite is a global bound including big-output runs and free-tier queue
+stalls that do not occur at floor bundle sizes. Buying unused headroom costs +254s
+on every wedged seat instead of +100s, and 11.8% of floor-regime seat-runs are
+non-productive.
+
+**And the bundle-size scaling is the wrong model at the small end, which this
+made obvious.** A live round on 2026-09-04 took **430 seconds on a 1,229-token
+bundle**; `bundleTokens × 0.02` would have granted it 24s. Only the floor stands
+between that round and a false timeout. The scaling term is not wrong for large
+bundles, but below ~35k tokens it predicts nothing — the same category error the
+stall overlay had, one level up. Left as it is, with the floor doing the work and
+this note recording why.
 
 ## What this corrects in the record
 
