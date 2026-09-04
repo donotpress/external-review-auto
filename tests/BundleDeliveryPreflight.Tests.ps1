@@ -25,7 +25,7 @@ BeforeAll {
     $script:Reg = @{
         'opus'           = @{ backend = 'claude';       model_id = 'claude-opus-5' }
         'deepseek-flash' = @{ backend = 'opencode';     model_id = 'opencode-go/deepseek-v4-flash' }
-        'muse-spark'     = @{ backend = 'opencode';     model_id = 'opencode-go/muse-spark-1.2-contributor' }
+        'muse-spark'     = @{ backend = 'opencode';     model_id = 'opencode-go/muse-spark-1.3-contributor' }
         'gemini'         = @{ backend = 'agy';          model_id = 'gemini-3.6-flash-high' }
         'deepseek-api'   = @{ backend = 'openaicompat'; model_id = 'deepseek-chat' }
         'opus-api'       = @{ backend = 'anthropic';    model_id = 'claude-opus-5' }

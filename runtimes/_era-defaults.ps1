@@ -42,7 +42,12 @@ $script:EraShippedPanel = @('gemini', 'opus', 'deepseek-flash', 'muse-spark')
 #
 # 2026-08-26: that seat moved from `ox-alpha` to `muse-spark`
 # (opencode-go/muse-spark-1.2-contributor, display name exactly 'Muse Spark 1.2 Contributor')
-# at the operator's request. Worth recording that the ORIGINAL argument for a 4th reviewer was
+# at the operator's request.
+# 2026-09-04: the same seat bumped 1.2 -> 1.3 (opencode-go/muse-spark-1.3-contributor,
+# display name exactly 'Muse Spark 1.3 Contributor'), again at the operator's request.
+# Verified from `opencode models --verbose` that day: both are status active with
+# IDENTICAL cost ($0.10/$0.20 per Mtok) and identical 1,048,576 / 131,072 limits, so
+# this changes the model and nothing about the panel's cost or ceilings. Worth recording that the ORIGINAL argument for a 4th reviewer was
 # that ox-alpha is FREE, and muse-spark is not — $0.10/$0.20 per Mtok, ~$0.01 on a 100k-token
 # round. Cheaper than deepseek-flash and immaterial next to opus, so the seat is still
 # effectively free in practice, but the justification is now redundancy alone. `ox-alpha`

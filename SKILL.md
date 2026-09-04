@@ -74,7 +74,7 @@ Change it with `/era set default <names>` (accepts a panel), or edit the file.
 > **Default reviewers (a 4-model panel, run simultaneously):** a bare `/era` with no
 > `-Reviewer` dispatches **`gemini,opus,deepseek-flash,muse-spark`** — Gemini 3.6
 > Flash (agy), Claude Opus 5 (claude CLI), DeepSeek V4 Flash (New) (opencode-go) and
-> Muse Spark 1.2 Contributor (opencode-go). Cross-vendor on purpose: in round 11 one
+> Muse Spark 1.3 Contributor (opencode-go). Cross-vendor on purpose: in round 11 one
 > reviewer reviewed the wrong subject entirely while another found a real shipped
 > regression, so a single reviewer is a single point of failure whichever one you
 > pick. Cost is dominated by Opus (~$5/$25 per M vs ~$0.3, ~$0.14 and ~$0.10) — pass
