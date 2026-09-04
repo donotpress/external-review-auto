@@ -218,7 +218,7 @@ Describe 'era.ps1 on wildcard-metacharacter paths' -Tag Unit {
             & pwsh -NonInteractive -Command @"
 Set-Location -LiteralPath '$WorkDir'
 try {
-    & '$($script:EraPath)' -TopicSlug 'bracket-test' -Force $ArgLiteral 2>&1 | Out-String
+    & '$($script:EraPath)' -PreflightOnly -TopicSlug 'bracket-test' -Force $ArgLiteral 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }

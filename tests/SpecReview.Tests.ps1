@@ -36,7 +36,7 @@ Describe 'PR5: -SpecReview preset' -Tag Unit {
 `$ErrorActionPreference = 'Stop'
 Set-Location '$($script:TmpDir -replace "'", "''")'
 try {
-    & '$($script:EraPath)' -SpecReview '$($specFile -replace "'", "''")' -PromptOverrideFile '$($promptFile -replace "'", "''")' -Force 2>&1 | Out-String
+    & '$($script:EraPath)' -PreflightOnly -SpecReview '$($specFile -replace "'", "''")' -PromptOverrideFile '$($promptFile -replace "'", "''")' -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }
@@ -53,7 +53,7 @@ try {
 `$ErrorActionPreference = 'Stop'
 Set-Location '$($script:TmpDir -replace "'", "''")'
 try {
-    & '$($script:EraPath)' -SpecReview '$($specFile -replace "'", "''")' -Force 2>&1 | Out-String
+    & '$($script:EraPath)' -PreflightOnly -SpecReview '$($specFile -replace "'", "''")' -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }

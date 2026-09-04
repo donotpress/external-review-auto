@@ -118,6 +118,22 @@ param(
     # commits them, and the resulting commit was never reviewed by the round
     # that appears to cover it. That produced an unreviewed layer THREE TIMES in
     # one session, purely from ordering. ERA_ALLOW_DIRTY=1 is the env equivalent.
+    # -PreflightOnly: build the bundle, run EVERY gate, then stop before
+    # dispatching. Exit 0, nothing sent, nothing spent.
+    #
+    # THIS IS A SWITCH AND NOT ONLY AN ENV VAR, AND THAT IS THE WHOLE POINT.
+    # It shipped 2026-09-04 as ERA_PREFLIGHT_ONLY alone and a WSL caller lost
+    # $0.66 to it the same day: `ERA_PREFLIGHT_ONLY=1 pwsh ... era.ps1` sets a
+    # LINUX env var, pwsh on a WSL PATH execs pwsh.EXE, and ERA_* is not in
+    # WSLENV -- so the variable arrives EMPTY and era dispatches a real round.
+    # references/troubleshooting.md has documented that boundary for weeks; the
+    # guard was built on the one mechanism known not to cross it.
+    #
+    # The direction of the failure is what makes it serious: a dropped safety
+    # flag does not refuse, it SPENDS. A switch crosses the boundary because it
+    # is an argument. The env var is kept for callers already inside pwsh (the
+    # test forks), and is documented as WSL-fragile.
+    [switch]$PreflightOnly,
     [switch]$AllowDirtyTree,
     [string[]]$IncludeFiles,
     [string]$PromptOverrideFile,
@@ -2071,8 +2087,9 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # thing they exercise. A stop AFTER the gates is the only placement that keeps
     # the tests honest, and it is worth having on its own merits: it answers
     # "what would this round cost and would every seat fit?" for free.
-    if ($env:ERA_PREFLIGHT_ONLY -eq '1') {
-        Write-Host "[era] ERA_PREFLIGHT_ONLY=1 -- bundle built and every gate passed; stopping BEFORE dispatch. Nothing was sent and nothing was spent."
+    if ($PreflightOnly -or $env:ERA_PREFLIGHT_ONLY -eq '1') {
+        $how = if ($PreflightOnly) { '-PreflightOnly' } else { 'ERA_PREFLIGHT_ONLY=1' }
+        Write-Host "[era] $how -- bundle built and every gate passed; stopping BEFORE dispatch. Nothing was sent and nothing was spent."
         Write-Host "[era] Round $round artifacts are on disk under $reviewDir (bundle, prompt, manifest); no metadata is written because no reviewer ran."
         $runSucceeded = $true
         exit 0

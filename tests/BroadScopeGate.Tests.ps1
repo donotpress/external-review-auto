@@ -199,8 +199,7 @@ Describe 'A1: cost consent is not scale consent' -Tag Unit {
 Set-Location '$tmp'
 `$env:ERA_BROAD_MAX_FILES = '2'
 try {
-    `$env:ERA_PREFLIGHT_ONLY = '1'
-    & '$($script:EraPath)' -TopicSlug 'gate-test' -Force 2>&1 | Out-String
+        & '$($script:EraPath)' -PreflightOnly -TopicSlug 'gate-test' -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }
@@ -224,8 +223,7 @@ Set-Location '$tmp'
 `$env:ERA_BROAD_FORCE = '1'
 `$env:ERA_DEFAULT_GLOBS = 'nothing-matches-this-glob.zzz'
 try {
-    `$env:ERA_PREFLIGHT_ONLY = '1'
-    & '$($script:EraPath)' -TopicSlug 'gate-test' -Force 2>&1 | Out-String
+        & '$($script:EraPath)' -PreflightOnly -TopicSlug 'gate-test' -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }
@@ -276,8 +274,7 @@ Describe 'era.ps1 broad-path gate (out-of-process)' -Tag Unit {
 Set-Location '$tmp'
 `$env:ERA_BROAD_MAX_FILES = '2'
 try {
-    `$env:ERA_PREFLIGHT_ONLY = '1'
-    & '$($script:EraPath)' -TopicSlug 'gate-test' -Reviewer gemini 2>&1 | Out-String
+        & '$($script:EraPath)' -PreflightOnly -TopicSlug 'gate-test' -Reviewer gemini 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }
@@ -298,8 +295,7 @@ try {
 Set-Location '$tmp'
 `$env:ERA_BROAD_MAX_FILES = '2'
 try {
-    `$env:ERA_PREFLIGHT_ONLY = '1'
-    & '$($script:EraPath)' -TopicSlug 'gate-test' -Reviewer gemini -IncludeFiles 'doc1.md,definitely-missing.py' 2>&1 | Out-String
+        & '$($script:EraPath)' -PreflightOnly -TopicSlug 'gate-test' -Reviewer gemini -IncludeFiles 'doc1.md,definitely-missing.py' 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }
@@ -317,9 +313,8 @@ try {
             $out = & pwsh -NonInteractive -Command @"
 Set-Location '$tmp'
 `$env:ERA_BROAD_MAX_FILES = 'none'
-`$env:ERA_PREFLIGHT_ONLY = '1'
 try {
-    & '$($script:EraPath)' -TopicSlug 'gate-test' 2>&1 | Out-String
+    & '$($script:EraPath)' -PreflightOnly -TopicSlug 'gate-test' 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }

@@ -28,7 +28,7 @@ BeforeAll {
         & pwsh -NonInteractive -Command @"
 Set-Location '$WorkDir'
 try {
-    & '$($script:EraPath)' -TopicSlug 'empty-test' -Force $ArgLiteral 2>&1 | Out-String
+    & '$($script:EraPath)' -PreflightOnly -TopicSlug 'empty-test' -Force $ArgLiteral 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
 }

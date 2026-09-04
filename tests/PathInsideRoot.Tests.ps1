@@ -91,7 +91,7 @@ Describe 'The traversal guard is not bypassable by bracketing the path' -Tag Int
             param([string]$Repo, [string]$ArgLiteral)
             & pwsh -NonInteractive -Command @"
 Set-Location -LiteralPath '$Repo'
-try { & '$($script:EraPath)' -TopicSlug 'trav-test' -Force $ArgLiteral 2>&1 | Out-String }
+try { & '$($script:EraPath)' -PreflightOnly -TopicSlug 'trav-test' -Force $ArgLiteral 2>&1 | Out-String }
 catch { Write-Output "CAUGHT: `$(`$_.Exception.Message)" }
 "@ 2>&1 | Out-String
         }
