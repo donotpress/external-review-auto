@@ -184,10 +184,45 @@ Describe 'the adapter no longer grants itself time the dispatcher will not wait'
     It 'does not warn on every healthy round' {
         # The clamp is now the NORMAL case (824s floor vs 600-900s seat budgets),
         # so the warning had to move off it or become noise nobody reads. It is
-        # attached to the clamped threshold falling under 571s instead -- the
-        # measured line below which a working seat gets killed.
-        $script:Src | Should -Match '\$killRiskSec = 571'
+        # attached to the clamped threshold falling under the measured line below
+        # which THAT MODEL gets killed while working.
+        $script:Src | Should -Match '\$killRiskSec = Get-OpencodeKillRiskSec -ModelId \$modelId'
         $script:Src | Should -Match 'if \(\(\$stallThresholdMs / 1000\) -lt \$killRiskSec\)'
+    }
+
+    It 'and the flat constant it replaced would have warned on every default round' {
+        # MEASURED ON A LIVE ROUND, 2026-09-04. era's default budget is 600s; the
+        # adapter sees 599s after startup; the clamp yields 569s. The first cut of
+        # this warning used a flat 571 -- deepseek's figure -- so it fired on a
+        # muse-spark round that finished healthy in 73.4 seconds, two seconds under
+        # the line. That is the "warning nobody reads" failure the branch exists to
+        # avoid, reintroduced by the constant inside it.
+        $defaultBudgetThresholdSec = (Resolve-OpencodeStallPlan -TimeoutSec 599 -Variant 'xhigh' -BundleBytes 17411).StallThresholdMs / 1000
+        $defaultBudgetThresholdSec | Should -Be 569 -Because 'this is the number the live round printed'
+
+        # The old flat line warns here...
+        $defaultBudgetThresholdSec | Should -BeLessThan 571
+        # ...and the measured, per-model line does not, for the seat that ran.
+        $defaultBudgetThresholdSec | Should -BeGreaterThan (Get-OpencodeKillRiskSec -ModelId 'opencode-go/muse-spark-1.3-contributor')
+        # ...while still warning for the seat that genuinely can exceed it.
+        $defaultBudgetThresholdSec | Should -BeLessThan (Get-OpencodeKillRiskSec -ModelId 'opencode-go/deepseek-v4-flash')
+    }
+
+    It 'carries each seat its own measured line' {
+        # Longest silent stretch of a PRODUCTIVE turn, per model, from the corpus.
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/deepseek-v4-flash')          | Should -Be 571
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/deepseek-v4-pro')            | Should -Be 571
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/muse-spark-1.2-contributor') | Should -Be 195
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/muse-spark-1.3-contributor') | Should -Be 195
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/ox-alpha-free')              | Should -Be 786
+        (Get-OpencodeKillRiskSec -ModelId 'minimax/MiniMax-M2.7')                   | Should -Be 39
+    }
+
+    It 'gives an unmeasured model the worst of the seats era dispatches' {
+        # Over-warning on a model with no measurement is the safe direction.
+        (Get-OpencodeKillRiskSec -ModelId 'opencode-go/some-new-model') |
+            Should -Be (Get-OpencodeKillRiskSec -ModelId 'opencode-go/deepseek-v4-flash')
+        (Get-OpencodeKillRiskSec -ModelId '') | Should -Be 571
     }
 }
 

@@ -255,6 +255,55 @@ function Resolve-OpencodeStallPlan {
     }
 }
 
+function Get-OpencodeKillRiskSec {
+    <#
+    .SYNOPSIS
+        Below how many seconds of permitted silence can THIS model be killed
+        while it is genuinely working?
+
+    .DESCRIPTION
+        The "[opencode] Stall threshold:" line warns when the budget has clamped
+        the threshold into the range where a real answer dies. That warning was a
+        single flat 571s -- deepseek-v4-flash's worst productive silence -- and a
+        LIVE ROUND ON 2026-09-04 SHOWED WHY THAT IS WRONG:
+
+          [opencode] Stall threshold: 569s (variant=xhigh, bundle=4353tok)
+            -- the 599s budget clamped it from 837.059s. WARNING: below 571s ...
+
+        That was a healthy muse-spark round that finished in 73.4 seconds. era's
+        DEFAULT budget is 600s, which clamps to 569s, which is two seconds under
+        the flat line -- so the warning would have printed on every default-budget
+        opencode round ever dispatched. A warning on every healthy round is a
+        warning nobody reads, which is the exact failure the branch was written to
+        avoid, reintroduced by the constant inside it.
+
+        The fix is the same one the threshold itself just took: THE MODEL
+        PREDICTS, NOT A SINGLE GLOBAL NUMBER. Longest silent stretch of a
+        PRODUCTIVE turn, per model, over the corpus in
+        docs/assessments/2026-09-04-stall-threshold-measured.md:
+
+            deepseek-v4-flash            570.2s over 655 productive turns
+            muse-spark-1.2/1.3           194.7s over 421
+            ox-alpha-free                785.0s over 940  (free-tier queueing,
+                                         not generation -- 291 input tokens
+                                         producing 279 in one 785.0s case)
+            minimax-m2.7                  38.4s over 20
+
+        So at the 569s the default budget yields, deepseek IS at risk and the
+        warning is worth printing; muse-spark is nowhere near it and the line is
+        noise. An unknown model gets deepseek's figure: it is the worst of the
+        seats era actually dispatches, and over-warning on a model with no
+        measurement is the safe direction.
+    #>
+    [CmdletBinding()]
+    param([string]$ModelId)
+    if ($ModelId -match '(?i)ox-alpha')   { return 786 }
+    if ($ModelId -match '(?i)deepseek')   { return 571 }
+    if ($ModelId -match '(?i)muse-spark') { return 195 }
+    if ($ModelId -match '(?i)minimax')    { return 39 }
+    return 571
+}
+
 function Get-OpencodePollIntervalMs {
     <#
     .SYNOPSIS
@@ -1061,14 +1110,14 @@ function Invoke-OpencodeReview {
         #
         # So the clamp is reported as a fact, and the WARNING is attached to the
         # thing that is actually worth knowing: whether the clamped threshold has
-        # dropped into the range where it kills work. 571s is where that starts,
-        # measured -- the longest silent stretch any productive turn on an era
-        # seat has taken in the local opencode.db is 570.2s, over 1,078 of them.
-        $killRiskSec = 571
+        # dropped into the range where it kills work. That line is PER MODEL --
+        # see Get-OpencodeKillRiskSec, and the live round that proved a flat
+        # constant fires on every healthy default-budget dispatch.
+        $killRiskSec = Get-OpencodeKillRiskSec -ModelId $modelId
         if ($stallPlan.Clamped) {
             $line = "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok) -- the ${effectiveTimeoutSec}s budget clamped it from $($stallPlan.WantedMs/1000)s."
             if (($stallThresholdMs / 1000) -lt $killRiskSec) {
-                $line += " WARNING: below ${killRiskSec}s a real answer can be killed mid-think -- measured, the longest silent stretch a productive opencode seat has taken here is 570.2s. Raise the reviewer timeout."
+                $line += " WARNING: below ${killRiskSec}s a real answer from this model can be killed mid-think -- that is its longest silent stretch on a productive turn in the local opencode.db. Raise the reviewer timeout."
             }
             Write-Host $line
         } else {
