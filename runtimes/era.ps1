@@ -2035,6 +2035,35 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         }
     }
 
+    # --- ERA_PREFLIGHT_ONLY: everything except the spend -------------------
+    # Build the bundle, run every gate (broad scope, dirty tree, delivery
+    # ceilings, cost estimate, blind-seat strip) and then STOP, without
+    # dispatching a single reviewer.
+    #
+    # WHY THIS EXISTS. tests/BroadScopeGate.Tests.ps1 and
+    # tests/AutoDetect.Tests.ps1 fork a real era.ps1 to observe behaviour that
+    # happens BEFORE dispatch -- a bad ceiling env var must not throw a raw cast
+    # error, -AutoDetect must pick a subject. Several of those forks passed no
+    # -IncludeFiles and no -Reviewer, so era did exactly what it is supposed to
+    # do and dispatched the full default panel. Measured 2026-09-04: a suite run
+    # spawned a real `opencode run` (traced from the process tree of the holder
+    # of Global\era-opencode-run-mutex), which is why BroadScopeGate is the
+    # second-slowest file at 216.78s, why `tests/README.md`'s "no network or live
+    # backend spawning" was false, and why a full suite BLOCKED a concurrent real
+    # round for 476s on that mutex.
+    #
+    # The gate under test sits at Test-EraBroadScopeAllowed, well after reviewer
+    # validation, so pointing the tests at a bogus -Reviewer would exit before the
+    # thing they exercise. A stop AFTER the gates is the only placement that keeps
+    # the tests honest, and it is worth having on its own merits: it answers
+    # "what would this round cost and would every seat fit?" for free.
+    if ($env:ERA_PREFLIGHT_ONLY -eq '1') {
+        Write-Host "[era] ERA_PREFLIGHT_ONLY=1 -- bundle built and every gate passed; stopping BEFORE dispatch. Nothing was sent and nothing was spent."
+        Write-Host "[era] Round $round artifacts are on disk under $reviewDir (bundle, prompt, manifest); no metadata is written because no reviewer ran."
+        $runSucceeded = $true
+        exit 0
+    }
+
     $results = Invoke-ReviewerDispatch -ReviewerList $approvedList `
         -Registry $registryHash -BundlePath $bundlePath -PromptPath $promptPath `
         -ReviewDir $reviewDir -Round $round -AgyModelHint $resolvedAgyHint `

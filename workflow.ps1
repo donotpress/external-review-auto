@@ -909,6 +909,39 @@ function Stop-EraAdapterChild {
     }
 }
 
+function Get-EraHeartbeatSec {
+    <#
+    .SYNOPSIS
+        How often the dispatch poll loop should report that it is still alive.
+        60s default; ERA_HEARTBEAT_SEC overrides; 0 disables.
+
+    .DESCRIPTION
+        Pure so it can be tested without a dispatch, the same reason
+        Test-EraStragglerExpired below is pure. A bad env value falls back to the
+        default rather than throwing or silencing the heartbeat: silence is the
+        failure mode this exists to remove, so an unparseable tunable must not
+        produce it.
+    #>
+    [CmdletBinding()]
+    param([string]$EnvValue, [int]$Default = 60)
+    if ([string]::IsNullOrWhiteSpace($EnvValue)) { return $Default }
+    $v = 0
+    if ([int]::TryParse($EnvValue, [ref]$v) -and $v -ge 0) { return $v }
+    return $Default
+}
+
+function Test-EraHeartbeatDue {
+    <#
+    .SYNOPSIS
+        Is a heartbeat due at $ElapsedSec, given the last scheduled beat?
+        Returns $true/$false. Disabled entirely when $HeartbeatSec is 0.
+    #>
+    [CmdletBinding()]
+    param([int]$ElapsedSec, [int]$NextBeatSec, [int]$HeartbeatSec)
+    if ($HeartbeatSec -le 0) { return $false }
+    return ($ElapsedSec -ge $NextBeatSec)
+}
+
 function Test-EraStragglerExpired {
     <#
     .SYNOPSIS
@@ -2007,10 +2040,48 @@ function Invoke-ReviewerDispatch {
     $loneSince  = -1
     $stopReason = ''
     $doneStates = @('Completed', 'Failed', 'Stopped')
+
+    # HEARTBEAT. Without it this loop is SILENT from the "[dispatch] Scaled
+    # TimeoutSec" line until either a lone straggler appears or the budget
+    # expires -- up to $budgetSec, which is 732s on a 35k-token panel and 1830s
+    # on a large one. In that window the log cannot distinguish "working" from
+    # "died ten minutes ago", and that ambiguity has now cost two rounds:
+    #
+    #   bulk-refresh-vpn-headless r1/r2 (2026-09-02): the driver read the silence
+    #     as death and re-dispatched while r1 was still alive. Both seats paid twice.
+    #   direction-paths-2026-09-04 r1: the dispatcher was reaped by its launcher's
+    #     tool timeout at ~01:21 and nothing said so. Establishing merely WHEN it
+    #     died needed process forensics and an argument from the survival of
+    #     round-1-claim.json, because the log's last line was the dispatch line.
+    #
+    # Cheap: the loop already wakes every 500ms, so this is a counter and one
+    # Write-Host. Emitted only while something is outstanding, so a fast round
+    # stays quiet. ERA_HEARTBEAT_SEC tunes it; 0 disables.
+    #
+    # Write-Host reaches a redirected log promptly -- verified 2026-09-04 by
+    # tailing a redirect mid-run -- so these lines are visible live rather than
+    # arriving in one flush at exit. That is the whole point; a buffered
+    # heartbeat would be worse than none, because it would look like silence.
+    $heartbeatSec = Get-EraHeartbeatSec -EnvValue $env:ERA_HEARTBEAT_SEC
+    $nextBeat     = $heartbeatSec
+
     while ($true) {
         $outstanding = @($allJobs | Where-Object { $_.State -notin $doneStates }).Count
         if ($outstanding -eq 0) { break }
         $elapsed = [int]$sw.Elapsed.TotalSeconds
+
+        if (Test-EraHeartbeatDue -ElapsedSec $elapsed -NextBeatSec $nextBeat -HeartbeatSec $heartbeatSec) {
+            $nextBeat = $elapsed + $heartbeatSec
+            # Name WHO is outstanding, not just how many: on a 4-seat panel
+            # "2 running" does not tell you whether the expensive seat is one of
+            # them, and the seat names are what a post-mortem needs.
+            $waiting = @($dispatched | Where-Object { $_.Job.State -notin $doneStates } |
+                         ForEach-Object { $_.Preset }) -join ', '
+            $doneN = @($allJobs).Count - $outstanding
+            Write-Host ("[dispatch] {0}s elapsed of {1}s budget; {2}/{3} done; still running: {4}" -f `
+                        $elapsed, $budgetSec, $doneN, @($allJobs).Count, $(if ($waiting) { $waiting } else { '(resolving)' }))
+        }
+
         if ($outstanding -eq 1 -and $loneSince -lt 0 -and @($allJobs).Count -ge 2) {
             $loneSince = $elapsed
             Write-Host "[dispatch] One reviewer still running at ${elapsed}s; allowing ${graceSec}s grace before abandoning it (ERA_STRAGGLER_GRACE_SEC)."

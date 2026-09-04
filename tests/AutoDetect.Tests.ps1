@@ -29,6 +29,7 @@ Describe 'PR4: -AutoDetect flag' -Tag Unit {
 `$ErrorActionPreference = 'Stop'
 `$env:PATH = 'C:\Windows\System32'  # git not here
 try {
+    `$env:ERA_PREFLIGHT_ONLY = '1'
     & '$($script:EraPath)' -TopicSlug 'test' -AutoDetect -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
@@ -50,6 +51,7 @@ try {
 `$ErrorActionPreference = 'Stop'
 Set-Location '$($tmpDir -replace "'", "''")'
 try {
+    `$env:ERA_PREFLIGHT_ONLY = '1'
     & '$($script:EraPath)' -TopicSlug 'test' -AutoDetect -Force 2>&1 | Out-String
 } catch {
     Write-Output "CAUGHT: `$(`$_.Exception.Message)"
