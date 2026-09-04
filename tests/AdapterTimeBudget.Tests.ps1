@@ -308,7 +308,7 @@ Describe 'Resolve-OpencodeRunBudget' -Tag Unit {
         $b    = Resolve-OpencodeRunBudget -TimeoutSec 1800 -ElapsedSec 1500
         $plan = Resolve-OpencodeStallPlan -TimeoutSec $b.RemainingSec -Variant 'max' -BundleBytes 600000
         ($plan.StallThresholdMs / 1000) | Should -BeLessThan $b.RemainingSec
-        $plan.Clamped | Should -BeTrue -Because 'a 300s remainder cannot fund a max variant''s 600s base appetite'
+        $plan.Clamped | Should -BeTrue -Because 'a 300s remainder cannot fund the measured appetite (824s floor, 1274s at this bundle)'
     }
 }
 

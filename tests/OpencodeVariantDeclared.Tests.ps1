@@ -18,13 +18,23 @@
 # minimal/low/medium/high/xhigh. There is no 'max'. So from 2026-08-26 to
 # 2026-09-04 the 4th panel seat asked for a variant equivalent to nonsense.
 #
-# WHAT THIS TEST DOES NOT COVER, deliberately: entries that list a variant era
-# will never CHOOSE. `deepseek-v4-flash` lists an undeclared 'medium', but the
-# preference loop stops at 'max' first and 'max' IS declared for that model, so
-# the dead entry cannot reach opencode. Asserting on every string in every list
-# would fail on inert data and pressure someone into editing a live default-panel
-# seat to satisfy a test. The rule asserted is the one that bites: what era
-# actually sends.
+# WHAT THIS TEST USED TO LEAVE UNCOVERED, and no longer does. The rule started
+# as "only check what era actually SENDS", on the argument that an undeclared
+# name era will never choose is inert and asserting on it would pressure someone
+# into editing a live default-panel seat to satisfy a test. That was true and it
+# was too narrow. Swept 2026-09-04, FOUR registry entries listed variants the
+# snapshot says opencode does not declare:
+#
+#   opencode-go/deepseek-v4-pro        low, medium   (declares high, max)
+#   opencode-go/mimo-v2.5              low, medium, high   (declares none)
+#   opencode-go/mimo-v2.5-pro          low, medium, high   (declares none)
+#   google/gemini-2.5-flash-image      high, max     (declares none)
+#
+# All four inert, all four one edit away from being live: reorder the preference
+# loop, or have opencode drop 'max' from deepseek-v4-pro, and era starts sending
+# a name that is silently ignored -- with no runtime signal, which is the whole
+# reason this file exists. They are corrected in the registry and the sweep below
+# is now asserted, so the next one cannot be added quietly.
 #
 # Run:
 #   pwsh -Command "Invoke-Pester -Path tests/OpencodeVariantDeclared.Tests.ps1 -Output Detailed"
@@ -122,17 +132,53 @@ Describe 'the test and the adapter rank variants the same way' -Tag Unit {
         ($adapterOrder -join ',') | Should -Be 'xhigh,max,high,medium,low'
     }
 
-    It 'gives xhigh and max the same stall budget' {
-        # They are two providers' names for "think as long as you like", not two
-        # tiers. A model declares one vocabulary or the other, never both.
-        $x = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'xhigh' -BundleBytes 1000
-        $m = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max'   -BundleBytes 1000
-        $x.WantedMs | Should -Be $m.WantedMs
-        $x.WantedMs | Should -BeGreaterThan (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'high' -BundleBytes 1000).WantedMs
+    It 'no longer lets the variant name change the stall budget at all' {
+        # THIS TEST USED TO ASSERT AN ORDERING -- xhigh == max, and both above
+        # 'high' -- which pinned four guessed constants that measurement has
+        # since removed. Silence tracks the model and how much it generates, not
+        # the reasoning-effort knob: muse-spark peaks at 194.7s over its 421
+        # productive turns while deepseek-v4-flash at 'max' reaches 570.2s over
+        # 655. See Resolve-OpencodeStallPlan and
+        # docs/assessments/2026-09-04-stall-threshold-measured.md.
+        #
+        # What survives is the half that was about THIS file: whichever name era
+        # resolves to, a wrong one can no longer starve the seat of stall budget.
+        # That is what turned the 2026-08-26 muse-spark mismatch from a silent
+        # no-op into a potential kill, and it is now structurally impossible.
+        $ref = (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 1000).WantedMs
+        foreach ($v in @('xhigh','high','medium','low','minimal','default','totally-bogus-zzz')) {
+            (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant $v -BundleBytes 1000).WantedMs |
+                Should -Be $ref -Because "variant '$v' must not change the stall budget"
+        }
     }
+}
 
-    It 'still treats an unknown variant name as the default budget' {
-        (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'totally-bogus-zzz' -BundleBytes 1000).WantedMs |
-            Should -Be (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'default' -BundleBytes 1000).WantedMs
+Describe 'no registry entry asks for a variant opencode does not declare' -Tag Unit {
+
+    It 'sweeps every model in the opencode map, not just the dispatchable presets' {
+        # An inert undeclared name is one preference-loop edit away from being a
+        # live one, and the failure it becomes is silent in both directions.
+        # Models absent from the snapshot are skipped -- absent is not the same
+        # fact as "declares nothing", and the snapshot records the difference
+        # (null vs []).
+        $problems = @()
+        $checked  = 0
+        foreach ($prov in $script:Reg._opencode_model_map.PSObject.Properties) {
+            foreach ($entry in $prov.Value.PSObject.Properties) {
+                $mid = $entry.Value.model_id
+                if (-not $mid) { continue }
+                if (-not $script:Snap.declared.PSObject.Properties[$mid]) { continue }
+                $declared = $script:Snap.declared.$mid
+                if ($null -eq $declared) { continue }
+                $checked++
+                foreach ($v in @($entry.Value.variants)) {
+                    if (@($declared) -notcontains $v) {
+                        $problems += "$mid lists '$v'; opencode declares [$(@($declared) -join ', ')]"
+                    }
+                }
+            }
+        }
+        $checked | Should -BeGreaterThan 20 -Because 'the sweep must actually reach the map'
+        $problems -join "`n" | Should -BeNullOrEmpty
     }
 }

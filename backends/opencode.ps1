@@ -86,13 +86,10 @@ function Resolve-OpencodeStallPlan {
     .SYNOPSIS
         How long may opencode go quiet before we call it stalled, given the
         budget we were actually handed? Returns
-        @{ StallThresholdMs; WantedMs; CeilingMs; Clamped; BundleTokenEst }.
+        @{ StallThresholdMs; WantedMs; CeilingMs; Clamped; BundleTokenEst;
+           PrefillMs; GenerationMs }.
 
     .DESCRIPTION
-        Reasoning-heavy variants ('max') can think silently for minutes before
-        the first token, so the appetite scales with the variant, plus a
-        bundle-size overlay (20ms/token ~ 50 tok/sec) for large bundles.
-
         THE STALL MUST FIRE BEFORE OUR OWN TIMEOUT, or both land at once and the
         timeout label wins -- mis-attributing a silent-think stall and skipping
         the forensic snapshot the stall path writes.
@@ -112,14 +109,101 @@ function Resolve-OpencodeStallPlan {
         and every failure was labelled "Timed out (global)" with no snapshot --
         precisely the outcome the escalation existed to prevent.
 
-        So the budget is now taken as given and the THRESHOLD is clamped to fit
+        So the budget is taken as given and the THRESHOLD is clamped to fit
         inside it. Same intent, using time that actually exists. The resulting
         order holds at every size and variant:
 
             stall threshold  <  adapter TimeoutSec  <  dispatcher TimeoutSec+30
 
         A clamp is reported, not silent: it means the budget is too small for
-        this variant/bundle, which is a real thing for an operator to know.
+        this bundle, which is a real thing for an operator to know.
+
+        ================================================================
+        WHERE THE APPETITE ITSELF COMES FROM (rewritten 2026-09-04)
+        ================================================================
+        It used to be `max(variant base, bundleTokens x 20ms)`, with bases of
+        600s for max/xhigh, 300s for high and 120s for everything else. Those
+        four numbers were guesses. They have now been measured against 8,199
+        assistant turns in the local opencode.db -- 2,038 of which finished and
+        wrote an answer -- and BOTH halves of the old formula were wrong:
+
+          * THE VARIANT NAME PREDICTS NOTHING. muse-spark peaks at 194.7s of
+            silence over its 421 productive turns -- and that worst case IS an
+            'xhigh' one -- while deepseek-v4-flash at 'max' reaches 570.2s over
+            655. Same "think as long as you like" tier, three times apart. What
+            differs is the MODEL, not the knob.
+            And the tier that mattered most was the fallback: 'default' = 120s
+            kills 8.07% of productive era-seat turns, which is exactly the
+            2026-08-22 ox-alpha incident and the reason three registry entries
+            carry a star telling the next person not to omit a variants list.
+            Deriving the threshold from the variant is what made a missing
+            registry line lethal. It no longer is.
+
+          * THE BUNDLE OVERLAY MULTIPLIED THE WRONG COUNT BY THE WRONG RATE.
+            Its own comment read "20ms/token ~ 50 tok/sec", which is a
+            GENERATION rate -- and it was applied to the INPUT token count.
+            Measured, the two quantities barely relate: silence vs input tokens
+            is r = +0.10 for deepseek-v4-flash, silence vs OUTPUT tokens is
+            r = +0.83. Reading the bundle is prefill, and prefill is cheap:
+            0.3 ms/token at the median (30.1s at 90-100k input) against the
+            20 ms/token the overlay charged, ~65x too much.
+
+        So the appetite is now the sum of the two things that actually consume
+        the silence, each with its own measurement:
+
+          PREFILL/QUEUE = 120,000 ms + 3 ms x bundle token
+            120s floor: time-to-first-part over all 8,146 turns that produced
+            one is p50 4.1s, p95 22.2s, p99 47.7s. The 120s covers the p99 with
+            room; the distribution's max is a single 431.4s free-tier queue.
+            3 ms/token: the measured prefill slope. deepseek-v4-flash medians
+            run 1.9s at <10k input to 30.1s at 90-100k (0.3 ms/token); the
+            worst single observation in any bucket is 229.2s at ~95k
+            (2.4 ms/token). 3 sits above the worst one seen.
+
+          GENERATION = 704,000 ms = 32,000 output tokens x 22 ms/token
+            32,000: deepseek-v4-flash's observed OUTPUT CEILING -- three turns
+            in the database sit at exactly 32000, all finish=length, and every
+            one returned no text at all (that is the zero-output bug, diagnosed
+            in docs/assessments/2026-09-04-opencode-zero-output-diagnosed.md).
+            NOT a universal cap: one run reached 66,602. The two tails are not
+            independent, though -- that run generated at 7.8 ms/token and was
+            silent for 512.3s, well inside this bound. Multiplying the largest
+            output ever seen by the slowest rate ever seen gives 1,518s and
+            prices a run that has never happened.
+            22 ms/token: the slowest per-output-token rate measured over the 81
+            turns that emitted more than 8k tokens (p50 9.6, p95 18.1, p99 22.0,
+            max 22.8).
+
+        FLOOR = 824s, and that number is checked, not asserted: of the 2,038
+        productive turns in the corpus, ZERO have a silent stretch longer than
+        824s and the largest is 785.0s. At 600s -- what 'max' granted before --
+        two are killed; at 300s ('high', which is what era's deepseek seat asks
+        for since this morning) twenty-six of the 655 productive
+        deepseek-v4-flash turns are killed, 3.97%, up to 570.2s.
+
+        WHAT THIS COSTS IN THE OTHER DIRECTION, stated because the threshold
+        exists to catch real hangs. It costs less than it looks. The clamp still
+        binds: a threshold of 824s against era's typical 600-900s seat budget is
+        clamped to (budget - 30), so on most rounds the stall now fires 30s
+        before the timeout rather than minutes before it. That is the honest
+        consequence of the measurement -- silence does not discriminate. The 89
+        turns in the corpus that finished with NO answer have silences of
+        p50 121.1s, p90 319.6s, max 688.6s: the same range the WORKING turns
+        occupy, with 42 of the 89 under 120s. There is no threshold that keeps
+        the failures and lets the work through, so the only defensible choice is
+        the one that never kills work and leaves the failures to the exit-code
+        and empty-capture checks that actually identify them.
+
+        Re-derive all of it with:
+            tools/probes/opencode-silence.py <a copy of opencode.db>
+        and the reasoning is written up in
+            docs/assessments/2026-09-04-stall-threshold-measured.md
+
+        $Variant IS STILL ACCEPTED AND DELIBERATELY IGNORED. Every caller passes
+        it, it is still echoed in the "[opencode] Stall threshold:" line so the
+        operator can see what ran, and dropping the parameter would be a
+        signature change for no gain. What it no longer does is decide
+        arithmetic. Removing that dependency is the point of the rewrite.
     #>
     [CmdletBinding()]
     param(
@@ -127,52 +211,25 @@ function Resolve-OpencodeStallPlan {
         [string]$Variant,
         [long]$BundleBytes = 0
     )
-    $variantBaseMs = switch ($Variant) {
-        # 'xhigh' and 'max' are the SAME budget deliberately. They are two
-        # providers' names for "think as long as you like", not two tiers:
-        # opencode-go/muse-spark declares minimal/low/medium/high/xhigh, while
-        # google/* and opencode-go/deepseek-* declare high/max. A model declares
-        # one vocabulary or the other, never both (checked across the whole
-        # registry 2026-09-04), so nothing has to rank them against each other.
-        'xhigh'  { 600000 }
-        'max'    { 600000 }
-        'high'   { 300000 }
-        default  { 120000 }
-    }
-    # THE 20ms/TOKEN RULE IS IMPLEMENTED TWICE, and this is the copy that has to
-    # guess. Get-EraDispatchPlan (workflow.ps1, `$bundleScaledSec = [int]($BundleTokens
-    # * 0.02)`) applies the same 20ms/token to the REAL repomix token count; this
-    # adapter is handed only -BundleBytes, so it re-derives tokens from a ratio.
-    # Named independently by the gemini and muse-spark seats of the 2026-09-02
-    # panel, both of which framed it as "bytes/4 here vs the measured 3.369
-    # elsewhere".
-    #
-    # SWAPPING THE CONSTANT IS NOT THE FIX, and that is a measurement, not an
-    # opinion. The ratio is not a property of repomix, it is a property of the
-    # bundle: 2,396,233 B / 711,253 tok = 3.369 on the bundle 3.369 was measured
-    # on, and 532,112 B / 146,167 tok = 3.640 on the bundle the panel that raised
-    # this ran over. Eight percent apart. Either literal is wrong for some bundle.
-    #
-    # WHAT IT COSTS TODAY, measured on that same round: the adapter estimated
-    # 133,028 tokens where repomix counted 146,167, so `wantedMs` differed by 10%
-    # -- and the stall threshold was IDENTICAL, because at 532 KB both values are
-    # far above $ceilingMs and both clamp. The divergence only reaches the
-    # threshold in the unclamped regime (small bundle, large budget): 60,000 B at
-    # any budget gives 300s here against 356s from the real count. So the live
-    # cost is a stall window up to ~16% tighter than the dispatcher's own model of
-    # the same bundle, plus a token count in the "[opencode] Stall threshold:"
-    # line that disagrees with the round's own "Bundle ready. Tokens:" by 10%.
-    #
-    # THE FIX IS TO PASS THE REAL COUNT DOWN, not to pick a better constant --
-    # the dispatcher already has it. That means a new parameter on every adapter
-    # (the dispatch ScriptBlock passes its arguments uniformly; see the
-    # accepted-and-ignored -OpencodeProvider in agy.ps1), which is a change to
-    # live dispatch for a heuristic whose measured effect on the round that found
-    # it was zero. Left deliberately, with the numbers, rather than done in
-    # passing.
+    # THE BYTES->TOKENS RATIO NO LONGER MATTERS MUCH, and that is a consequence
+    # of the rewrite rather than a separate fix. Get-EraDispatchPlan has the real
+    # repomix count; this adapter is handed only -BundleBytes and re-derives from
+    # a ratio, and the 2026-09-02 panel raised the divergence (bytes/4 here vs a
+    # measured 3.369 elsewhere) from two seats independently. The ratio is not a
+    # property of repomix but of the bundle -- 2,396,233 B / 711,253 tok = 3.369
+    # on one, 532,112 B / 146,167 tok = 3.640 on another, eight percent apart --
+    # so no literal is right for every bundle. What changed is the price of being
+    # wrong: the coefficient this feeds went from 20 ms/token to 3, so the same
+    # 10% miscount that used to move the threshold by 10% of a dominant term now
+    # moves it by 10% of a term worth 93s on a 31k-token bundle against a 824s
+    # floor. Passing the real count down is still the correct fix and still needs
+    # a new parameter on every adapter; it is now worth even less than when it
+    # was declined.
     $bundleTokenEst = [int]($BundleBytes / 4)
-    $bundleScaledMs = [long]$bundleTokenEst * 20
-    $wantedMs       = [Math]::Max([long]$variantBaseMs, $bundleScaledMs)
+
+    $prefillMs    = 120000L + ([long]$bundleTokenEst * 3)
+    $generationMs = 704000L
+    $wantedMs     = $prefillMs + $generationMs
 
     # Leave the same 30s margin the escalation used, so the stall throw has room
     # to fire cleanly before our own deadline. Floored so an absurdly small
@@ -193,6 +250,8 @@ function Resolve-OpencodeStallPlan {
         CeilingMs        = [int]$ceilingMs
         Clamped          = $clamped
         BundleTokenEst   = $bundleTokenEst
+        PrefillMs        = [int]$prefillMs
+        GenerationMs     = [int]$generationMs
     }
 }
 
@@ -977,10 +1036,9 @@ function Invoke-OpencodeReview {
         $stderrCopyTask = $opencodeProc.StandardError.BaseStream.CopyToAsync($stderrSink)
 
         # Stall detector: poll every 10s; kill if no output growth for the
-        # variant-aware threshold OR if the global TimeoutSec is exceeded.
-        # Reasoning-heavy variants ('max') can think silently for minutes before the
-        # first token, so the base scales with the variant; a bundle-size overlay
-        # (20ms/token ~ 50 tok/sec) adds headroom for large bundles. Max of the two.
+        # measured threshold OR if the global TimeoutSec is exceeded. The
+        # threshold is prefill + generation, both measured against opencode.db --
+        # see Resolve-OpencodeStallPlan, which carries the numbers.
         # ONE definition of the poll interval, shared with the MinRunSec floor
         # that is derived from it (Get-OpencodeMinRunSec). It was a bare literal
         # here while the floor was a bare literal 15 in Resolve-OpencodeRunBudget.
@@ -994,12 +1052,27 @@ function Invoke-OpencodeReview {
         # adapter's deadlines out of reach on large max-variant bundles.
         $stallPlan        = Resolve-OpencodeStallPlan -TimeoutSec $effectiveTimeoutSec -Variant $chosenVariant -BundleBytes $bundleSize
         $stallThresholdMs = $stallPlan.StallThresholdMs
+        # THE CLAMP IS NOW THE NORMAL CASE, so it can no longer carry the warning
+        # on its own. The measured appetite floors at 824s and era's seat budgets
+        # are routinely 600-900s, which means the old "-- CLAMPED ... raise the
+        # reviewer timeout" line would print on almost every healthy round. A
+        # warning on every round is a warning nobody reads -- the same trap the
+        # "Budget after the run queue" line is suppressed for above.
+        #
+        # So the clamp is reported as a fact, and the WARNING is attached to the
+        # thing that is actually worth knowing: whether the clamped threshold has
+        # dropped into the range where it kills work. 571s is where that starts,
+        # measured -- the longest silent stretch any productive turn on an era
+        # seat has taken in the local opencode.db is 570.2s, over 1,078 of them.
+        $killRiskSec = 571
         if ($stallPlan.Clamped) {
-            Write-Host ("[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok) " +
-                "-- CLAMPED from $($stallPlan.WantedMs/1000)s to fit the ${effectiveTimeoutSec}s budget. A silent think longer than " +
-                "$($stallThresholdMs/1000)s will be called a stall; raise the reviewer timeout if this variant needs longer.")
+            $line = "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok) -- the ${effectiveTimeoutSec}s budget clamped it from $($stallPlan.WantedMs/1000)s."
+            if (($stallThresholdMs / 1000) -lt $killRiskSec) {
+                $line += " WARNING: below ${killRiskSec}s a real answer can be killed mid-think -- measured, the longest silent stretch a productive opencode seat has taken here is 570.2s. Raise the reviewer timeout."
+            }
+            Write-Host $line
         } else {
-            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok); budget=${effectiveTimeoutSec}s of ${TimeoutSec}s."
+            Write-Host "[opencode] Stall threshold: $($stallThresholdMs/1000)s (variant=$chosenVariant, bundle=$($stallPlan.BundleTokenEst)tok = $($stallPlan.PrefillMs/1000)s prefill + $($stallPlan.GenerationMs/1000)s generation); budget=${effectiveTimeoutSec}s of ${TimeoutSec}s."
         }
 
         # PHASE 1 MUST NOT CONTRADICT THE STALL PLAN. Round-8 (deepseek-flash)
@@ -1024,7 +1097,7 @@ function Invoke-OpencodeReview {
         if (-not $env:ERA_OPENCODE_FIRST_TOKEN_SEC) {
             $planSilenceSec = [int]($stallThresholdMs / 1000)
             if ($planSilenceSec -gt $firstTokenSec) {
-                Write-Host "[opencode] First-token deadline raised ${firstTokenSec}s -> ${planSilenceSec}s to match the silence this variant is expected to need (variant=$chosenVariant). Set ERA_OPENCODE_FIRST_TOKEN_SEC to override."
+                Write-Host "[opencode] First-token deadline raised ${firstTokenSec}s -> ${planSilenceSec}s to match the silence the stall plan already permits (variant=$chosenVariant). Set ERA_OPENCODE_FIRST_TOKEN_SEC to override."
                 $firstTokenSec = $planSilenceSec
             }
         }

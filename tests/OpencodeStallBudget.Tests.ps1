@@ -1,7 +1,8 @@
-# opencode's stall detector must fire INSIDE the budget it was actually given.
+# opencode's stall detector must fire INSIDE the budget it was actually given,
+# and its appetite must come from a measurement rather than a guess.
 #
-# Interim round (deepseek-flash), R2 -- confirmed by the log of the very round
-# that reported it:
+# PART ONE -- THE CLAMP (2026-09-02). Interim round (deepseek-flash), R2,
+# confirmed by the log of the very round that reported it:
 #
 #   [dispatch] Scaled TimeoutSec 600s -> 1800s for 174313-token bundle.
 #   [opencode] Escalating timeout from 1800s to 3152s (variant=max,
@@ -28,6 +29,30 @@
 # Ordering this restores, for every bundle size:
 #     stall threshold  <  adapter TimeoutSec  <  dispatcher TimeoutSec + 30
 #
+# PART TWO -- THE APPETITE (2026-09-04). The clamp decided what to do with the
+# appetite; it never asked where the appetite came from. It came from four
+# guessed constants -- 600s for max/xhigh, 300s for high, 120s otherwise, plus
+# `bundleTokens x 20ms` -- and measuring them against 8,199 assistant turns in
+# the local opencode.db refuted both halves:
+#
+#   * the variant name predicts nothing. muse-spark peaks at 194.7s of silence
+#     over its 421 productive turns (that worst case is an 'xhigh' one), while
+#     deepseek-v4-flash at 'max' reaches 570.2s over 655. The MODEL differs, not
+#     the knob. And the 120s fallback
+#     tier kills 8.07% of productive era-seat turns, which is the 2026-08-22
+#     ox-alpha incident with a number on it.
+#   * the bundle overlay multiplied an INPUT token count by a GENERATION rate
+#     (its own comment: "20ms/token ~ 50 tok/sec"). Silence vs input tokens is
+#     r = +0.10; silence vs OUTPUT tokens is r = +0.83. Prefill measures
+#     0.3 ms/token at the median -- the overlay charged ~65x that.
+#
+# Replaced by two terms that each carry their measurement:
+#     PREFILL    = 120,000 ms + 3 ms x bundle token
+#     GENERATION = 704,000 ms = 32,000 output tokens x 22 ms/token
+# giving an 824s floor, above all 2,038 productive turns in the corpus (max
+# 785.0s). Re-derive with tools/probes/opencode-silence.py; the reasoning is in
+# docs/assessments/2026-09-04-stall-threshold-measured.md.
+#
 # Run:
 #   pwsh -Command "Invoke-Pester -Path tests/OpencodeStallBudget.Tests.ps1 -Output Detailed"
 
@@ -39,20 +64,9 @@ BeforeAll {
 
 Describe 'Resolve-OpencodeStallPlan' -Tag Unit {
 
-    It 'reproduces the measured round: a 624 KB bundle at variant max' {
-        # The real numbers from the interim round.
-        $p = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 624465
-        $p.BundleTokenEst | Should -Be 156116
-        $p.WantedMs | Should -Be 3122320 -Because 'the raw appetite is unchanged; only what we do with it changes'
-        $p.Clamped  | Should -BeTrue
-        # The thing that was broken: it must now fit inside the budget.
-        ($p.StallThresholdMs / 1000) | Should -BeLessThan 1800 `
-            -Because 'a threshold beyond the budget can never fire'
-    }
-
     It 'never lets the stall threshold reach the budget, at any size or variant' {
         foreach ($to in @(120, 600, 1800)) {
-            foreach ($v in @('max','high','medium')) {
+            foreach ($v in @('max','xhigh','high','medium','default')) {
                 foreach ($bytes in @(0, 50KB, 624465, 8MB)) {
                     $p = Resolve-OpencodeStallPlan -TimeoutSec $to -Variant $v -BundleBytes $bytes
                     ($p.StallThresholdMs / 1000) | Should -BeLessThan $to `
@@ -62,43 +76,22 @@ Describe 'Resolve-OpencodeStallPlan' -Tag Unit {
         }
     }
 
-    It 'leaves a small bundle exactly as it was — no clamp, no change' {
-        # Regression guard: the common case must not move. 20,000 bytes is
-        # 5,000 tokens -> 100s of overlay, under the 120s medium base, so the
-        # base wins. (An earlier version of this test used 40,000 bytes and
-        # expected 120000; that was the TEST being wrong about the arithmetic --
-        # 40 KB is 200s of overlay, which correctly dominates the base.)
-        $p = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'medium' -BundleBytes 20000
-        $p.Clamped | Should -BeFalse
-        $p.StallThresholdMs | Should -Be 120000 -Because 'the medium base, untouched'
+    It 'still fits the round that motivated the clamp inside its budget' {
+        # The interim round's 624 KB bundle at the dispatcher's 1800s. Under the
+        # old arithmetic the appetite was 3122.32s and the clamp was the only
+        # thing keeping it reachable; under the measured one it is 1292.348s and
+        # fits on its own. The invariant the clamp exists for is asserted either
+        # way -- that is the point of asserting the invariant and not the number.
+        $p = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 624465
+        $p.BundleTokenEst | Should -Be 156116
+        ($p.StallThresholdMs / 1000) | Should -BeLessThan 1800 `
+            -Because 'a threshold beyond the budget can never fire'
+        $p.Clamped | Should -BeFalse -Because '1292.348s already fits inside 1770s'
     }
 
-    It 'is byte-identical to the ORIGINAL formula whenever no clamp is needed' {
-        # The change must be a no-op for every case that already fit. This
-        # replicates the pre-fix arithmetic verbatim and requires agreement.
-        foreach ($to in @(600, 1800)) {
-            foreach ($v in @('max','high','medium')) {
-                foreach ($bytes in @(0, 1KB, 20000, 40000, 100KB)) {
-                    $baseMs   = switch ($v) { 'max' {600000} 'high' {300000} default {120000} }
-                    $scaledMs = [int]($bytes / 4) * 20
-                    $original = [Math]::Max($baseMs, $scaledMs)
-                    $p = Resolve-OpencodeStallPlan -TimeoutSec $to -Variant $v -BundleBytes $bytes
-                    if (-not $p.Clamped) {
-                        $p.StallThresholdMs | Should -Be $original `
-                            -Because "unclamped cases must not move (to=$to v=$v bytes=$bytes)"
-                    }
-                }
-            }
-        }
-    }
-
-    It 'keeps the variant bases when they fit' {
-        (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max'  -BundleBytes 0).StallThresholdMs | Should -Be 600000
-        (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'high' -BundleBytes 0).StallThresholdMs | Should -Be 300000
-    }
-
-    It 'reports when it clamped, so the operator learns the budget is too small' {
-        $tight = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 624465
+    It 'still clamps when the budget genuinely cannot fund the appetite' {
+        # Non-vacuity for the clamp: a seat that queued behind the run mutex.
+        $tight = Resolve-OpencodeStallPlan -TimeoutSec 300 -Variant 'max' -BundleBytes 624465
         $tight.Clamped   | Should -BeTrue
         $tight.WantedMs  | Should -BeGreaterThan $tight.StallThresholdMs
         $tight.CeilingMs | Should -Be $tight.StallThresholdMs
@@ -108,6 +101,65 @@ Describe 'Resolve-OpencodeStallPlan' -Tag Unit {
         $p = Resolve-OpencodeStallPlan -TimeoutSec 40 -Variant 'max' -BundleBytes 8MB
         $p.StallThresholdMs | Should -BeGreaterThan 0
         ($p.StallThresholdMs / 1000) | Should -BeLessThan 40
+    }
+}
+
+Describe 'the appetite is the measurement, not the variant' -Tag Unit {
+
+    It 'gives every variant the same answer' {
+        # The finding that removed the tiers: silence tracks the MODEL and the
+        # amount it generates, not the reasoning-effort knob. Two providers'
+        # vocabularies ('high'/'max' vs 'minimal'..'xhigh'), an unknown name and
+        # the no-flag fallback must all land on the same number.
+        foreach ($bytes in @(0, 20000, 124188, 624465)) {
+            $ref = (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes $bytes).StallThresholdMs
+            foreach ($v in @('xhigh','high','medium','low','minimal','default','totally-bogus-zzz','')) {
+                (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant $v -BundleBytes $bytes).StallThresholdMs |
+                    Should -Be $ref -Because "variant '$v' must not move the threshold (bytes=$bytes)"
+            }
+        }
+    }
+
+    It 'floors at the measured 824s, whatever the bundle' {
+        # 120s prefill floor + 704s generation. Checked, not asserted: no
+        # productive turn in the 2,038-turn corpus has a silent stretch longer
+        # than 824s, and the largest is 785.0s.
+        $p = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'default' -BundleBytes 0
+        $p.PrefillMs     | Should -Be 120000
+        $p.GenerationMs  | Should -Be 704000
+        $p.WantedMs      | Should -Be 824000
+        $p.Clamped       | Should -BeFalse
+    }
+
+    It 'clears the largest silence any productive era seat has taken' {
+        # 570.2s, deepseek-v4-flash, over 1,078 productive turns on models era
+        # dispatches. A threshold at or under this kills real answers; the whole
+        # rewrite exists because the shipping value for 'high' was 300s.
+        foreach ($bytes in @(0, 20000, 124188)) {
+            (Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'high' -BundleBytes $bytes).StallThresholdMs |
+                Should -BeGreaterThan 570200 -Because "bytes=$bytes must not kill a working seat"
+        }
+        # ...and the value this replaced would have failed that, which is the
+        # non-vacuity the rest of the file needs.
+        $oldHighBase = [Math]::Max(300000, [int](20000 / 4) * 20)
+        $oldHighBase | Should -BeLessThan 570200
+    }
+
+    It 'charges prefill 3 ms per bundle token, not 20' {
+        # The overlay's constant was a generation rate applied to an input count.
+        # Measured prefill: 0.3 ms/token at the median, 2.4 ms/token at the worst
+        # single observation (229.2s at ~95k input).
+        $a = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 400000
+        $b = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 800000
+        ($b.WantedMs - $a.WantedMs) | Should -Be ((100000 - 50000) * 3 + (50000 * 3)) `
+            -Because '100,000 extra tokens at 3 ms each'
+        $a.PrefillMs | Should -Be (120000 + 100000 * 3)
+    }
+
+    It 'reports the two terms so the log can show its working' {
+        $p = Resolve-OpencodeStallPlan -TimeoutSec 1800 -Variant 'max' -BundleBytes 124188
+        ($p.PrefillMs + $p.GenerationMs) | Should -Be $p.WantedMs
+        $script:Src | Should -Match 'prefill \+ \$\(\$stallPlan\.GenerationMs/1000\)s generation'
     }
 }
 
@@ -128,6 +180,15 @@ Describe 'the adapter no longer grants itself time the dispatcher will not wait'
         # same house rule the grading bundle just had to learn.
         $script:Src | Should -Match '\[opencode\] Stall threshold'
     }
+
+    It 'does not warn on every healthy round' {
+        # The clamp is now the NORMAL case (824s floor vs 600-900s seat budgets),
+        # so the warning had to move off it or become noise nobody reads. It is
+        # attached to the clamped threshold falling under 571s instead -- the
+        # measured line below which a working seat gets killed.
+        $script:Src | Should -Match '\$killRiskSec = 571'
+        $script:Src | Should -Match 'if \(\(\$stallThresholdMs / 1000\) -lt \$killRiskSec\)'
+    }
 }
 
 Describe 'Phase 1 must not contradict the stall plan' -Tag Unit {
@@ -137,12 +198,11 @@ Describe 'Phase 1 must not contradict the stall plan' -Tag Unit {
     # kills any process with zero output after $firstTokenSec (default 120s) and
     # is entirely variant-blind.
     #
-    # But the stall plan's premise is that a 'max' variant may think silently for
-    # minutes before its first token, and it grants 600s of base appetite. So on
-    # exactly the case the clamp was built for:
+    # But the stall plan's premise is that a run may think silently for minutes
+    # before its first token. So on exactly the case the clamp was built for:
     #
-    #   stall threshold (max, 624 KB bundle) : 1770s of permitted silence
-    #   Phase-1 default                      :  120s -> kills first
+    #   stall threshold (624 KB bundle, 1800s budget) : 1292s of permitted silence
+    #   Phase-1 default                               :  120s -> kills first
     #
     # A model thinking silently for 121s was killed and labelled "possible
     # limit/popup block" -- the same mis-attribution the clamp exists to prevent

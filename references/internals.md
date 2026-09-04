@@ -93,7 +93,7 @@ degraded panel reads as a real one.
 
 Opencode models can expose reasoning-effort variants (`low`/`medium`/`high`/`max`). The adapter resolves one per invocation from `_registry.json` (populated by `update-models`), picking the highest-effort tier present (`max → high → medium → low`), falling back to `"default"` for models that declare none (e.g. `glm-5.1`).
 
-The resolved variant is **passed via the `--variant` CLI flag** and used to widen the stall threshold for reasoning-heavy variants. It is NOT written to `model.json` by default (the old pre-run swap was removed — see §5 above). Caveat: opencode exposes no reasoning telemetry, so `--variant`'s real effect is unverifiable; the optional `ERA_OPENCODE_VARIANT_STATE=1` insurance also writes the state-file variant entry for belt-and-suspenders.
+The resolved variant is **passed via the `--variant` CLI flag**. It no longer affects the stall threshold: measured over 8,199 turns of local `opencode.db` history, the variant name predicts nothing about how long a run stays silent (`muse-spark` peaks at 194.7s across all its variants, `deepseek-v4-flash`/`max` at 570.2s), so `Resolve-OpencodeStallPlan` derives the threshold from prefill + generation instead — see `docs/assessments/2026-09-04-stall-threshold-measured.md`. It is NOT written to `model.json` by default (the old pre-run swap was removed — see §5 above). Caveat: opencode exposes no reasoning telemetry, so `--variant`'s real effect is unverifiable; the optional `ERA_OPENCODE_VARIANT_STATE=1` insurance also writes the state-file variant entry for belt-and-suspenders.
 
 ---
 

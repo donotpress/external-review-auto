@@ -46,12 +46,25 @@ Describe 'deepseek-v4-flash is not asked for maximum reasoning effort' -Tag Unit
         $v | Should -Contain 'high'
     }
 
-    It 'loses no stall budget on a real bundle by dropping max' {
-        # The whole cost of this change would be a tighter stall window. It is not:
-        # above ~30k tokens the bundle-size overlay dominates the variant base.
-        $max  = Resolve-OpencodeStallPlan -TimeoutSec 702 -Variant 'max'  -BundleBytes 124188
-        $high = Resolve-OpencodeStallPlan -TimeoutSec 702 -Variant 'high' -BundleBytes 124188
-        $high.StallThresholdMs | Should -Be $max.StallThresholdMs
+    It 'loses no stall budget by dropping max' {
+        # The whole cost of this change would be a tighter stall window.
+        #
+        # WHEN THIS WAS WRITTEN THE CLAIM ONLY HELD FOR BIG BUNDLES, and the note
+        # in _registry.json said so in a way that waved the small ones through:
+        # "only a tiny bundle moves, 570s -> 300s, still generous". It was not
+        # generous. 26 of the 655 productive deepseek-v4-flash turns in the local
+        # opencode.db -- 3.97% -- go silent for longer than 300s, up to 570.2s.
+        # On a small bundle, dropping 'max' would have killed about one working
+        # round in twenty-five.
+        #
+        # Fixed at the root on 2026-09-04 rather than papered over here: the
+        # stall plan no longer derives anything from the variant name, so the
+        # claim now holds at EVERY size instead of only above ~30k tokens.
+        foreach ($bytes in @(0, 4096, 124188, 624465)) {
+            $max  = Resolve-OpencodeStallPlan -TimeoutSec 702 -Variant 'max'  -BundleBytes $bytes
+            $high = Resolve-OpencodeStallPlan -TimeoutSec 702 -Variant 'high' -BundleBytes $bytes
+            $high.StallThresholdMs | Should -Be $max.StallThresholdMs -Because "bytes=$bytes"
+        }
     }
 
     It 'records WHY, so the next person does not put max back' {

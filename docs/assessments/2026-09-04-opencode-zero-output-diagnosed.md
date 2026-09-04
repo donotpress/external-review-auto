@@ -54,10 +54,13 @@ question rather than "why does it intermittently fail".
 
 
 `deepseek-v4-flash` no longer asks for `max`; its map entry is `["low","high"]`.
-`high` is declared by opencode for that model, its useful answers are ~3k tokens,
-and the change costs nothing in stall budget on any real bundle — above ~30k tokens
-the bundle-size overlay dominates the variant base (measured 620.94s either way at
-124,188 bytes). Only a tiny bundle moves, 570s → 300s.
+`high` is declared by opencode for that model and its useful answers are ~3k
+tokens. The claim that followed — that the change "costs nothing in stall budget on
+any real bundle … only a tiny bundle moves, 570s → 300s" — was **half wrong**. True
+for a big bundle, where the overlay dominates (620.94s either way at 124,188
+bytes); false for a small one, where 300s kills **3.97%** of this model's
+productive turns, up to 570.2s. Moot as of the same day: the stall plan no longer
+derives anything from the variant name.
 
 `medium` went too: opencode never declared it, and it was inert only because the
 preference loop stopped at `max` first.
@@ -66,25 +69,50 @@ preference loop stopped at `max` first.
 validation run at `high` came back with zero stdout and I reported the fix as
 falsified. That was wrong. `opencode.db` shows the run's final turn as
 `completed=NO, output=0` — **era's own stall detector tree-killed it** at 620.94s
-of no output growth while the model was still generating. It is inconclusive, not
-negative. I read "no stdout" and concluded "the model produced nothing" without
-checking whether the process was killed or self-terminated — the exact distinction
-this entire investigation turns on, and the second time in one session I drew a
-confident conclusion from a partial read.
+of no output growth. It is inconclusive, not negative. I read "no stdout" and
+concluded "the model produced nothing" without checking whether the process was
+killed or self-terminated — the exact distinction this entire investigation turns
+on, and the second time in one session I drew a confident conclusion from a
+partial read.
+
+> **CORRECTED 2026-09-04, and it is the same error a third time.** This paragraph
+> and the section below both said the model was *"still generating"* when era
+> killed it. It was not. That is an inference from `output=0`, not a reading of
+> the record. The turn (`msg_06ba0f905001C6IJETWbMVPtzs`) holds four parts:
+> `step-start`, `reasoning` with `text=""` and no `time.end`, then — **352 seconds
+> later** — another `step-start` and another empty `reasoning`. Nothing arrived in
+> between. And a turn killed *while generating* does not look like that either:
+> opencode persists reasoning incrementally, so five never-completed turns in the
+> same database still hold 2,999 to 105,568 characters of partial reasoning. This
+> one kept **zero** across 633s and two step boundaries, while the sibling run six
+> minutes earlier wrote 114,762 characters in 457.3s. era killed a run that was already in the zero-output
+> state — the kill was correct. Full working:
+> `docs/assessments/2026-09-04-stall-threshold-measured.md`.
 
 ## A separate defect the validation run exposed
 
 **era's stall detector counts silent reasoning as a stall.** The threshold measures
 OUTPUT GROWTH, and a model in a long reasoning phase produces none — no stdout, no
-new tool narration. The successful `max` runs reasoned 188.1s, 342.5s and 458.6s
-and finished inside the 620.94s threshold. The validation run did not, and was
-killed for working.
+new tool narration.
 
-This is a distinct failure mode from everything else in the population, and it
-means an unknown share of historical "seat produced nothing" losses may be era
-killing healthy runs rather than models failing. It is NOT fixed here: raising the
-threshold trades against the real stalls it was built to catch, and that trade
-needs its own measurement.
+> **CORRECTED 2026-09-04.** This section originally read: *"The successful `max`
+> runs reasoned 188.1s, 342.5s and 458.6s and finished inside the 620.94s
+> threshold. The validation run did not, and was killed for working."* Two things
+> in that are wrong. **The 458.6s run was not successful** — it is the
+> `finish=length`, `output=32000`, zero-text turn this very document is about, and
+> it is where the `exitfail` snapshot came from. Two of the three era-repro
+> deepseek trials succeeded, at 188.1s and 342.5s. And **the validation run was not
+> killed for working**; see the correction above.
+
+The defect is real anyway, and it was measured properly rather than argued: the
+threshold was set by four guessed constants plus an overlay that multiplied an
+INPUT token count by a GENERATION rate. Against 8,199 turns of local history, the
+`high` base era's deepseek seat now uses — 300s — kills 3.97% of that model's
+productive turns, and the `default` base of 120s kills 8.07% of all era-seat
+productive turns. Replaced with a measured `prefill + generation` rule flooring at
+824s, above every one of the 2,038 productive turns in the corpus.
+**Full working, with the distributions and the cost of the other direction:**
+`docs/assessments/2026-09-04-stall-threshold-measured.md`.
 
 ## Three defects found in the same round, all confirmed
 
@@ -162,6 +190,11 @@ so a cheap muse-only variant tests nothing.
 
 **The better target is the defect this hunt exposed**, not the hunt itself: era's
 stall detector counts silent reasoning as a stall, and it is fully within our
-control. Successful runs reasoned 188.1s, 342.5s and 458.6s inside a 620.94s
-threshold; the validation run exceeded it and was killed while still generating.
-Fixing it needs a distribution of real reasoning durations, not a guessed number.
+control. Fixing it needs a distribution of real reasoning durations, not a guessed
+number.
+
+> **DONE 2026-09-04**, and the distribution cost nothing — it was already in
+> `opencode.db`. See `docs/assessments/2026-09-04-stall-threshold-measured.md` and
+> `tools/probes/opencode-silence.py`. The premise this paragraph rested on ("the
+> validation run was killed while still generating") did not survive the
+> measurement; the defect did, by a different route.
