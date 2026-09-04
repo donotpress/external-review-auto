@@ -1180,7 +1180,52 @@ function Invoke-OpencodeReview {
             $retryArgs['TimeoutSec']  = $retryBudget.RemainingSec
             return Invoke-OpencodeReview @retryArgs
         }
-        throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr"
+        # SNAPSHOT THIS PATH TOO. This is the throw the read-tool intermittency
+        # actually takes, and until 2026-09-04 it was the only failure exit that
+        # wrote NO forensic artifact -- so the instrument that exists for exactly
+        # this bug had never once fired on it.
+        #
+        # The three detector throws above (firsttoken / stall / timeout) each call
+        # $snapshotPartialAndDebug. This one does not, because it is reached when
+        # the CHILD died on its own: no detector tripped, opencode exited with a
+        # non-zero code (or exited clean with nothing parseable), and era only
+        # noticed afterwards. Measured on direction-paths-2026-09-04 round 2:
+        # deepseek-flash on the read-tool path, 124,188-byte bundle, ran 570.5s,
+        # emitted three "Read <bundle>" tool lines and no review, exit -1. The
+        # stall threshold for that round was ~620.9s, so the detector was right
+        # not to fire -- and the artifact directory stayed empty. Same shape as
+        # the 74,740 B and 79,294 B losses in the watch list.
+        #
+        # It cannot reuse $snapshotPartialAndDebug: that scriptblock reads $stdFile
+        # and $errFile, and the finally above has already read them into
+        # $resultText/$stderr and DELETED them. So write from the strings we still
+        # hold. Best-effort throughout -- a diagnostic must never replace the real
+        # error with an error about diagnostics.
+        $exitTail = ''
+        try {
+            $debugDir = Join-Path ([System.IO.Path]::GetTempPath()) 'opencode-stall-debug'
+            $null = New-Item -ItemType Directory -Path $debugDir -Force -ErrorAction SilentlyContinue
+            $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
+            $pidPart = if ($opencodeProc) { $opencodeProc.Id } else { 'nopid' }
+            $base = Join-Path $debugDir "exitfail-$stamp-pid$pidPart"
+            Set-Content -LiteralPath "$base-stdout.txt" -Value $resultText -Encoding utf8 -ErrorAction SilentlyContinue
+            Set-Content -LiteralPath "$base-stderr.txt" -Value $stderr     -Encoding utf8 -ErrorAction SilentlyContinue
+            Set-Content -LiteralPath "$base-context.txt" -Encoding utf8 -ErrorAction SilentlyContinue -Value @"
+model            : $modelId
+variant          : $chosenVariant
+delivery         : $(if ($useReadTool) { 'read-tool' } else { 'attach' })
+bundle bytes     : $bundleBytes
+exit code        : $exitCode
+wall clock sec   : $([math]::Round($sw.Elapsed.TotalSeconds,1))
+effective budget : ${effectiveTimeoutSec}s of ${TimeoutSec}s
+stall threshold  : $([math]::Round($stallThresholdMs/1000,1))s  (did NOT fire, or this throw would not be the one reporting)
+first-token sec  : $firstTokenSec
+stdout bytes     : $($resultText.Length)
+stderr bytes     : $($stderr.Length)
+"@
+            $exitTail = " Forensic snapshot: $base-*.txt"
+        } catch {}
+        throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr$exitTail"
     }
 
     # Honest content validation: even on a clean exit, the capture can be a
