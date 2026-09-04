@@ -243,10 +243,24 @@ if ($script:UserSuppliedIncludeFiles -and @($IncludeFiles).Count -eq 0) {
 # now DEPEND on it being falsy, so leaving it unset is no longer merely untidy.
 $runSucceeded = $false
 
-$repoRoot = if (Test-Path -LiteralPath ".git") { (Get-Location).Path }
+# .ProviderPath, NOT .Path. For a UNC working directory PowerShell's .Path is
+# PROVIDER-QUALIFIED - measured 2026-09-04 in
+# \\wsl.localhost\Ubuntu\home\joshua\ai-workspace-config, .Path is
+# `Microsoft.PowerShell.Core\FileSystem::\\wsl.localhost\...` while
+# .ProviderPath is the bare UNC path. Every .NET file API treats that prefix as
+# a RELATIVE path and fails, and Reserve-ReviewRound's
+# `[System.IO.File]::Open(..., CreateNew, ...)` throws a DirectoryNotFoundException
+# - which derives from IOException, so its `catch [System.IO.IOException]`
+# swallowed it as "another process claimed this round" and retried 50 times
+# before throwing "Directory may be in an inconsistent state". It was not: no
+# claim file could ever be written. This bites ONLY a repo with no drive-letter
+# path, i.e. one that lives on the WSL disk, which is precisely the kind of repo
+# this tool is run from. On a drive-letter cwd the two are identical (measured),
+# so nothing else changes.
+$repoRoot = if (Test-Path -LiteralPath ".git") { (Get-Location).ProviderPath }
             elseif (Get-Command git -ErrorAction SilentlyContinue) { $(& git rev-parse --show-toplevel 2>$null) }
             else { $null }
-if (-not $repoRoot) { $repoRoot = (Get-Location).Path }
+if (-not $repoRoot) { $repoRoot = (Get-Location).ProviderPath }
 
 function Get-EraGitState {
     <#
