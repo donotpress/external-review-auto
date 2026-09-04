@@ -67,3 +67,106 @@ an hour earlier, which no single-reviewer setup would have caught.
 **Caveat on this round specifically:** the seat with 5/5 was reviewing a diff
 written by the same model family that then triaged it. Treat cross-family verdicts
 as the more informative ones as data accumulates.
+
+---
+
+## 2026-09-04 · `direction-paths-2026-09-04` rounds 2–3 · availability, not precision
+
+These two rounds produced **no findings about era** — they were era pointed at
+another repo — so there are no verdict rows. What they produced is the other half
+of what this file is for, and the first round's totals table already has a column
+for it: **whether the seat came back at all.**
+
+| round | seat | outcome |
+|---|---|---|
+| 2 | `deepseek-flash` (opencode, read-tool) | **did not return** — three `Read <bundle>` lines, no review, exit −1 at 570.5 s on a 124,188-byte bundle |
+| 2 | remaining seats | returned |
+| 3 | all seats | returned |
+
+Round 2's loss is the fifth occurrence of the read-tool zero-output failure and
+the one that finally produced evidence, because `98b7e8a` had just wired the
+`exitfail` snapshot to the fourth throw path the bug actually takes. Diagnosed the
+same night — see the round below.
+
+Measured while writing that fix, and it belongs here because it bounds every
+availability number in this file: across 629 rounds with metadata there are **50
+opencode read-tool seat-runs and 5 failures — 10%**, and they are not confined to
+`deepseek-flash`. `muse-spark` failed in the same round, both at ~70 s. Wall
+clocks across the five: 67.4, 72.8, 395.9, 570.5, 786.9 s.
+
+---
+
+## 2026-09-04 · `opencode-readtool-zero-output` · 2-seat panel on the diagnosis
+
+Two seats, `gemini` (3.1 Pro) and `muse-spark` (identified in that round's
+assessment as Gemini 3.8 Flash). Both were asked whether the
+`max → xhigh` change on muse-spark had increased its exposure to the zero-output
+failure, and both were shown the same evidence.
+
+| seat | # | severity | finding | verdict | how it was settled |
+|---|---|---|---|---|---|
+| gemini | 1 | HIGH | *"**False. Budget exhaustion is physically impossible**"* — no hedge | **FALSE** | sound arithmetic (277 tok/s) against the wrong ceiling of 131,072. At the real 32,000 it is 70 tok/s, entirely ordinary. Settled from `opencode.db`. |
+| gemini | 2 | MEDIUM | the `xhigh` change increased muse-spark's exposure | **FALSE** | token accounting: muse-spark reports reasoning separately (~11k) with output ~3k, so it cannot exhaust an output ceiling the way deepseek can (deepseek folds reasoning into `output`). 3/3 clean at `xhigh`. |
+| gemini | 3 | HIGH | Phase 1 is dead code — the banner on stderr makes `$hasSeenOutput` true at the first poll | **TRUE** | measured on a real capture: 176 stderr bytes against 2 on stdout |
+| muse-spark | 1 | MEDIUM | the ceiling is probably a lower proxy limit, 16k–64k — tagged `[UNVERIFIED — needs inspection of opencode.db]`, with the query named | **TRUE** | 32,000, inside the range it gave. The seat named the exact query that settled it. |
+| muse-spark | 2 | MEDIUM | the `xhigh` change increased muse-spark's exposure | **FALSE** | same token accounting as gemini 2. Both seats wrong, for the same reason: they reasoned about effort level without the accounting, which was in a database neither had. |
+| muse-spark | 3 | HIGH | Phase 1 is dead code | **TRUE** | found independently of gemini 3, same evidence |
+| muse-spark | 4 | MEDIUM | the non-viable-budget `throw` jumps past the mutex release | **TRUE** | the `throw` sits above the `try/finally`; released before the throw now |
+| muse-spark | 5 | LOW | the `exitfail` snapshot has no retention pruning — 3 files per failure, forever | **TRUE** | about code added earlier the same night; prunes at 40 like the stall path |
+| both | — | HIGH | **the fix they proposed for Phase 1** — count stdout only | **DECLINED** | the finding was right and the prescription was wrong: stdout-only would have killed the validation run at 621 s with the wrong diagnosis. Baselining the first poll's byte count instead let the stall detector report it accurately. |
+
+**Round totals (checked findings only):**
+
+| seat | TRUE | FALSE | precision | top-severity finding |
+|---|---|---|---|---|
+| muse-spark | 4 | 1 | 4/5 | TRUE |
+| gemini | 1 | 2 | 1/3 | **FALSE** (HIGH) |
+
+**Two conclusions of this round's own were also wrong, and are corrected in
+`docs/assessments/2026-09-04-stall-threshold-measured.md`:** that era's stall
+detector killed the validation run *"while the model was still generating"* (the
+turn holds two empty reasoning parts 352 s apart and 0 output tokens, and turns
+killed mid-generation demonstrably keep their partial reasoning — the kill was
+correct), and that the successful runs *"reasoned 188.1 s, 342.5 s and 458.6 s"*
+(the 458.6 s run is the `finish=length`, zero-text failure this document is about).
+Neither came from a seat. Both are mine, and both are the same error the round
+already caught itself making twice: a confident conclusion from a partial read.
+
+---
+
+## Across rounds: the temperament gap
+
+The most useful thing in this file is not any one seat's precision. It is that the
+same shape keeps recurring:
+
+**`gemini` states a mechanism with full confidence and no hedge, and the mechanism
+does not hold. `muse-spark` marks what it has not checked, and names the
+measurement that would settle it.**
+
+Two reproductions are sourced inside this repository:
+
+| round | gemini | muse-spark |
+|---|---|---|
+| 2026-09-02 `era-f12-and-two-gaps` | top finding HIGH, **FALSE**, stated flatly — the assignment it says is missing is on the very next line | top finding CRITICAL, **FALSE** too; but its `L?` finding was written as a bounded risk rather than a claim, and measuring it (zero new non-frame flags across 108 responses) is what let it be declined with a number instead of an argument |
+| 2026-09-04 `opencode-readtool-zero-output` | *"physically impossible"*, unhedged, **wrong** | *"probably a lower proxy limit (16k–64k)"*, tagged `[UNVERIFIED]` with the query named, **right** |
+
+`docs/assessments/2026-09-04-opencode-zero-output-diagnosed.md` calls this "the
+same temperament gap as the previous three rounds". **That claim is recorded here,
+not re-derived** — those three rounds predate this ledger and their findings were
+never written down per seat, which is the gap this file exists to close going
+forward. Do not cite it as five reproductions; two are auditable.
+
+**Why it matters and what it costs.** On the 2026-09-04 round the unhedged
+rejection would have closed the investigation — the ceiling story is the whole
+diagnosis, and gemini said it was physically impossible. n is small and this cannot
+rank the seats on precision alone. What it can say, because it is a count, is that
+**both of gemini's top-severity findings across the two auditable rounds were
+false**, and in both rounds the hedged item was the one that survived checking.
+Weight the confidence, not just the finding.
+
+**Two standing caveats.** Several of these rounds reviewed diffs written by the
+same model family that then triaged them; cross-family verdicts remain the more
+informative ones. And in the 2026-09-04 round both seats are Gemini-family —
+`2026-09-04-opencode-zero-output-diagnosed.md` identifies `muse-spark` as Gemini
+3.8 Flash and `gemini` as 3.1 Pro — so that round contrasts tiers and temperaments,
+not vendors.
