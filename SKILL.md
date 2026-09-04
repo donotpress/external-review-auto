@@ -292,7 +292,7 @@ When round N's response contains critical issues:
 |---|---|---|
 | Don't run repomix manually then paste | era.ps1 handles bundling, round numbering, metadata, and capture | Always dispatch via era.ps1 |
 | Don't guess the reviewer preset name | Typos fail silently or route to wrong backend | Use resolve.ps1 for natural language, or check the preset table in the Supported backends section |
-| Don't skip triage on round 3+ | Auto-pilot mode kicks in; you stop verifying claims | Validate at least one empirical claim per round |
+| Don't skip triage on round 3+ | Auto-pilot mode kicks in; you stop verifying claims | Validate at least one empirical claim per round, and write the verdict into `docs/assessments/seat-precision-ledger.md` — triage that is never recorded cannot tell you which seat to trust |
 | Don't tell agy-backend reviewers to "read the files" | Triggers repo exploration; the response can be a ~120-char planner preamble instead of a review | Scope it to the bundle: "Review ONLY what is in the bundle. Do NOT open, view, fetch, or read any file **outside** the bundle" (already in the -SpecReview template). The word that matters is *outside* — agy's own delivery mode is `disk-read`, so a blanket ban on reading forbids the only way it ever sees the bundle (that is what the adapter's own prompt used to say; see `docs/assessments/2026-09-02-agy-disk-read-contradiction.md`) |
 | Don't re-bundle everything on round 2+ | 4x more expensive; reviewer re-reads unchanged code | Use `--diff` + curated `-IncludeFiles` |
 | Don't pass absolute paths or paths outside the repo to `-IncludeFiles` | era.ps1 resolves relative to repo root; external paths fail with "not found" | Copy external files into the repo, or reference them in prompt text only |

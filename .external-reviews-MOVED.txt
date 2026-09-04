@@ -1,0 +1,17 @@
+era's own self-review archive was moved out of this skill directory on
+2026-09-01, to  %USERPROFILE%\.claude\era-archive\external-review-auto-selfreviews
+
+Why: Claude Code walks ~/.claude/skills at every session start, and that tree is
+on a 9p mount (/mnt/c). Measured with scripts/perf/opentrace.py in the nellis
+repo: a session start opened 555 distinct paths under ~/.claude/skills, of which
+~206 were this archive's round-N-*.md files. Nothing reads them at session start;
+they are historical output.
+
+Nothing is lost and nothing breaks: era writes .external-reviews into the ROOT OF
+THE REPO IT IS REVIEWING (era.ps1: Join-Path $repoRoot '.external-reviews'), so
+this copy only ever accumulated when era was run against its own repo. If you run
+era on this repo again it will simply create a fresh .external-reviews here.
+The directory is gitignored (.gitignore:2) and had 0 tracked files.
+
+To restore:  Move-Item %USERPROFILE%\.claude\era-archive\external-review-auto-selfreviews `
+                       %USERPROFILE%\.claude\skills\external-review-auto\.external-reviews

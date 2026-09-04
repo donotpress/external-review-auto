@@ -17,3 +17,12 @@ coverage.xml
 
 # Stray crash-recovery backups (should live under $HOME, never the repo)
 *.era-backup
+
+# Hand-made backups and one-off prompt scratch. Untracked files in the repo root
+# are not free: era records every dirty path in each round's manifest, and they
+# keep the dirty-tree gate armed. Ten of these accumulated over a month and became
+# 10 of the 24 git_dirty entries in every self-review round (cleaned 2026-09-04).
+*.bak
+*.bak-*
+*-PROMPT-*.md
+*-EVIDENCE-*.md

@@ -327,6 +327,26 @@ Invoke-Pester -Path tests/                                              # ~100s,
 
 Coverage (325 tests): `Get-AgyTranscriptResponse` (the highest-risk function), the agy retry loop + non-review detector, the cross-adapter process-tree-kill and shareable-sink invariants, the natural-language resolver (incl. the with/via clause acceptance table), empty-bundle/ANSI regexes, registry integrity, env-scrub blocks, and out-of-repo staging (incl. the username-absence privacy assertion). See `tests/README.md` for the full list and when to add tests.
 
+## Releasing
+
+**Tag when something changed for a user of the skill, not on a cadence.** As of
+2026-09-04 this repo had **35 tags across 155 commits** — and the last six were
+1, 1, 1, 3 and 2 commits apart, i.e. a release per commit. That is ceremony: every
+tag carries an annotated body summarising what was found and what is still unknown,
+which is genuinely valuable, and writing one for a two-line docs fix devalues the
+ones that matter.
+
+Tag when: behaviour a caller depends on changed (a default seat, an exit code, a
+delivery ceiling, a refusal), or a finding is significant enough that someone
+should be able to `git show` it standing alone.
+
+Do not tag: docs-only corrections, comment fixes, test-only additions, or the
+follow-up commit that fixes the last one. Let those accumulate and name them in the
+next real release body.
+
+The annotated-tag convention itself stays: body states what was found, what
+changed, and what is still unknown, then `gh release create --verify-tag`.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
