@@ -286,9 +286,20 @@ function Get-OpencodeMinRunSec {
     #
     # ONE value, and it was exactly the old floor -- the boundary
     # OpencodeConstantParity.Tests.ps1 pins as Viable. A seat handed precisely
-    # MinRunSec was killed at its first wake with "no response within 9s --
+    # MinRunSec would be killed at its first wake with "no response within 9s --
     # possible limit/popup block", which is the mis-attribution this whole line
     # of fixes exists to prevent, having billed the bundle prefill on the way in.
+    #
+    # HONEST FOOTNOTE, ADDED LATER THE SAME DAY. When this was written the kill it
+    # describes COULD NOT HAPPEN: Phase 1 is guarded by `-not $hasSeenOutput`, and
+    # $hasSeenOutput was being set true at the first poll of every run by
+    # opencode's startup banner on stderr. The sweep above verified the ARITHMETIC
+    # (lowered 9 < poll 10) and nobody checked whether the branch was reachable --
+    # the same error, one level up, as the finding it was fixing. Phase 1 was
+    # repaired hours later (see the banner-baseline note in the run loop), which
+    # makes this floor load-bearing for real rather than in principle. It is
+    # recorded rather than quietly corrected because "I verified the arithmetic of
+    # a branch that could not execute" is the failure worth remembering.
     #
     # (opus stated the exposure as "every seat under ~50s of effective budget".
     # That is not what the sweep says: at 16 the lowering returns 10 and the
@@ -921,6 +932,19 @@ function Invoke-OpencodeReview {
     # process has been started.
     $runBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec -ElapsedSec $sw.Elapsed.TotalSeconds
     if (-not $runBudget.Viable) {
+        # RELEASE THE MUTEX BEFORE THROWING. It was taken above; the try/finally
+        # that releases it does not open until further down, so this throw used to
+        # jump straight past the release. Found by the muse-spark seat of the
+        # 2026-09-04 panel. The leak self-heals -- a ThreadJob thread ending
+        # abandons the mutex and the next WaitOne gets AbandonedMutexException,
+        # which this adapter catches and treats as acquired -- but that path is
+        # meant to be an anomaly, not the routine way this lock is handed on, and
+        # relying on it hides a real collision if one ever happens.
+        if ($runMutex) {
+            if ($runMutexHeld) { try { $runMutex.ReleaseMutex() } catch {} }
+            try { $runMutex.Dispose() } catch {}
+            $runMutex = $null; $runMutexHeld = $false
+        }
         throw ("opencode: this seat's ${TimeoutSec}s budget was spent waiting for the run lock " +
                "($([int]$sw.Elapsed.TotalSeconds)s in the queue, $($runBudget.RemainingSec)s left). Refusing to start a run the " +
                "dispatcher will abandon before it finishes -- it would return nothing and be recorded as a plain timeout. " +
@@ -1030,6 +1054,7 @@ function Invoke-OpencodeReview {
         $deadline   = [System.Diagnostics.Stopwatch]::StartNew()
         $firstTokenDeadline = [System.Diagnostics.Stopwatch]::StartNew()
         $hasSeenOutput = $false
+        $outputBaseline = $null   # bytes present at the first poll (the banner); see the loop
         # $firstTokenDeadline is a total wall-clock from process start (not a sliding
         # window). Once $hasSeenOutput=$true, Phase 1 is permanently disabled — Phase 2
         # takes over with its own independent stall tracking via $lastGrowth.
@@ -1092,7 +1117,22 @@ function Invoke-OpencodeReview {
 
             $now = $stdoutSink.Length + $stderrSink.Length
 
-            if ($now -gt 0) { $hasSeenOutput = $true }
+            # PHASE 1 WAS DEAD CODE UNTIL 2026-09-04, and both seats of that day's
+            # panel found it independently. `$now` sums stdout AND stderr, and
+            # opencode writes its `> build - <model>` banner to STDERR the moment
+            # it launches -- measured in a real capture: 176 stderr bytes against
+            # 2 on stdout. So `$hasSeenOutput` flipped true at the FIRST poll of
+            # every run that started at all, `-not $hasSeenOutput` was never true
+            # again, and the whole first-token deadline apparatus below (the raise
+            # to the stall plan's silence, the 0.6 lowering) could not fire.
+            #
+            # The banner is proof the process STARTED, which is not what this
+            # guard asks. It asks whether the process is producing anything. So
+            # take the first poll's byte count as the baseline and require growth
+            # BEYOND it. A wedged process sits at the baseline; a working one
+            # moves, because the read-tool path narrates its tool calls to stderr.
+            if ($null -eq $outputBaseline) { $outputBaseline = $now }
+            if ($now -gt $outputBaseline) { $hasSeenOutput = $true }
 
             if (-not $hasSeenOutput -and $firstTokenDeadline.Elapsed.TotalSeconds -gt $firstTokenSec) {
                 try { $opencodeProc.Kill($true) } catch {}
@@ -1207,6 +1247,17 @@ function Invoke-OpencodeReview {
             $null = New-Item -ItemType Directory -Path $debugDir -Force -ErrorAction SilentlyContinue
             $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss-fff')
             $pidPart = if ($opencodeProc) { $opencodeProc.Id } else { 'nopid' }
+            # Prune like $snapshotPartialAndDebug does. Without this the exitfail
+            # path grows the debug directory by 3 files per failure forever --
+            # raised by the muse-spark seat of the 2026-09-04 panel, about code
+            # added earlier the same night.
+            try {
+                $existing = Get-ChildItem -LiteralPath $debugDir -File -ErrorAction SilentlyContinue |
+                            Sort-Object LastWriteTime -Descending
+                if (@($existing).Count -gt 40) {
+                    $existing | Select-Object -Skip 40 | Remove-Item -Force -ErrorAction SilentlyContinue
+                }
+            } catch {}
             $base = Join-Path $debugDir "exitfail-$stamp-pid$pidPart"
             Set-Content -LiteralPath "$base-stdout.txt" -Value $resultText -Encoding utf8 -ErrorAction SilentlyContinue
             Set-Content -LiteralPath "$base-stderr.txt" -Value $stderr     -Encoding utf8 -ErrorAction SilentlyContinue

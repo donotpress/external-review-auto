@@ -135,7 +135,15 @@ Describe 'Phase 1 first-token watchdog env-var parsing' {
     }
 
     It 'updates $hasSeenOutput BEFORE the Phase 1 deadline check (race guard)' {
-        $script:OC | Should -Match 'if \(\$now -gt 0\) \{ \$hasSeenOutput = \$true \}[\s\S]*?if \(\-not \$hasSeenOutput -and \$firstTokenDeadline'
+        # The ordering is the point and still is. The CONDITION changed on
+        # 2026-09-04: it was `$now -gt 0`, which counted opencode's startup banner
+        # on STDERR and so set $hasSeenOutput true at the first poll of every run,
+        # making Phase 1 unreachable. It is now growth beyond the first poll's
+        # baseline. This test pinned the old expression verbatim, so it failed on
+        # the fix rather than on a regression -- pin the ORDERING, which is what it
+        # is named for, not the arithmetic inside it.
+        $script:OC | Should -Match '\$hasSeenOutput = \$true[\s\S]*?if \(\-not \$hasSeenOutput -and \$firstTokenDeadline'
+        $script:OC | Should -Match '\$now -gt \$outputBaseline'
     }
 }
 

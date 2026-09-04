@@ -590,11 +590,10 @@
       "deepseek-v4-flash": {
         "display": "deepseek v4 flash",
         "model_id": "opencode-go/deepseek-v4-flash",
+        "_variants_note": "\u26d4 'max' REMOVED 2026-09-04, and 'medium' with it because opencode never declared it. DIAGNOSED FROM opencode.db, not guessed: under --variant max this model reasons until it hits a 32,000-token OUTPUT ceiling and returns a message whose parts are {step-start, reasoning, step-finish} with NO text part -- so opencode prints nothing to stdout and exits 0, and era sees a clean exit with an empty capture. Two messages in the local opencode.db have output=32000 EXACTLY, and BOTH have 0 text chars; a SUCCESSFUL run on the same bundle came in at 31,942 output tokens, 58 short of failing. deepseek folds reasoning into the output count (its 'reasoning' field reads 0 while output is tens of thousands, unlike muse-spark which reports ~11k separately), so maximum effort can spend the entire ceiling before a single answer token is written. This model's useful answers are ~3k tokens. \u26a0 THE BENEFIT IS UNPROVEN. The single validation run at 'high' was INCONCLUSIVE -- era's own stall detector tree-killed it at 620.94s of no output growth while the model was still generating (opencode.db shows that turn as completed=NO, output=0), so it says nothing about whether 'high' avoids the ceiling. What survives is the correlation above, not a demonstrated cure: this is a reasonable change on token-accounting evidence, and it should not be described as a fix until a run at 'high' is observed finishing on its own. 'high' IS declared by opencode for this model, and costs nothing in stall budget on any real bundle: the bundle-size overlay dominates the variant base above ~30k tokens (measured 620.94s either way at 124,188 bytes; only a tiny bundle moves, 570s -> 300s, still generous).",
         "variants": [
           "low",
-          "medium",
-          "high",
-          "max"
+          "high"
         ]
       },
       "kimi-k2.5": {
