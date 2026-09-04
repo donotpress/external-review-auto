@@ -128,6 +128,13 @@ function Resolve-OpencodeStallPlan {
         [long]$BundleBytes = 0
     )
     $variantBaseMs = switch ($Variant) {
+        # 'xhigh' and 'max' are the SAME budget deliberately. They are two
+        # providers' names for "think as long as you like", not two tiers:
+        # opencode-go/muse-spark declares minimal/low/medium/high/xhigh, while
+        # google/* and opencode-go/deepseek-* declare high/max. A model declares
+        # one vocabulary or the other, never both (checked across the whole
+        # registry 2026-09-04), so nothing has to rank them against each other.
+        'xhigh'  { 600000 }
         'max'    { 600000 }
         'high'   { 300000 }
         default  { 120000 }
@@ -748,7 +755,18 @@ function Invoke-OpencodeReview {
             }
         } catch {} # registry read failure is non-fatal -> 'default'
     }
-    foreach ($preferred in @('max','high','medium','low')) {
+    # STRONGEST FIRST. 'xhigh' was added 2026-09-04 and is not cosmetic: opencode
+    # DOES NOT VALIDATE VARIANT NAMES. Measured that day --
+    # `opencode run --variant totally-bogus-zzz` returns exit 0 and a normal
+    # answer, byte-identical in shape to `--variant max` -- so a variant the model
+    # does not declare is silently ignored, not rejected. muse-spark declares
+    # minimal/low/medium/high/xhigh and NOT 'max', so era asking for 'max' was in
+    # the same class as asking for nonsense: the seat ran at opencode's default
+    # reasoning effort while era believed it had asked for maximum. Because the
+    # failure is silent in both directions, the guard is a test
+    # (OpencodeVariantDeclared.Tests.ps1) and not a runtime check -- there is
+    # nothing at runtime to check against.
+    foreach ($preferred in @('xhigh','max','high','medium','low')) {
         if ($modelVariants -contains $preferred) { $chosenVariant = $preferred; break }
     }
 
@@ -805,7 +823,13 @@ function Invoke-OpencodeReview {
         if ($psi.Environment.ContainsKey($var)) { $null = $psi.Environment.Remove($var) }
     }
 
-    Write-Host "[opencode] run -m $modelId --variant $chosenVariant (attach=$([bool](-not $useReadTool)))"
+    # REPORT WHAT ACTUALLY RAN. This line used to print "--variant $chosenVariant"
+    # unconditionally, including when $chosenVariant is 'default' -- which is the one
+    # case where the flag is NOT passed (see the omit branch above). A log that names
+    # an argument the process did not receive is the same class of defect as a comment
+    # asserting behaviour no code path has: it survives review because it reads true.
+    $variantEcho = if ($chosenVariant -eq 'default') { "(no --variant; opencode's own default)" } else { "--variant $chosenVariant" }
+    Write-Host "[opencode] run -m $modelId $variantEcho (attach=$([bool](-not $useReadTool)))"
 
     $exitCode = -1
     $clean = $null

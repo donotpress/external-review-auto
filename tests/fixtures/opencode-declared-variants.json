@@ -1,0 +1,119 @@
+{
+  "_README": "Snapshot of the variant names opencode DECLARES per model. Captured with `opencode models --verbose` on the date below and committed so OpencodeVariantDeclared.Tests.ps1 can check era's registry against it without a network call. A model listed with [] declares no variants. A model ABSENT from `models` entirely is recorded as null. REFRESH by re-running that command and regenerating this file; a test failure tells you which of the two moved.",
+  "_captured": "2026-09-04",
+  "_command": "opencode models --verbose",
+  "declared": {
+    "google/gemini-2.0-flash": null,
+    "google/gemini-2.0-flash-lite": null,
+    "google/gemini-2.5-flash": [
+      "high",
+      "max"
+    ],
+    "google/gemini-2.5-flash-image": [],
+    "google/gemini-2.5-flash-lite": [
+      "high",
+      "max"
+    ],
+    "google/gemini-2.5-flash-preview-tts": [],
+    "google/gemini-2.5-pro": [
+      "high",
+      "max"
+    ],
+    "google/gemini-2.5-pro-preview-tts": [],
+    "google/gemini-3-flash-preview": [
+      "high",
+      "low",
+      "medium",
+      "minimal"
+    ],
+    "google/gemini-3-pro-preview": null,
+    "google/gemini-3.1-flash-image-preview": [
+      "high",
+      "minimal"
+    ],
+    "google/gemini-3.1-flash-lite": [
+      "high",
+      "low",
+      "medium",
+      "minimal"
+    ],
+    "google/gemini-3.1-flash-lite-preview": null,
+    "google/gemini-3.1-pro-preview": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "google/gemini-3.1-pro-preview-customtools": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "google/gemini-3.5-flash": [
+      "high",
+      "low",
+      "medium",
+      "minimal"
+    ],
+    "google/gemini-embedding-001": [],
+    "google/gemini-flash-latest": [
+      "high",
+      "low",
+      "medium"
+    ],
+    "google/gemini-flash-lite-latest": [
+      "high",
+      "low",
+      "medium",
+      "minimal"
+    ],
+    "google/gemma-4-26b-a4b-it": [
+      "high",
+      "low"
+    ],
+    "google/gemma-4-31b-it": [
+      "high",
+      "low"
+    ],
+    "minimax/MiniMax-M2": [],
+    "minimax/MiniMax-M2.1": [],
+    "minimax/MiniMax-M2.5": [],
+    "minimax/MiniMax-M2.5-highspeed": [],
+    "minimax/MiniMax-M2.7": [],
+    "minimax/MiniMax-M2.7-highspeed": [],
+    "opencode-go/deepseek-v4-flash": [
+      "high",
+      "low",
+      "max"
+    ],
+    "opencode-go/deepseek-v4-pro": [
+      "high",
+      "max"
+    ],
+    "opencode-go/glm-5": null,
+    "opencode-go/glm-5.1": [],
+    "opencode-go/kimi-k2.5": null,
+    "opencode-go/kimi-k2.6": [],
+    "opencode-go/mimo-v2.5": [],
+    "opencode-go/mimo-v2.5-pro": [],
+    "opencode-go/minimax-m2.5": null,
+    "opencode-go/minimax-m2.7": [],
+    "opencode-go/muse-spark-1.2-contributor": [
+      "high",
+      "low",
+      "medium",
+      "minimal",
+      "xhigh"
+    ],
+    "opencode-go/muse-spark-1.3-contributor": [
+      "high",
+      "low",
+      "medium",
+      "minimal",
+      "xhigh"
+    ],
+    "opencode-go/ox-alpha-free": null,
+    "opencode-go/qwen3.5-plus": null,
+    "opencode-go/qwen3.6-plus": [],
+    "opencode-go/qwen3.7-max": []
+  }
+}
