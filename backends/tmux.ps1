@@ -324,26 +324,24 @@ function Invoke-TmuxReview {
         $qSessT = ConvertTo-EraShellQuoted -Value "${session}:"
         $qWin   = ConvertTo-EraShellQuoted -Value $window
         $qDir   = ConvertTo-EraShellQuoted -Value $scratchWsl
-        # NEUTRALISE THE SEAT'S INHERITED TMUX SOCKET. tmux sets TMUX in every
-        # pane it creates, so a seat would inherit era's EPHEMERAL socket --
-        # measured, `TMUX=/tmp/tmux-1000/era-<pid>,15632,0`. Any turn-state
-        # plugin in the seat's CLI then signals into a socket era is about to
-        # destroy, and the failures land in the SHARED
-        # ~/.local/state/tui-workspace/agent-signal.log, which `tui-workspace
-        # check` gates pushes on for every repo on this box. A peer session had a
-        # push refused by exactly that on 2026-09-06.
+        # TMUX IS LEFT ALONE, DELIBERATELY, AND THE FIRST FIX HERE WAS WRONG.
+        # tmux sets TMUX in each pane to ITS OWN socket, which is what we want:
+        # anything the seat signals goes to era's server and dies with it.
         #
-        # `-e TMUX=` was chosen over disabling plugins (`opencode --pure`), which
-        # was the first fix and is on the WRONG AXIS: the invariant is "the seat
-        # must not signal to a socket that will not outlive it", which is a
-        # property of the seat's ENVIRONMENT, not of its plugin set. Those
-        # coincide only while the sole signalling plugin is external. §6 rule 4
-        # would have era ship its OWN turn-end plugin, and no setting of --pure
-        # satisfies both -- on, era loses its own signal; off, the operator's
-        # plugin returns. Clearing TMUX holds on the axis the invariant lives on
-        # and keeps holding when era's plugin arrives, because that plugin's
-        # signal is a FILE in the scratch directory, not a tmux message.
-        # (Diagnosis and the axes argument: a peer session, 2026-09-06.)
+        # An earlier revision passed `-e 'TMUX=' -e 'TMUX_PANE='` to stop seats
+        # signalling at all. It made things WORSE, and a peer session measured the
+        # damage: tmux re-sets TMUX_PANE for the pane regardless, so the seat ran
+        # with TMUX empty and TMUX_PANE=%1 -- and pane ids are PER-SERVER, so
+        # `set-option -p -t %1` then resolved the DEFAULT socket and stamped the
+        # OPERATOR's window. Their `pwsh` and `bash` windows were painted
+        # "working" for 900s at a time, carrying era seats' conversation ids,
+        # because a foreign seat never sends `done`.
+        #
+        # Clearing half of a two-part identity is worse than clearing neither. The
+        # signals are stopped at the SEAT instead (see the registry's launch
+        # lines: `--pure` for opencode, `--settings` for claude), which is also
+        # where era's own turn-end hook will live -- and that one writes a FILE,
+        # so it needs no tmux identity at all.
         #
         # ONE tmux argument for the watchdog: tmux JOINS multiple command
         # arguments and re-runs them through sh, so `-- /bin/sh -c 'sleep 120'`
@@ -359,15 +357,29 @@ function Invoke-TmuxReview {
         # it, which is indistinguishable at the tmux level from a model that
         # crashed instantly. Resolving here makes a missing CLI a LOUD, distinct
         # failure (exit 3) instead.
-        $qBin  = ConvertTo-EraShellQuoted -Value $argvBuilt[0]
-        $qRest = (@($argvBuilt | Select-Object -Skip 1) |
-                  ForEach-Object { ConvertTo-EraShellQuoted -Value $_ }) -join ' '
+        # THE SEAT RUNS UNDER A LOGIN SHELL, via its own script file.
+        # `wsl.exe` gives a NON-LOGIN bash whose PATH is system defaults, and the
+        # tmux server inherits it. Resolving the seat binary's absolute path is
+        # not enough: measured 2026-09-06, `cmdc` is `#!/usr/bin/env node` and
+        # `node` is NOT on that PATH, so the window died instantly with
+        # new-window still returning 0 -- indistinguishable, at the tmux level,
+        # from a model that crashed on startup. opencode never showed it because
+        # its launcher is a compiled ELF binary with no interpreter to find.
+        #
+        # tmux JOINS multiple command arguments into one shell string anyway, so
+        # there is no "exec directly" option to prefer here; a script file is the
+        # form with no quoting left to get wrong.
+        $seatLine = ($argvBuilt | ForEach-Object { ConvertTo-EraShellQuoted -Value $_ }) -join ' '
+        $seatSh   = Join-Path $scratch 'seat.sh'
+        [System.IO.File]::WriteAllText($seatSh, "#!/bin/bash -l`nexec $seatLine`n")
+        $qSeatSh  = ConvertTo-EraShellQuoted -Value ($scratchWsl + '/seat.sh')
+        $qBin     = ConvertTo-EraShellQuoted -Value $argvBuilt[0]
 
         $setup = "set -e`n" +
                  "SEAT_BIN=`$(bash -lc 'command -v '$qBin 2>/dev/null || true)`n" +
                  "if [ -z `"`$SEAT_BIN`" ]; then echo `"era-tmux: seat binary $qBin is not on the login PATH inside WSL`" >&2; exit 3; fi`n" +
                  "tmux -L $qSock new-session -A -d -s $qSess -n era-watchdog $qWatch`n" +
-                 "tmux -L $qSock new-window -d -e 'TMUX=' -e 'TMUX_PANE=' -t $qSessT -n $qWin -c $qDir -- `"`$SEAT_BIN`" $qRest`n"
+                 "tmux -L $qSock new-window -d -t $qSessT -n $qWin -c $qDir -- bash -l $qSeatSh`n"
         $r = Invoke-EraTmuxScript -ScratchDir $scratch -ScriptBody $setup
         if ($r.Rc -eq 3) { throw "the seat CLI '$($argvBuilt[0])' is not installed inside WSL; the transport cannot carry this preset. $($r.Err.Trim())" }
         if ($r.Rc -ne 0) { throw "tmux setup failed (rc=$($r.Rc)): $($r.Err.Trim())" }
@@ -493,7 +505,24 @@ function Invoke-TmuxReview {
                 $qs = ConvertTo-EraShellQuoted -Value $socket
                 $qt = ConvertTo-EraShellQuoted -Value "${session}:$window"
                 $qe = ConvertTo-EraShellQuoted -Value $session
+                # KILL THE WINDOW, PAUSE, THEN THE SERVER -- the pause is the
+                # fix, not politeness. A dying agent's last hooks fire after its
+                # pane closes: with the server already gone they hit a dead
+                # socket, and agent-signal records `set-failed` in the SHARED
+                # ~/.local/state/tui-workspace/agent-signal.log that
+                # `tui-workspace check` gates pushes on, for every repo on this
+                # box. A peer session had a push refused by exactly that.
+                #
+                # Three seconds of a live server absorbs those signals: they land
+                # on era's own window options, which nothing reads, and the server
+                # is destroyed a moment later. This is done at the TRANSPORT level
+                # on purpose -- the per-vendor alternatives do
+                # not generalise (`opencode --pure` disables the plugin era's own
+                # turn-end hook would need; `claude --bare` skips keychain reads
+                # and would break subscription auth on this box, which has no
+                # ANTHROPIC_API_KEY).
                 $teardown = "tmux -L $qs kill-window -t $qt 2>/dev/null`n" +
+                            "sleep 3`n" +
                             "left=`$(tmux -L $qs list-windows -t $qe -F '#{window_name}' 2>/dev/null | grep -v -x 'era-watchdog' | grep -c . || true)`n" +
                             "if [ `"`$left`" = `"0`" ]; then tmux -L $qs kill-server 2>/dev/null; fi`n" +
                             "exit 0`n"

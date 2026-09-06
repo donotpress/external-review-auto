@@ -127,8 +127,50 @@ Describe 'agy kills the whole process tree on stall/timeout (R-C2)' {
 
 Describe 'era.ps1 resolves a default agy settings_value and passes -ResolvedAgyModel' {
     It 'preserves agy_model_family / agy_model_tier in the registryHash copy' {
-        $script:EraSource | Should -Match 'agy_model_family'
-        $script:EraSource | Should -Match 'agy_model_tier'
+        # REWRITTEN 2026-09-06. This used to assert era.ps1's SOURCE contained the
+        # literals `agy_model_family` and `agy_model_tier`, which pinned the
+        # per-field ALLOWLIST era.ps1 used to project the registry with. That
+        # allowlist dropped a field three separate times -- api_base/api_key_env,
+        # then max_bundle_bytes/max_bundle_tokens (found by all four seats of the
+        # 2026-08-31 panel), then tmux_launch -- so it was replaced by a generic
+        # copy of every property. The literals are gone; the guarantee is
+        # stronger, because no field can be omitted at all now.
+        #
+        # So this asserts the BEHAVIOUR instead, by running era.ps1's own
+        # projection over a synthetic agy preset. A source-text check could not
+        # tell "the field is carried" from "the field is named".
+        $registry = [pscustomobject]@{
+            'fake-agy' = [pscustomobject]@{
+                backend          = 'agy'
+                model_id         = 'gemini-x-high'
+                agy_model_family = 'gemini-x'
+                agy_model_tier   = 'high'
+                pricing          = [pscustomobject]@{ input_per_m = 1.0; output_per_m = 2.0 }
+            }
+        }
+        $registryHash = @{}
+        $registry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach-Object {
+            $h = @{}
+            foreach ($f in $_.Value.PSObject.Properties) { $h[$f.Name] = $f.Value }
+            if ($_.Value.pricing) {
+                $h['pricing'] = @{
+                    input_per_m  = $_.Value.pricing.input_per_m
+                    output_per_m = $_.Value.pricing.output_per_m
+                }
+            }
+            $registryHash[$_.Name] = $h
+        }
+        $registryHash['fake-agy']['agy_model_family'] | Should -Be 'gemini-x' `
+            -Because 'Resolve-AgyDefaultModelToken keys the default --model token on the family'
+        $registryHash['fake-agy']['agy_model_tier'] | Should -Be 'high' `
+            -Because 'the tier picks which settings_value that family resolves to'
+    }
+
+    It 'era.ps1 still projects the registry generically (guards the test above)' {
+        # The test above builds its own copy of the projection, so it would keep
+        # passing if era.ps1 stopped copying fields entirely. This pins the real
+        # source to the generic form.
+        $script:EraSource | Should -Match 'foreach \(\$f in \$_\.Value\.PSObject\.Properties\)'
     }
 
     It 'passes the agy model map into Invoke-ReviewerDispatch for per-reviewer default resolution' {
