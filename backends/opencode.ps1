@@ -933,6 +933,45 @@ function Invoke-OpencodeReview {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
 
+    # DO NOT WRAP THIS LAUNCH TO HIDE A CONSOLE WINDOW. It has been proposed once
+    # (a VBS hidden-launch shim) and investigated across three sessions on
+    # 2026-09-05/06 after the operator reported console windows flashing on their
+    # desktop. era was named as a suspect because `cmd.exe /c opencode.cmd ...`
+    # with parent=pwsh.exe is easy to SEE in a process-creation trace.
+    #
+    # era draws nothing the operator can see, and the reason is structural:
+    # pwsh.exe launched from WSL runs in Windows SESSION 0, while the interactive
+    # desktop is session 1. MEASURED 2026-09-06, from session 1 via an on-demand
+    # scheduled task (no human at the keyboard), counting only console-class
+    # windows keyed on pid+class:
+    #
+    #   control  : a console started from session 1 drew a window immediately,
+    #              so the instrument can see consoles
+    #   subject  : 150s of sampling -> ONE new console, and it belonged to an
+    #              unrelated pm2-broker task, not to anything launched via WSL
+    #   incidental control: a mutation sweep was launching .venv python through
+    #              WSL every ~40s throughout that window. ZERO consoles.
+    #
+    # The actual cause was a crash-looping pm2 service (1,193 restarts, each
+    # running `taskkill` without windowsHide, with stdio:'ignore' hiding the
+    # crash). The flash was the crash report.
+    #
+    # THE MEASUREMENT HISTORY IS THE WARNING. Five window-probe results on this
+    # box that day were WRONG and every one looked clean: two of mine from
+    # enumerating windows while in session 0 (a probe that cannot see explorer.exe
+    # reporting "no windows"), one the same, one from a subject that never
+    # launched, and one from keying window identity on TITLE so a browser tab
+    # switch counted as a new window -- that one printed the negation of its own
+    # evidence. None was caught by the number; they were caught by controls, a
+    # marker, and per-window detail. If you are about to change this line on the
+    # strength of a window count, get a positive control first: a zero is only
+    # evidence once the instrument has just proved it can see a one.
+    #
+    # CreateNoWindow above is also already the correct mechanism for a Windows
+    # process launching a Windows process -- it needs no VBS chain -- and it does
+    # not reach opencode's own MCP grandchild anyway, which is spawned from the
+    # operator's opencode.json and is not era's to suppress.
+
     # Scrub agent-context env vars from the child's env block. Defensive against
     # recursion guards in opencode (and any aggregator/proxy it spawns).
     # ProcessStartInfo.Environment is per-child -- does not affect parent.
