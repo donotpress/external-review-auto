@@ -67,6 +67,26 @@ Describe 'Compare-EraSeatContainment' -Tag Unit {
         $r.HeadMoved | Should -BeTrue
     }
 
+    It 'ignores dirt that was already there, so the check survives -AllowDirtyTree' {
+        # The gate at runtimes/era.ps1 refuses a dirty tree by default and
+        # -AllowDirtyTree / ERA_ALLOW_DIRTY=1 waives it. That waiver is about
+        # PROVENANCE -- "round N covers commits X..Y" means nothing when the tree
+        # is dirty -- and it must not also waive containment, or the one flag an
+        # operator reaches for when reviewing uncommitted work would silently
+        # switch off the only check that watches the seats.
+        #
+        # It does not, and this is what makes that true: pre-existing dirt is in
+        # BOTH snapshots, so it diffs away and only what appeared during the
+        # round is left.
+        $before = State -Dirty @(' M src/app.py', '?? notes.md')
+        $after  = State -Dirty @(' M src/app.py', '?? notes.md', '?? seat-wrote-this.py')
+
+        $r = Compare-EraSeatContainment -Before $before -After $after
+
+        $r.Verdict  | Should -Be 'breached'
+        $r.NewDirty | Should -Be @('?? seat-wrote-this.py')
+    }
+
     It 'says unmeasured, not contained, when there is no git state to compare' {
         # Get-EraGitState returns $null outside a work tree and when git is not
         # on PATH. Two nulls compare equal and produce an empty diff, so the

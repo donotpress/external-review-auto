@@ -118,12 +118,20 @@ Describe 'v1.12: default reviewer is the 3-model panel' -Tag Unit {
             Should -Be 'Gemini 3.1 Pro (Low)'
     }
 
-    It 'explicit -Reviewer gemini resolves to Gemini 3.6 Flash via the registry' {
+    It 'explicit -Reviewer gemini resolves to Gemini 3.8 Flash via the registry' {
         $registry = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/_registry.json') |
             ConvertFrom-Json
-        # v1.12 moved the Flash slot 3.5 -> 3.6. The previous model is still
-        # reachable as `gemini-flash-35` so a regression can be A/B'd.
-        $registry.'gemini'.agy_model_family | Should -Be 'gemini-3.6-flash'
+        # v1.12 moved the Flash slot 3.5 -> 3.6; 2026-09-05 moved it 3.6 -> 3.8.
+        $registry.'gemini'.agy_model_family | Should -Be 'gemini-3.8-flash'
+        # `gemini-flash-35` is STILL ASSERTED, and it is now a DEAD PRESET:
+        # `agy models` on 2026-09-06 lists 3.8 / 3.7 / 3.6 / 3.1-pro and NO 3.5,
+        # so this preset names a model the vendor no longer offers -- the same
+        # shape as ox-alpha, which sat in the default panel dispatching nothing.
+        # The assertion is left standing deliberately: it pins what the registry
+        # SAYS, and the registry is wrong in a way no test here can see. That is
+        # the gap the model-drift detector is being specced to close; when it
+        # lands, this line should fail against the vendor snapshot rather than
+        # agree with a stale registry.
         $registry.'gemini-flash-35'.agy_model_family | Should -Be 'gemini-3.5-flash'
     }
 }

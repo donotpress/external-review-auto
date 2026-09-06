@@ -1,8 +1,8 @@
 {
   "gemini": {
     "backend": "agy",
-    "model_id": "gemini-3.6-flash-high",
-    "agy_model_family": "gemini-3.6-flash",
+    "model_id": "gemini-3.8-flash-high",
+    "agy_model_family": "gemini-3.8-flash",
     "agy_model_tier": "high",
     "pricing": {
       "input_per_m": 0.3,
@@ -10,7 +10,7 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy --dangerously-skip-permissions --print, model 'Gemini 3.6 Flash (High)'. Bundle read from disk via agy tools. Verified 2026-08-02 against `agy models`."
+    "notes": "agy --dangerously-skip-permissions --print, model 'Gemini 3.8 Flash (High)'. Bundle read from disk via agy tools. BUMPED 3.6 -> 3.8 on 2026-09-05 at the operator's request, verified the same day from `agy models`, which lists gemini-3.8-flash-{high,medium,low} alongside 3.7 and 3.6. PRICING IS CARRIED OVER FROM 3.6 AND IS NOT MEASURED: `agy models` prints ids and display names only, no rates, so $0.3/$1.2 per Mtok is an assumption inherited from the previous seat rather than a figure checked for 3.8. It feeds the cost estimate and the per-reviewer cap, so if 3.8 is priced differently every estimate on this seat is wrong in that proportion. The 3.6 entry below is kept and still selectable by -Model. NOTE 3.5 IS GONE from `agy models` as of the same check, which makes the `gemini-flash-35` preset the same dead-preset shape ox-alpha was."
   },
   "gemini-pro-high": {
     "backend": "agy",
@@ -306,6 +306,20 @@
       "high": {
         "display": "Gemini 3.6 Flash (High)",
         "settings_value": "Gemini 3.6 Flash (High)"
+      }
+    },
+    "gemini-3.8-flash": {
+      "low": {
+        "display": "Gemini 3.8 Flash (Low)",
+        "settings_value": "Gemini 3.8 Flash (Low)"
+      },
+      "medium": {
+        "display": "Gemini 3.8 Flash (Medium)",
+        "settings_value": "Gemini 3.8 Flash (Medium)"
+      },
+      "high": {
+        "display": "Gemini 3.8 Flash (High)",
+        "settings_value": "Gemini 3.8 Flash (High)"
       }
     }
   },
@@ -617,13 +631,6 @@
           "xhigh"
         ],
         "note": "\u2b50 SAME RULE AS 1.2 ABOVE AND ox-alpha-free BELOW: the `variants` list is what sets era's OWN stall threshold, and without an entry here era resolves variant='default' (120s stall base) and kills a reasoning model mid-think having captured only its banner. Added 2026-09-04 with the 1.2 -> 1.3 default bump. `--variant max` verified accepted that day by running `opencode run -m opencode-go/muse-spark-1.3-contributor --variant max` directly. Also verified the same day: era does NOT pass `--variant default` -- backends/opencode.ps1 omits the flag entirely when the resolved variant is 'default' -- so this list is the only thing that makes the flag appear at all. (`--variant default` IS accepted by opencode if passed; era simply does not pass it.) \u2705 RESOLVED THE SAME DAY, AND THE VALUE ABOVE CHANGED AS A RESULT. This entry said `max` for one commit, copied from 1.2. `opencode models --verbose` declares this model's variants as minimal / low / medium / high / xhigh -- THERE IS NO `max`. And OPENCODE DOES NOT VALIDATE VARIANT NAMES: measured, `--variant totally-bogus-zzz` returns exit 0 and a normal answer, identical in shape to `--variant max`. So the undeclared name was being silently IGNORED and this seat ran at opencode's DEFAULT reasoning effort while era believed it had asked for maximum -- from 2026-08-26, when muse-spark entered the default panel, to 2026-09-04. Now `xhigh`, which the model actually declares. THE REGISTRY HALF COULD NOT BE CHANGED ALONE: era's preference loop is @('xhigh','max','high','medium','low') and had to learn 'xhigh' in the same commit, or it would match nothing here, fall back to variant='default', and hand a reasoning model the 120s stall base -- turning a silent no-op into the ox-alpha kill. Resolve-OpencodeStallPlan gives 'xhigh' and 'max' the same 600s budget on purpose: they are two providers' names for \"think as long as you like\", not two tiers. Guarded by tests/OpencodeVariantDeclared.Tests.ps1 against tests/fixtures/opencode-declared-variants.json, a dated snapshot of what opencode declares. \u2705 SUPERSEDED IN PART, 2026-09-04: the `variants` list NO LONGER SETS THE STALL THRESHOLD. Resolve-OpencodeStallPlan stopped deriving anything from the variant name that day -- measured, the name predicts nothing about how long a run stays silent, and the 120s 'default' tier this note warns about was killing 8.07% of productive era-seat turns (docs/assessments/2026-09-04-stall-threshold-measured.md). So a missing entry here is no longer fatal. IT STILL DECIDES WHAT era SENDS: with no entry the resolver returns 'default' and no --variant flag is passed at all, so the seat runs at opencode's own reasoning effort. Keep the entry; the consequence of losing it is now a quieter seat rather than a killed one."
-      },
-      "ox-alpha-free": {
-        "model_id": "opencode-go/ox-alpha-free",
-        "variants": [
-          "max"
-        ],
-        "note": "⭐ THE `variants` LIST IS WHAT SETS THE STALL THRESHOLD, AND WITHOUT IT THIS MODEL CANNOT BE REVIEWED WITH. Measured 2026-08-22: ox-alpha prints its `> build · ox-alpha-free` banner (38 bytes) and then thinks SILENTLY for minutes — observed real review runs of 1m20s and 7m41s. With no map entry era resolves variant='default', whose stall base is 120s, so it was killed at 130s wall having emitted only the banner. Two smoke tests failed that way before the cause was found. `--variant max` is accepted by the model (verified directly) and raises the stall base to 600s. ⛔ The model itself was never the problem: `opencode run` direct answers in 20-23s, both with and without `-f` attach. \u2705 SUPERSEDED IN PART, 2026-09-04: the `variants` list NO LONGER SETS THE STALL THRESHOLD. Resolve-OpencodeStallPlan stopped deriving anything from the variant name that day -- measured, the name predicts nothing about how long a run stays silent, and the 120s 'default' tier this note warns about was killing 8.07% of productive era-seat turns (docs/assessments/2026-09-04-stall-threshold-measured.md). So a missing entry here is no longer fatal. IT STILL DECIDES WHAT era SENDS: with no entry the resolver returns 'default' and no --variant flag is passed at all, so the seat runs at opencode's own reasoning effort. Keep the entry; the consequence of losing it is now a quieter seat rather than a killed one."
       }
     }
   },
@@ -652,20 +659,6 @@
     "supports_file_read": true,
     "supports_streaming": false,
     "notes": "opencode run -m opencode-go/deepseek-v4-flash. models.dev display name is 'DeepSeek V4 Flash (New)' — the 2026-07-31 build, NOT the 2026-04-24 one. 1M context, 384k max output, reasoning-capable. Verified 2026-08-02."
-  },
-  "ox-alpha": {
-    "backend": "opencode",
-    "model_id": "opencode-go/ox-alpha-free",
-    "opencode_provider": "opencode-go",
-    "opencode_model_family": "ox-alpha",
-    "pricing": {
-      "input_per_m": 0.0,
-      "output_per_m": 0.0
-    },
-    "supports_file_read": true,
-    "supports_streaming": false,
-    "retired": true,
-    "notes": "\u26d4 RETIRED 2026-08-26 \u2014 OPENCODE NO LONGER OFFERS THIS MODEL. `opencode models` does not list ox-alpha at all any more, so every dispatch to it returns nothing. Observed the same day on a live panel: rounds 1-3 each produced an ox-alpha response, and it was absent from `opencode models` by the afternoon. (An earlier version of this note claimed round 4 dispatched it and got nothing, i.e. a silent 4 -> 3 degradation. That was WRONG and is retracted: round 4 was invoked with an explicit 3-reviewer -Reviewer list, so ox-alpha was never asked. The withdrawal is established from `opencode models`; no degradation event was observed) \u2014 the exact failure the note below was added to protect against, arriving from the other direction. Replaced in the default panel by `muse-spark`. Kept rather than deleted so the history stays legible and an explicit `-Reviewer ox-alpha` still resolves and fails loudly instead of resolving to nothing. ORIGINAL NOTE: opencode run -m opencode-go/ox-alpha-free. models.dev display name 'Ox Alpha Free (Unlimited)'. FREE tier, so it carries no cost ceiling and is safe to add to the default panel. Model id confirmed 2026-08-22 from `opencode models`. Added to the default panel the same day, taking it 3 -> 4 reviewers, after a round in which deepseek-flash ERRORED and the panel silently degraded to 2 (reference_era_tooling_defects_2026_08_09): a 4th free reviewer buys redundancy against exactly that."
   },
   "opus-48": {
     "backend": "claude",

@@ -1777,9 +1777,37 @@ function Test-BackendCliAvailable {
 }
 
 function Test-ThreadJobAvailable {
-    $module = Get-Module -Name ThreadJob -ListAvailable -ErrorAction SilentlyContinue
-    if (-not $module) {
-        throw "ThreadJob module is required. Install with: Install-Module -Name ThreadJob -Force -Scope CurrentUser"
+    <#
+    ASK WHETHER THE HOST CAN START A THREAD JOB, NOT WHETHER A MODULE HAS A
+    PARTICULAR NAME. This was `Get-Module -Name ThreadJob -ListAvailable`, and on
+    2026-09-06 -- after a reboot that updated PowerShell -- it took era down on
+    this box completely: every dispatch threw "ThreadJob module is required.
+    Install with: Install-Module -Name ThreadJob", and 28 tests in
+    tests/DispatchThreadJob.Tests.ps1 failed with it.
+
+    Nothing was missing. PowerShell RENAMED the module. Measured that day:
+
+        Get-Module -ListAvailable ThreadJob,Microsoft.PowerShell.ThreadJob
+          -> Microsoft.PowerShell.ThreadJob  2.2.0
+             C:\program files\powershell\7\Modules\...
+        Get-Command Start-ThreadJob
+          -> Microsoft.PowerShell.ThreadJob  2.2.0
+
+    So the probe reported a fact about ITS OWN QUESTION ("no module is called
+    ThreadJob") as a fact about the SUBJECT ("this host cannot run thread
+    jobs"), and era refused to dispatch on a host that was fully capable. Same
+    shape as the fail-open catches recorded in backends/opencode.ps1, one
+    direction over: there a read failure looked like a real measurement, here a
+    naming change looked like a missing dependency.
+
+    Get-Command auto-loads from any module that exports the cmdlet, so this form
+    accepts BOTH names and whatever the next rename produces. The guard exists to
+    protect Start-ThreadJob; ask about Start-ThreadJob.
+    #>
+    if (-not (Get-Command Start-ThreadJob -ErrorAction SilentlyContinue)) {
+        throw ("Start-ThreadJob is not available in this PowerShell. It ships with PowerShell 7 as " +
+               "Microsoft.PowerShell.ThreadJob (older hosts call it ThreadJob); install with: " +
+               "Install-Module -Name Microsoft.PowerShell.ThreadJob -Force -Scope CurrentUser")
     }
 }
 

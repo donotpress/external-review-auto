@@ -194,6 +194,34 @@ function $fn {
     }
 }
 
+Describe 'Test-ThreadJobAvailable probes the capability, not a module name' -Tag Unit {
+
+    It 'does not throw on a host where Start-ThreadJob is callable' {
+        # 2026-09-06, AFTER A REBOOT: era stopped dispatching entirely on this
+        # box, and 28 tests in this file failed with "ThreadJob module is
+        # required. Install with: Install-Module -Name ThreadJob". The module was
+        # not missing. PowerShell RENAMED it -- `Get-Module -ListAvailable`
+        # reports Microsoft.PowerShell.ThreadJob 2.2.0 shipped in
+        # C:\program files\powershell\7\Modules, and `Start-ThreadJob` resolves
+        # from it -- while the guard still asked for a module literally named
+        # `ThreadJob`.
+        #
+        # So the probe answered a question nobody asked ("is a module with this
+        # NAME installed") and reported it as the answer to the one that matters
+        # ("can this host start a thread job"). That is the instrument-for-
+        # subject substitution this repo keeps paying for, and here it made era
+        # refuse to dispatch on a host that was perfectly capable.
+        #
+        # Asserting on the capability is also the only form that survives the
+        # next rename: the module has now been called both names, and the guard
+        # exists to protect Start-ThreadJob, so ask about Start-ThreadJob.
+        Get-Command Start-ThreadJob -ErrorAction SilentlyContinue |
+            Should -Not -BeNullOrEmpty -Because 'this test is meaningless on a host that genuinely lacks it'
+
+        { Test-ThreadJobAvailable } | Should -Not -Throw
+    }
+}
+
 Describe 'Invoke-ReviewerDispatch — the happy path, through real ThreadJobs' -Tag Unit {
     BeforeAll {
         $script:D1 = script:New-FakeSkillRoot

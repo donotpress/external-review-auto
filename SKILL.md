@@ -83,7 +83,11 @@ Change it with `/era set default <names>` (accepts a panel), or edit the file.
 > The 4th seat was `ox-alpha` from 2026-08-22 until 2026-08-26, when opencode stopped
 > offering that model entirely — so a bare `/era` would have been dispatching a
 > reviewer that cannot run. A registry `retired` flag and a test now keep a withdrawn
-> model out of the default panel.
+> model out of the default panel. On 2026-09-05 the preset was **deleted**: `retired`
+> turned out to be read by nothing at runtime, only by two test files, so an explicit
+> `-Reviewer ox-alpha` still dispatched, spawned an opencode process, and failed at the
+> vendor rather than at era. The flag keeps a withdrawn model out of the *default panel*;
+> it does not make one fail loudly on request, and the note claiming otherwise was wrong.
 > **The single-reviewer fallback still adapts to what's installed:** if
 > agy isn't available, `/era` auto-selects the first usable backend by preference
 > (`gemini-pro-low` → `sonnet` → `deepseek` → `gemini-api`) instead of erroring, and

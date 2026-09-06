@@ -78,8 +78,14 @@ Describe 'every dispatchable opencode preset asks for a variant its model declar
             $declared = $script:Snap.declared.($p.ModelId)
             if ($null -eq $declared) {
                 # Model absent from `opencode models` when the snapshot was taken.
-                # `ox-alpha` is the known case and is flagged retired on purpose so
-                # an explicit -Reviewer fails loudly rather than silently.
+                # `ox-alpha` was the known case, and this comment used to say it
+                # was "flagged retired on purpose so an explicit -Reviewer fails
+                # loudly rather than silently". That was never true: `retired` is
+                # read by this file and RegistryCapabilities and by NOTHING at
+                # runtime, so the preset dispatched normally and failed at the
+                # vendor. It was deleted on 2026-09-05. The branch stays for the
+                # NEXT withdrawn model -- `retired` keeps one out of the default
+                # panel, which is all it has ever done.
                 if (-not $p.Retired) {
                     $problems += "$($p.Preset) -> $($p.ModelId): NOT OFFERED by opencode in the snapshot, and not flagged retired"
                 }

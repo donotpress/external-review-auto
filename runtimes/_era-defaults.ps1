@@ -50,8 +50,23 @@ $script:EraShippedPanel = @('gemini', 'opus', 'deepseek-flash', 'muse-spark')
 # this changes the model and nothing about the panel's cost or ceilings. Worth recording that the ORIGINAL argument for a 4th reviewer was
 # that ox-alpha is FREE, and muse-spark is not — $0.10/$0.20 per Mtok, ~$0.01 on a 100k-token
 # round. Cheaper than deepseek-flash and immaterial next to opus, so the seat is still
-# effectively free in practice, but the justification is now redundancy alone. `ox-alpha`
-# stays in the registry and is selectable by name.
+# effectively free in practice, but the justification is now redundancy alone.
+#
+# 2026-09-05: `ox-alpha` DELETED from the registry, having been kept since 2026-08-26 on
+# the stated grounds that it "stays selectable by name" so an explicit -Reviewer would
+# "fail loudly instead of resolving to nothing". Measured that day: `retired` is read by
+# NOTHING at runtime -- only by two test files -- so the preset dispatched normally,
+# spawned an opencode process, and failed at the vendor with `Model not found:
+# opencode-go/ox-alpha-free. Did you mean: omen-alpha?`. A tombstone that still spends a
+# process is a trap, not a signpost. `opencode-go/omen-alpha` does exist and was NOT
+# adopted in its place: it is a different model with no measurements here, and renaming
+# would have silently inherited ox-alpha's 786s kill-risk figure, which was measured over
+# 940 of ox-alpha's turns and says nothing about omen-alpha.
+#
+# 2026-09-05: the gemini seat bumped 3.6 -> 3.8 (gemini-3.8-flash-high, display name
+# exactly 'Gemini 3.8 Flash (High)') at the operator's request, verified the same day
+# from `agy models`. Its PRICING is inherited from 3.6 and is NOT measured -- see the
+# registry note on that preset.
 #
 # Kept in lockstep with config/defaults.json ON PURPOSE — this file's own header records
 # that the two layers carrying different defaults is how a bare /era once dispatched a

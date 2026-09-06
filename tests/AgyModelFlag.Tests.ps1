@@ -162,10 +162,15 @@ Describe 'per-reviewer agy default --model resolution (heterogeneous batch)' {
         Get-Command Resolve-AgyDefaultModelToken -ErrorAction SilentlyContinue | Should -Not -BeNullOrEmpty
     }
 
-    It "resolves gemini's default to 'Gemini 3.6 Flash (High)'" {
+    # THESE LITERALS ARE COUPLED TO THE `gemini` PRESET AND ARE MEANT TO BE.
+    # Deriving the expected token from the same registry the resolver reads would
+    # make the assertion an identity that passes for any implementation. So when
+    # the default seat is bumped, this literal moves with it -- 3.6 -> 3.8 on
+    # 2026-09-05 -- and that edit is the point, not friction.
+    It "resolves gemini's default to 'Gemini 3.8 Flash (High)'" {
         $token = Resolve-AgyDefaultModelToken -AgyModelMap $script:AgyMap `
             -Family $script:Gemini.agy_model_family -Tier $script:Gemini.agy_model_tier
-        $token | Should -BeExactly 'Gemini 3.6 Flash (High)'
+        $token | Should -BeExactly 'Gemini 3.8 Flash (High)'
     }
 
     It "resolves gemini-pro-low's default to 'Gemini 3.1 Pro (Low)'" {
@@ -182,7 +187,7 @@ Describe 'per-reviewer agy default --model resolution (heterogeneous batch)' {
         }
         ($tokens | Select-Object -Unique).Count | Should -Be 2 `
             -Because 'a heterogeneous agy batch must not collapse to one model'
-        $tokens[0] | Should -BeExactly 'Gemini 3.6 Flash (High)'
+        $tokens[0] | Should -BeExactly 'Gemini 3.8 Flash (High)'
         $tokens[1] | Should -BeExactly 'Gemini 3.1 Pro (Low)'
     }
 }
