@@ -344,6 +344,25 @@ function Test-EraCaptureAcceptable {
         [AllowNull()][AllowEmptyString()][string]$PromptPath,
         [string]$Vendor = 'The provider'
     )
+    # AN EMPTY CAPTURE IS NOT AN ACCEPTABLE ONE. Test-AgenticNarrationCapture
+    # returns $false for a null/empty response -- correctly, because "is this
+    # narration?" has no answer when there is no text -- and that $false used to
+    # flow straight through to Ok = $true. A question that was never asked was
+    # being recorded as a negative answer, which is the shape this repo has now
+    # found in a `notObserved` field, in two vacuous controls, and here.
+    #
+    # Measured 2026-09-06: `Test-EraCaptureAcceptable -Response ''` returned
+    # Ok = True. Latent rather than live, because every existing adapter gates
+    # emptiness upstream on its own exit code -- but this function is shared by
+    # six backends now, and a seventh written against it would inherit the hole.
+    # Found when a path-translation slip fed it an empty read and the pass looked
+    # entirely clean.
+    if ([string]::IsNullOrWhiteSpace($Response)) {
+        return @{
+            Ok = $false; Error = 'empty-capture'
+            Warning = "$Vendor returned nothing (an empty or whitespace-only capture); re-dispatch to retry."
+        }
+    }
     if (Test-AgenticNarrationCapture -Response $Response) {
         # The Error CODE is unchanged on purpose: Get-EraRecoverableFailures keys
         # on it, and renaming it would silently stop the one bounded re-dispatch.

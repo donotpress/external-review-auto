@@ -1789,6 +1789,24 @@ function Test-BackendCliAvailable {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$CliName)
 
+    # `cmdc` IS WSL-ONLY ON THIS BOX. `where.exe cmdc` finds nothing, where
+    # `claude` and `opencode` both have Windows installs era spawns directly. A
+    # Windows PATH lookup would therefore refuse a working install, exactly as it
+    # did for tmux. Both halves are checked, and it is `cmdc --version` that can
+    # actually be absent -- wsl.exe ships with Windows, so probing only for that
+    # would pass on a machine with no cmdc and defer the failure to a dead seat.
+    if ($CliName -eq 'cmdc') {
+        if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
+            throw "Backend CLI 'cmdc' needs wsl.exe, which is not on PATH."
+        }
+        $probe = $null
+        try { $probe = (& wsl.exe -- bash -lc 'command -v cmdc' 2>$null | Select-Object -First 1) } catch { $probe = $null }
+        if (-not $probe -or -not $probe.Trim()) {
+            throw "Backend CLI 'cmdc' is not installed inside WSL (not on the login PATH)."
+        }
+        return
+    }
+
     if ($CliName -eq 'tmux') {
         if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
             throw "Backend CLI 'tmux' needs wsl.exe, which is not on PATH."
@@ -2675,7 +2693,17 @@ function Get-EraRecoverableFailures {
     # Every error code an adapter sets deliberately to mean "this ran, and what
     # came back was not a review". Free-text exception messages are excluded by
     # construction: they never equal one of these.
-    $recoverable = @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+    # 'empty-capture' joined 2026-09-06: a seat that returned nothing is the
+    # clearest case a re-dispatch can plausibly fix, and it was previously
+    # unreachable because the shared detector accepted an empty response.
+    #
+    # The two tmux codes are the transport's own recoverable failures (a seat
+    # that crashed, or wrote a partial file before dying). Its TIMEOUT codes are
+    # deliberately ABSENT: a seat that burned its whole budget must not be given
+    # another whole budget, which is a defect this repo already fixed once in the
+    # tmux design's own terminal conditions.
+    $recoverable = @('response-contract', 'agentic-narration-capture', 'prompt-echo',
+                     'empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated')
 
     $out = [System.Collections.Generic.List[string]]::new()
     foreach ($r in $ReviewerList) {

@@ -745,5 +745,16 @@
       "Read {instructions} and follow it exactly."
     ],
     "notes": "LongCat 2.0 (free) via the cmdc CLI over the tmux TUI transport. THIS PRESET IS THE POINT OF THE TRANSPORT: cmdc exposes 68 models and has NO era backend of its own -- no backends/cmdc.ps1, no adapter -- so reaching it is a registry entry rather than ~1,000 lines. Verified end to end 2026-09-06: read the archived 59,034-byte round-6 bundle, wrote a canary-valid 5-section review in 115s with the correct ERA-BUNDLE-TAIL. Pricing 0/0 is REAL, not a placeholder -- models.dev lists this model as free. ⚠ NO OTHER cmdc MODEL IS ADDED HERE, deliberately: `cmdc --list-models` prints ids and descriptions but NO RATES, so pricing for the paid 67 is unmeasured, and era's cost estimates were measured the same day to run ~3.2x low already (docs/assessments/2026-09-06-era-cost-estimates-vs-vendor-truth.md). Inventing a rate would feed a cap that is already wrong. ✅ cmdc ALSO SOLVES M9, the opencode TUI's missing --variant: `cmdc --effort high` is accepted AND CONFIRMED (\"Reasoning effort set to high for DeepSeek V4 Flash\"), and REFUSED where unsupported (\"LongCat 2.0 has no adjustable reasoning effort\", exit 0) -- loud both ways, where opencode silently ignores an undeclared variant. LongCat itself takes no --effort, which is why the flag is absent from this launch line."
+  },
+  "longcat": {
+    "backend": "cmdc",
+    "model_id": "meituan/longcat-2.0:free",
+    "pricing": {
+      "input_per_m": 0.0,
+      "output_per_m": 0.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "LongCat 2.0 (free) via the cmdc CLI, PROCESS-SPAWN (backends/cmdc.ps1) -- no tmux. cmdc exposes 68 models that had no era backend at all. `cmdc -p --tools-all` runs headless with stdin closed and no TTY; `--tools-all` is REQUIRED because a headless run withholds tools by default and this seat's job is reading a file. Pricing 0/0 is real, not a placeholder. ⚠ cmdc is WSL-ONLY on this box (`where.exe cmdc` finds nothing, where claude and opencode both have Windows installs), so this adapter DOES cross the WSL boundary -- see references/wsl-argument-boundary.md. It does not need tmux, which is a different and much smaller claim than crossing no boundary. Set `cmdc_effort` on a preset to pass --effort; cmdc CONFIRMS or REFUSES it on stdout and the adapter surfaces that as a warning, unlike opencode which silently ignores an undeclared variant."
   }
 }

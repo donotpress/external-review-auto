@@ -207,3 +207,50 @@ built, and this transport should not be extended further until it is.** What the
 transport has that process-spawn does not is a seat that reads its bundle off
 disk with no attach cap — which is a hedge against a failure mode whose trigger
 (§3.2) is still unknown.
+
+
+---
+
+## 9. `backends/cmdc.ps1` was built, and it settles the question
+
+Built the same day §8 identified it. **Process-spawn, headless, stdout-captured —
+era's ordinary adapter shape.** Live through era: `exit=0`, `capture_method=cmdc`,
+85.3 s, `seat_containment=contained`.
+
+**So the tmux transport's last argument is retired in practice, not just in
+principle.** The 68 cmdc models are reachable with a normal backend.
+
+**One correction to §8, measured rather than assumed.** I wrote that a
+process-spawn `cmdc.ps1` would "cross no boundary at all". `opus` called that
+false in the review, and it is: `where.exe cmdc` finds nothing, where `claude`
+and `opencode` both have Windows installs era spawns directly. **cmdc is
+WSL-only**, so the adapter does cross the boundary and inherits three of the six
+bugs — which is why it is written against
+`references/wsl-argument-boundary.md` from the first line: script file, login
+shell, locally-computed path with a `test -d` verification.
+
+What it does **not** need, and the tmux transport did: a server, windows, a
+watchdog, a launch latch, and a canary. A process exits when its turn ends and
+stdout is complete at that point. That is the whole difference, and it is worth
+about 400 lines.
+
+**cmdc's effort handling is loud in both directions**, which is what M9 wanted:
+
+- supported → `Reasoning effort set to high for DeepSeek V4 Flash` on stdout;
+  the adapter strips it from the review and surfaces it as a warning.
+- unsupported → **exit 1**, `LongCat 2.0 has no adjustable reasoning effort` on
+  stderr. Measured. The adapter returns `cmdc-effort-unsupported` naming the
+  preset and the fix, and it is deliberately **not** recoverable: a re-dispatch
+  would send the same flag.
+
+Compare opencode, which silently ignores an undeclared `--variant` and runs at
+default effort while era believes it asked for maximum — the failure the
+registry's variant notes exist for.
+
+### Standing recommendation
+
+`backends/cmdc.ps1` is the answer for cmdc. `backends/tmux.ps1` stays opt-in,
+carries `opus-tmux` and `muse-spark-tmux`, and should not be extended. Its
+remaining distinction is a seat that reads its bundle off disk with no attach
+cap — a hedge against a failure (§3.2) whose trigger is still unknown. That is a
+thin reason to maintain ~530 lines, and it is now the only one.

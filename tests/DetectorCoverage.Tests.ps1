@@ -517,3 +517,53 @@ Describe 'every backend checks for a prompt echo' -Tag Unit {
         } finally { $env:GEMINI_API_KEY = $saved }
     }
 }
+
+Describe 'Test-EraCaptureAcceptable rejects an empty capture' -Tag Unit {
+    # A FAIL-OPEN FOUND 2026-09-06. Test-AgenticNarrationCapture returns $false
+    # for a null/empty response -- correctly, since "is this narration?" has no
+    # answer without text -- and that $false flowed straight through to Ok=$true.
+    # A question never asked, recorded as a negative answer. Latent, because every
+    # adapter gates emptiness on its own exit code first, but the function is
+    # shared by six backends and a seventh would inherit it.
+    BeforeAll {
+        $script:SkillRoot = Split-Path $PSScriptRoot -Parent
+        . (Join-Path $script:SkillRoot 'backends/_capture-validation.ps1')
+        $script:PromptPath = Join-Path $script:SkillRoot '.external-reviews/model-drift/round-6-prompt.md'
+    }
+
+    It 'rejects <label> with the empty-capture code' -ForEach @(
+        @{ label = 'an empty string';      value = '' }
+        @{ label = 'spaces only';          value = '   ' }
+        @{ label = 'newlines only';        value = "`n`n" }
+        @{ label = 'a tab';                value = "`t" }
+    ) {
+        $v = Test-EraCaptureAcceptable -Response $value -PromptPath $script:PromptPath -Vendor 'x'
+        $v.Ok    | Should -BeFalse
+        $v.Error | Should -Be 'empty-capture'
+    }
+
+    It 'still ACCEPTS a real archived review (guards the tests above)' {
+        # Without this, a detector that rejected everything would pass the four
+        # cases above -- the same vacuity the empty-capture hole itself was.
+        $real = Join-Path $script:SkillRoot '.external-reviews/model-drift/round-6-muse-spark-response.md'
+        if (-not (Test-Path -LiteralPath $real)) { Set-ItResult -Skipped -Because 'the archived review is not present'; return }
+        $v = Test-EraCaptureAcceptable -Response (Get-Content -Raw -LiteralPath $real) `
+                                       -PromptPath $script:PromptPath -Vendor 'x'
+        $v.Ok | Should -BeTrue
+    }
+
+    It 'empty-capture is in the recoverable set, so the bounded fallback can fire' {
+        $src = Get-Content -Raw -LiteralPath (Join-Path $script:SkillRoot 'workflow.ps1')
+        $src | Should -Match "'empty-capture'"
+    }
+
+    It 'the tmux TIMEOUT codes are NOT recoverable' {
+        # A seat that burned its whole budget must not be handed another whole
+        # budget. The tmux design fixed exactly this once already, in its own
+        # terminal conditions; the recoverable list must not reintroduce it.
+        $src = Get-Content -Raw -LiteralPath (Join-Path $script:SkillRoot 'workflow.ps1')
+        $recoverableLine = ([regex]::Match($src, '\$recoverable = @\([^)]*\)')).Value
+        $recoverableLine | Should -Not -Match 'tmux-seat-timeout'
+        $recoverableLine | Should -Match 'tmux-seat-exited'
+    }
+}
