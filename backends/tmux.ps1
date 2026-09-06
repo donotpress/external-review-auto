@@ -69,22 +69,70 @@ function Get-EraTmuxDistro {
     return $script:EraTmuxDistro
 }
 
-function Invoke-EraTmuxCli {
+function ConvertTo-EraWslPathPure {
     <#
     .SYNOPSIS
-        Run one tmux command inside WSL. Returns @{ Rc; Out; Err }.
+        `C:\X\Y` -> `/mnt/c/X/Y`, computed locally, with no round trip.
 
     .DESCRIPTION
-        ARGUMENTS ARE PASSED AS SEPARATE ELEMENTS, never joined into a shell
-        string -- that is the property measured to be injection-safe, and it is
-        the only reason prompt content can be handed to tmux at all.
-
-        Agent env vars are scrubbed per-child, `TMUX`/`TMUX_PANE` among them: a
-        seat that inherited the driving session's pane identity would have its
-        hooks write into the OPERATOR's window.
+        Deliberately NOT `wslpath`: calling it would need an argument to survive
+        the boundary, which is the very thing that cannot be relied on (see
+        Invoke-EraTmuxScript). The drive-letter mapping is deterministic, and it is
+        VERIFIED once per attempt by asking WSL whether the directory exists --
+        so a wrong mapping fails loudly at startup instead of silently pointing a
+        seat at nothing.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string[]]$TmuxArgs)
+    param([Parameter(Mandatory)][string]$WindowsPath)
+    $p = $WindowsPath -replace '\\', '/'
+    if ($p -match '^([A-Za-z]):/(.*)$') {
+        return ('/mnt/' + $Matches[1].ToLowerInvariant() + '/' + $Matches[2])
+    }
+    return $p
+}
+
+function Invoke-EraTmuxScript {
+    <#
+    .SYNOPSIS
+        Run a shell script inside WSL. Returns @{ Rc; Out; Err }.
+
+    .DESCRIPTION
+        EVERYTHING GOES THROUGH A SCRIPT FILE, and the only thing crossing the
+        Windows->WSL boundary is that file's path. This is the third design of
+        this function and the first that is not fighting a quoting layer.
+
+        `wsl.exe -- cmd args` DOES NOT EXEC DIRECTLY: it hands the arguments to
+        `bash -c`. Measured 2026-09-06, that shell was found three times over,
+        each looking like a different bug:
+
+          * `wslpath -u C:\Users\Joshua` returned `C:UsersJoshua` -- backslashes
+            eaten as escapes.
+          * `list-windows -F #{window_name}` failed with "-F expects an
+            argument" -- `#` began a COMMENT and swallowed the format string.
+          * `sh -c 'sleep N; tmux kill-server'` was re-parsed by a second shell
+            and died instantly, taking the server with it.
+
+        Single-quoting each argument fixed the first two and broke on the third,
+        because .NET does its OWN Windows-style quoting on top: an argument
+        containing double quotes came out with `"$@"` expanded to nothing. Layers
+        of escaping stacked on layers of escaping is not a fix, it is a queue of
+        future bugs.
+
+        A script file has no such layers. era writes the commands with
+        PowerShell, WSL reads them with bash, and the boundary carries one path.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ScriptBody,
+        [Parameter(Mandatory)][string]$ScratchDir
+    )
+
+    $name = 'era-cmd-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.sh'
+    $win  = Join-Path $ScratchDir $name
+    # LF endings: bash rejects a script whose lines end with CR ("\r: command
+    # not found"), and Set-Content on Windows would supply CRLF.
+    [System.IO.File]::WriteAllText($win, ($ScriptBody -replace "`r`n", "`n"))
+    $wsl = ConvertTo-EraWslPathPure -WindowsPath $win
 
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = 'wsl.exe'
@@ -92,11 +140,11 @@ function Invoke-EraTmuxCli {
     $psi.CreateNoWindow         = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
-
     $distro = Get-EraTmuxDistro
     if ($distro) { $psi.ArgumentList.Add('-d'); $psi.ArgumentList.Add($distro) }
     $psi.ArgumentList.Add('--')
-    foreach ($t in $TmuxArgs) { $psi.ArgumentList.Add($t) }
+    $psi.ArgumentList.Add('bash')
+    $psi.ArgumentList.Add($wsl)
 
     foreach ($v in @('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID',
                      'CLAUDE_CODE_GIT_BASH_PATH', 'AI_AGENT', 'ANTIGRAVITY_AGENT',
@@ -109,26 +157,38 @@ function Invoke-EraTmuxCli {
     $out = $p.StandardOutput.ReadToEnd()
     $err = $p.StandardError.ReadToEnd()
     $null = $p.WaitForExit(30000)
+    try { Remove-Item -LiteralPath $win -Force -ErrorAction SilentlyContinue } catch { }
     return @{ Rc = $p.ExitCode; Out = $out; Err = $err }
 }
 
-function ConvertTo-EraWslPath {
+function ConvertTo-EraShellQuoted {
     <#
     .SYNOPSIS
-        A Windows path as WSL sees it. The ONLY path translation in this backend.
-
-    .DESCRIPTION
-        Everything the model is told is a bare filename in its own cwd, so no
-        Windows path and no repo path ever reaches the prompt. era translates the
-        scratch directory once, here, and nothing else.
+        One shell-safe single-quoted token. Used to BUILD script text, where
+        there is exactly one shell and its rules are known.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$WindowsPath)
-    $r = Invoke-EraTmuxCli -TmuxArgs @('wslpath', '-u', $WindowsPath)
-    if ($r.Rc -ne 0 -or -not $r.Out.Trim()) {
-        throw "wslpath could not translate '$WindowsPath' (rc=$($r.Rc)): $($r.Err.Trim())"
-    }
-    return $r.Out.Trim()
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    return "'" + ($Value -replace "'", "'\''") + "'"
+}
+
+function Test-EraWslPathVisible {
+    <#
+    .SYNOPSIS
+        Positive control on the path mapping: can WSL actually see this directory?
+
+    .DESCRIPTION
+        ConvertTo-EraWslPathPure computes the mapping without asking WSL. That is
+        the right call -- but an unverified mapping would point a seat at a
+        directory that does not exist and the seat would fail looking like a model
+        problem. One `test -d` turns that into a loud transport error.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ScratchDir)
+    $wsl = ConvertTo-EraWslPathPure -WindowsPath $ScratchDir
+    $q = ConvertTo-EraShellQuoted -Value $wsl
+    $r = Invoke-EraTmuxScript -ScratchDir $ScratchDir -ScriptBody "test -d $q && echo VISIBLE"
+    return ($r.Out.Trim() -eq 'VISIBLE')
 }
 
 function Get-EraTmuxWindowNames {
@@ -141,11 +201,18 @@ function Get-EraTmuxWindowNames {
         not be reached and is NEVER a verdict about a seat -- era has three
         recorded fail-open catches where a read failure became indistinguishable
         from a real measurement, and this is the same shape.
+
+        The `#{window_name}` format string is why this goes through a script:
+        passed as a bare argument it reaches bash, which reads `#` as a comment.
     #>
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Socket, [Parameter(Mandatory)][string]$Session)
-    $r = Invoke-EraTmuxCli -TmuxArgs @('tmux', '-L', $Socket, 'list-windows', '-t', $Session,
-                                       '-F', '#{window_name}')
+    param(
+        [Parameter(Mandatory)][string]$Socket,
+        [Parameter(Mandatory)][string]$Session,
+        [Parameter(Mandatory)][string]$ScratchDir
+    )
+    $body = "tmux -L $(ConvertTo-EraShellQuoted -Value $Socket) list-windows -t $(ConvertTo-EraShellQuoted -Value $Session) -F '#{window_name}'"
+    $r = Invoke-EraTmuxScript -ScratchDir $ScratchDir -ScriptBody $body
     if ($r.Rc -ne 0) { return @{ ServerUp = $false; Names = @() } }
     $names = @($r.Out -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     return @{ ServerUp = $true; Names = $names }
@@ -221,80 +288,120 @@ function Invoke-TmuxReview {
     if (-not $launch) {
         throw "preset '$($ModelInfo.preset)' has no tmux_launch in backends/_registry.json, so it cannot be carried over the tmux transport."
     }
+    $argvBuilt = @()
+    foreach ($a in $launch) {
+        $argvBuilt += ($a -replace '\{model_id\}', $modelId -replace '\{instructions\}', 'instructions.md')
+    }
 
-    $nonce   = ([guid]::NewGuid().ToString('N').Substring(0, 16))
-    $socket  = "era-$PID"
-    $session = 'era'
-    $seat    = if ($ModelInfo.preset) { $ModelInfo.preset } else { 'seat' }
-    $window  = "era-$seat-$nonce"
-    $scratch = Join-Path ([System.IO.Path]::GetTempPath()) "era-tmux-$PID-$nonce"
-
-    # A watchdog deadline generous enough that it never pre-empts $TimeoutSec,
-    # and short enough that an era crash cannot leave an unattended agent for
-    # long. It is the ONLY orphan cleanup: no sweep, no pid liveness test.
+    $nonce    = ([guid]::NewGuid().ToString('N').Substring(0, 16))
+    $socket   = "era-$PID"
+    $session  = 'era'
+    $seat     = if ($ModelInfo.preset) { $ModelInfo.preset } else { 'seat' }
+    $window   = "era-$seat-$nonce"
+    $scratch  = Join-Path ([System.IO.Path]::GetTempPath()) "era-tmux-$PID-$nonce"
+    # Generous enough never to pre-empt $TimeoutSec, short enough that an era
+    # crash cannot leave an unattended agent for long. This is the ONLY orphan
+    # cleanup: no sweep, no pid liveness test, and it does not need era alive.
     $deadline = $TimeoutSec + 120
 
     try {
         New-Item -ItemType Directory -Path $scratch -Force -ErrorAction Stop | Out-Null
         Copy-Item -LiteralPath $BundlePath -Destination (Join-Path $scratch 'bundle.xml') -ErrorAction Stop
         $reviewPath = Join-Path $scratch 'review.md'
-        $instrPath  = Join-Path $scratch 'instructions.md'
         Get-EraTmuxSeatPrompt -PromptPath $PromptPath -Nonce $nonce |
-            Set-Content -LiteralPath $instrPath -Encoding utf8 -ErrorAction Stop
+            Set-Content -LiteralPath (Join-Path $scratch 'instructions.md') -Encoding utf8 -ErrorAction Stop
 
-        $scratchWsl = ConvertTo-EraWslPath -WindowsPath $scratch
-
-        # Session + watchdog. -A attaches to an existing session rather than
-        # erroring; the watchdog is created only when absent, because -A does NOT
-        # recreate an initial window and a lost watchdog silently restores the
-        # "seat death looks like transport failure" collision.
-        $null = Invoke-EraTmuxCli -TmuxArgs @('tmux', '-L', $socket, 'new-session', '-A', '-d',
-                                              '-s', $session, '-n', 'era-watchdog',
-                                              "sh -c 'sleep $deadline; tmux -L $socket kill-server'")
-        $state = Get-EraTmuxWindowNames -Socket $socket -Session $session
-        if (-not $state.ServerUp) {
-            throw "tmux server '$socket' did not come up; the transport is unavailable."
+        if (-not (Test-EraWslPathVisible -ScratchDir $scratch)) {
+            throw "WSL cannot see the scratch directory '$scratch'; the transport is unavailable."
         }
+        $scratchWsl = ConvertTo-EraWslPathPure -WindowsPath $scratch
 
-        $argv = @()
-        foreach ($a in $launch) {
-            $argv += ($a -replace '\{model_id\}', $modelId -replace '\{instructions\}', 'instructions.md')
-        }
-        $null = Invoke-EraTmuxCli -TmuxArgs (@('tmux', '-L', $socket, 'new-window', '-d',
-                                               '-t', "${session}:", '-n', $window,
-                                               '-c', $scratchWsl, '--') + $argv)
+        $qSock  = ConvertTo-EraShellQuoted -Value $socket
+        $qSess  = ConvertTo-EraShellQuoted -Value $session
+        # `-t era` names WINDOW 0 of that session; `-t era:` names the session
+        # and lets tmux pick the next free index. Measured: without the colon,
+        # new-window fails with "create window failed: index 0 in use".
+        $qSessT = ConvertTo-EraShellQuoted -Value "${session}:"
+        $qWin   = ConvertTo-EraShellQuoted -Value $window
+        $qDir   = ConvertTo-EraShellQuoted -Value $scratchWsl
+        # NEUTRALISE THE SEAT'S INHERITED TMUX SOCKET. tmux sets TMUX in every
+        # pane it creates, so a seat would inherit era's EPHEMERAL socket --
+        # measured, `TMUX=/tmp/tmux-1000/era-<pid>,15632,0`. Any turn-state
+        # plugin in the seat's CLI then signals into a socket era is about to
+        # destroy, and the failures land in the SHARED
+        # ~/.local/state/tui-workspace/agent-signal.log, which `tui-workspace
+        # check` gates pushes on for every repo on this box. A peer session had a
+        # push refused by exactly that on 2026-09-06.
+        #
+        # `-e TMUX=` was chosen over disabling plugins (`opencode --pure`), which
+        # was the first fix and is on the WRONG AXIS: the invariant is "the seat
+        # must not signal to a socket that will not outlive it", which is a
+        # property of the seat's ENVIRONMENT, not of its plugin set. Those
+        # coincide only while the sole signalling plugin is external. §6 rule 4
+        # would have era ship its OWN turn-end plugin, and no setting of --pure
+        # satisfies both -- on, era loses its own signal; off, the operator's
+        # plugin returns. Clearing TMUX holds on the axis the invariant lives on
+        # and keeps holding when era's plugin arrives, because that plugin's
+        # signal is a FILE in the scratch directory, not a tmux message.
+        # (Diagnosis and the axes argument: a peer session, 2026-09-06.)
+        #
+        # ONE tmux argument for the watchdog: tmux JOINS multiple command
+        # arguments and re-runs them through sh, so `-- /bin/sh -c 'sleep 120'`
+        # became `sh -c sleep` with `120` as $0 -- the window exited instantly and
+        # took the server with it. Measured 2026-09-06.
+        $qWatch = ConvertTo-EraShellQuoted -Value "sleep $deadline; tmux -L $socket kill-server"
+        # RESOLVE THE SEAT BINARY ON THE LOGIN PATH. `wsl.exe` runs a NON-LOGIN,
+        # non-interactive bash whose PATH is only the system defaults -- measured
+        # 2026-09-06: `command -v opencode` and `command -v claude` both return
+        # nothing there, while a login shell finds
+        # ~/.nvm/versions/node/*/bin/opencode and ~/.local/bin/claude. Launching
+        # the bare name produced a window that died before the latch could see
+        # it, which is indistinguishable at the tmux level from a model that
+        # crashed instantly. Resolving here makes a missing CLI a LOUD, distinct
+        # failure (exit 3) instead.
+        $qBin  = ConvertTo-EraShellQuoted -Value $argvBuilt[0]
+        $qRest = (@($argvBuilt | Select-Object -Skip 1) |
+                  ForEach-Object { ConvertTo-EraShellQuoted -Value $_ }) -join ' '
+
+        $setup = "set -e`n" +
+                 "SEAT_BIN=`$(bash -lc 'command -v '$qBin 2>/dev/null || true)`n" +
+                 "if [ -z `"`$SEAT_BIN`" ]; then echo `"era-tmux: seat binary $qBin is not on the login PATH inside WSL`" >&2; exit 3; fi`n" +
+                 "tmux -L $qSock new-session -A -d -s $qSess -n era-watchdog $qWatch`n" +
+                 "tmux -L $qSock new-window -d -e 'TMUX=' -e 'TMUX_PANE=' -t $qSessT -n $qWin -c $qDir -- `"`$SEAT_BIN`" $qRest`n"
+        $r = Invoke-EraTmuxScript -ScratchDir $scratch -ScriptBody $setup
+        if ($r.Rc -eq 3) { throw "the seat CLI '$($argvBuilt[0])' is not installed inside WSL; the transport cannot carry this preset. $($r.Err.Trim())" }
+        if ($r.Rc -ne 0) { throw "tmux setup failed (rc=$($r.Rc)): $($r.Err.Trim())" }
 
         # LAUNCH LATCH. `new-window` exits 0 for a bad binary, so the only honest
         # confirmation is the row appearing. Until it has been seen once, absence
         # means "never started" (a transport fault), not "the seat died".
         $seen = $false
-        $latchDeadline = (Get-Date).AddSeconds(10)
+        $latchDeadline = (Get-Date).AddSeconds(15)
         while ((Get-Date) -lt $latchDeadline) {
-            $state = Get-EraTmuxWindowNames -Socket $socket -Session $session
+            $state = Get-EraTmuxWindowNames -Socket $socket -Session $session -ScratchDir $scratch
             if ($state.ServerUp -and $state.Names -contains $window) { $seen = $true; break }
-            Start-Sleep -Milliseconds 250
+            Start-Sleep -Milliseconds 400
         }
         if (-not $seen) {
             return @{
                 Response = $null; ExitCode = -1; Error = 'tmux-transport-unavailable'
                 ContentOk = $false; CaptureMethod = 'tmux'; InputTokens = $null; OutputTokens = 0
                 WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-                TruncationWarning = $null; Stderr = $null
-                Warnings = @($warnings + "the seat window never appeared within 10s; the launch argv did not run (a bad model id or a missing CLI exits 0 from new-window). NOT a model failure and not re-dispatched.")
+                TruncationWarning = $null; Stderr = $r.Err
+                Warnings = @($warnings + "the seat window never appeared within 15s, so the launch argv did not run (a bad model id or a missing CLI still exits 0 from new-window). NOT a model failure, and not re-dispatched.")
             }
         }
 
         # WAIT LOOP. The staged file is polled on the Windows side, which is a
         # local stat; tmux is consulted on a slower cadence because each call
         # crosses the interop boundary.
-        $expected  = "ERA-CANARY-$nonce"
-        $hardStop  = (Get-Date).AddSeconds($TimeoutSec)
-        $lastSize  = -1
-        $lastWrite = [datetime]::MinValue
-        $stable    = $false
-        $canary    = $false
-        $nextTmux  = (Get-Date).AddSeconds(15)
+        $expected   = "ERA-CANARY-$nonce"
+        $hardStop   = (Get-Date).AddSeconds($TimeoutSec)
+        $lastSize   = -1
+        $lastWrite  = [datetime]::MinValue
+        $canary     = $false
         $windowGone = $false
+        $nextTmux   = (Get-Date).AddSeconds(15)
 
         while ((Get-Date) -lt $hardStop) {
             if (Test-Path -LiteralPath $reviewPath) {
@@ -303,19 +410,18 @@ function Invoke-TmuxReview {
                     $stable = ($fi.Length -eq $lastSize -and $fi.LastWriteTimeUtc -eq $lastWrite)
                     $lastSize  = $fi.Length
                     $lastWrite = $fi.LastWriteTimeUtc
-                    if ($stable) {
-                        $tail = Get-EraTmuxLastLine -Path $reviewPath
-                        if ($tail -eq $expected) { $canary = $true; break }
+                    if ($stable -and (Get-EraTmuxLastLine -Path $reviewPath) -eq $expected) {
+                        $canary = $true; break
                     }
                 }
             }
             if ((Get-Date) -ge $nextTmux) {
                 $nextTmux = (Get-Date).AddSeconds(15)
-                $state = Get-EraTmuxWindowNames -Socket $socket -Session $session
+                $state = Get-EraTmuxWindowNames -Socket $socket -Session $session -ScratchDir $scratch
                 if (-not $state.ServerUp) {
                     # The watchdog holds the server up for TimeoutSec+120, so the
-                    # server being gone inside the budget is an infrastructure
-                    # fault, not this seat exiting.
+                    # server being gone INSIDE the budget is infrastructure, not
+                    # this seat exiting. Never recorded as a model verdict.
                     throw "tmux server '$socket' disappeared mid-attempt; the transport is unavailable."
                 }
                 if ($state.Names -notcontains $window) { $windowGone = $true; break }
@@ -323,48 +429,37 @@ function Invoke-TmuxReview {
             Start-Sleep -Milliseconds 750
         }
 
-        # STAT THE FILE BEFORE LABELLING. Every terminal branch asks what is on
-        # disk first, so a complete review from a seat that exited is a SUCCESS
-        # and a partial one is truncation -- not whatever ended the attempt.
-        # Stability is required only while the writer is alive; once the window
-        # is gone nothing can change the file.
+        # STAT THE FILE BEFORE LABELLING, so a complete review from a seat that
+        # exited is a SUCCESS and a partial one is truncation -- not whatever
+        # ended the attempt. Stability is required only while the writer is
+        # alive; once the window is gone nothing can change the file.
         if (-not $canary -and (Test-Path -LiteralPath $reviewPath)) {
             if ((Get-EraTmuxLastLine -Path $reviewPath) -eq $expected) { $canary = $true }
         }
-
-        $timedOut = -not $canary -and -not $windowGone
 
         if (-not $canary) {
             $hasFile = Test-Path -LiteralPath $reviewPath
             $code = if ($windowGone) { if ($hasFile) { 'tmux-seat-truncated' } else { 'tmux-seat-exited' } }
                     else             { if ($hasFile) { 'tmux-seat-timeout-partial' } else { 'tmux-seat-timeout' } }
             if ($hasFile) {
-                $raw = Get-Content -Raw -LiteralPath $reviewPath -ErrorAction SilentlyContinue
                 $forensic = $ResponsePath -replace '-response\.md$', '-raw.md'
-                try { $raw | Set-Content -LiteralPath $forensic -Encoding utf8 -ErrorAction Stop
-                      $warnings += "partial output kept at $forensic" } catch { }
+                try {
+                    Get-Content -Raw -LiteralPath $reviewPath -ErrorAction Stop |
+                        Set-Content -LiteralPath $forensic -Encoding utf8 -ErrorAction Stop
+                    $warnings += "partial output kept at $forensic"
+                } catch { }
             }
             return @{
                 Response = $null; ExitCode = -1; Error = $code; ContentOk = $false
                 CaptureMethod = 'tmux'; InputTokens = $null; OutputTokens = 0
                 WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-                TruncationWarning = $(if ($code -like '*truncated*' -or $code -like '*partial*') {
-                    'review.md exists but does not end with this attempt''s canary, so the write did not complete.' })
+                TruncationWarning = $(if ($hasFile) { "review.md exists but does not end with this attempt's canary, so the write did not complete." })
                 Stderr = $null; Warnings = @($warnings)
             }
         }
 
-        if ($timedOut) {
-            # Reachable when the canary was only seen on the post-loop stat --
-            # i.e. the model wrote it and kept editing, so stability never held.
-            # Recorded rather than silently promoted: this is precisely the
-            # contract violation the envelope asks models not to commit.
-            $warnings += 'the canary was present but review.md never went stable, so the model may have kept writing after declaring the review final.'
-        }
-
         $body = Get-EraTmuxReviewBody -Path $reviewPath -Canary $expected
-        $verdict = Test-EraCaptureAcceptable -Response $body.Text -PromptPath $PromptPath `
-                                             -Vendor "tmux/$seat"
+        $verdict = Test-EraCaptureAcceptable -Response $body.Text -PromptPath $PromptPath -Vendor "tmux/$seat"
         if (-not $verdict.Ok) {
             $warnings += $verdict.Warning
             return @{
@@ -375,9 +470,8 @@ function Invoke-TmuxReview {
                 TruncationWarning = $null; Stderr = $null; Warnings = @($warnings)
             }
         }
-
         if ($body.TailClaim) {
-            $warnings += "seat reported bundle tail '$($body.TailClaim)' (compare against the bundle's last path to detect a truncated READ; the canary certifies only that the WRITE completed)."
+            $warnings += "seat reported bundle tail '$($body.TailClaim)'; compare it against the bundle's last path to detect a truncated READ, which the canary cannot see -- the canary certifies only that the WRITE completed."
         }
 
         $body.Text | Set-Content -LiteralPath $ResponsePath -Encoding utf8
@@ -395,20 +489,29 @@ function Invoke-TmuxReview {
         # collect it at the deadline, but not before it had done whatever it
         # liked for the rest of that window.
         try {
-            $null = Invoke-EraTmuxCli -TmuxArgs @('tmux', '-L', $socket, 'kill-window', '-t', "${session}:$window")
-            $after = Get-EraTmuxWindowNames -Socket $socket -Session $session
-            if ($after.ServerUp -and $after.Names -contains $window) {
-                Write-Host "[tmux] WARNING: window '$window' survived kill-window; the watchdog will collect it within $deadline s."
-            }
-            # Only era's own windows are left when the watchdog alone remains.
-            $rest = Get-EraTmuxWindowNames -Socket $socket -Session $session
-            if ($rest.ServerUp -and @($rest.Names | Where-Object { $_ -ne 'era-watchdog' }).Count -eq 0) {
-                $null = Invoke-EraTmuxCli -TmuxArgs @('tmux', '-L', $socket, 'kill-server')
+            if (Test-Path -LiteralPath $scratch) {
+                $qs = ConvertTo-EraShellQuoted -Value $socket
+                $qt = ConvertTo-EraShellQuoted -Value "${session}:$window"
+                $qe = ConvertTo-EraShellQuoted -Value $session
+                $teardown = "tmux -L $qs kill-window -t $qt 2>/dev/null`n" +
+                            "left=`$(tmux -L $qs list-windows -t $qe -F '#{window_name}' 2>/dev/null | grep -v -x 'era-watchdog' | grep -c . || true)`n" +
+                            "if [ `"`$left`" = `"0`" ]; then tmux -L $qs kill-server 2>/dev/null; fi`n" +
+                            "exit 0`n"
+                $null = Invoke-EraTmuxScript -ScratchDir $scratch -ScriptBody $teardown
             }
         } catch { }
-        try { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+        # RETRY THE SCRATCH REMOVAL. The seat's process holds the directory as its
+        # cwd, and process exit is asynchronous: measured 2026-09-06, a
+        # single-shot Remove-Item after kill-window left the directory behind
+        # every time. Best-effort still, but three attempts over ~1.5s clears it.
+        foreach ($attempt in 1..3) {
+            if (-not (Test-Path -LiteralPath $scratch)) { break }
+            try { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction Stop }
+            catch { Start-Sleep -Milliseconds 500 }
+        }
     }
 }
+
 
 function Get-EraTmuxLastLine {
     <#

@@ -738,38 +738,36 @@ $modelOverrides = @{}
 $providerOverrides = @{}
 $resolvedAgyHint = $null
 $registry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach-Object {
-    $registryHash[$_.Name] = @{
-        backend = $_.Value.backend
-        model_id = $_.Value.model_id
-        # Preserve agy family/tier so $ModelInfo carries them into the adapter:
-        # Fix 7's tier-based stall floor keys on agy_model_family (-match 'pro'),
-        # and the default --model settings_value lookup uses both.
-        agy_model_family = $_.Value.agy_model_family
-        agy_model_tier = $_.Value.agy_model_tier
-        # REST fields (openaicompat/anthropic): without these, dispatch's
-        # $modelInfo = @{} + $Registry[$r] loses the endpoint+key and the adapter
-        # throws "requires ModelInfo.api_base". (era.ps1 passes $registryHash to
-        # Invoke-ReviewerDispatch, not the raw registry.)
-        api_base = $_.Value.api_base
-        api_key_env = $_.Value.api_key_env
-        api_key_header = $_.Value.api_key_header
-        max_tokens = $_.Value.max_tokens
-        # Delivery ceilings. These were MISSING, which made the documented
-        # "a re-measurement is data, not a code change" contract dead on every
-        # real dispatch: Get-EraBundleDeliveryPlan reads them off THIS hashtable,
-        # so the override branch could never fire. The unit test passed
-        # -ModelInfo straight to the pure function and never exercised this
-        # layer, so it proved the function worked and said nothing about the
-        # wiring. Same bug, same literal, one field-set later than the REST
-        # comment directly above -- which exists because of the identical
-        # omission. Found by all four seats of the 2026-08-31 panel.
-        max_bundle_bytes = $_.Value.max_bundle_bytes
-        max_bundle_tokens = $_.Value.max_bundle_tokens
-        pricing = @{ input_per_m = $_.Value.pricing.input_per_m; output_per_m = $_.Value.pricing.output_per_m }
-        supports_file_read = $_.Value.supports_file_read
-        supports_streaming = $_.Value.supports_streaming
-        notes = $_.Value.notes
+    # COPY EVERY FIELD, DO NOT ENUMERATE THEM. This was an allowlist of the keys
+    # someone had needed so far, and the SAME BUG landed three times: the REST
+    # fields (api_base/api_key_env) were missing until an adapter threw; the
+    # delivery ceilings (max_bundle_bytes/max_bundle_tokens) were missing, which
+    # made the documented "a re-measurement is data, not a code change" contract
+    # dead on every real dispatch and was found by all four seats of the
+    # 2026-08-31 panel; and `tmux_launch` was missing on 2026-09-06, so the tmux
+    # backend threw "preset has no tmux_launch" against a registry entry that
+    # plainly had one.
+    #
+    # Each fix added one more literal to the list, which is why it kept
+    # recurring. A registry field is data: era's job is to carry it to the
+    # adapter, not to know its name. Adding a field to _registry.json is now a
+    # data change, as the registry's own notes have always claimed it was.
+    #
+    # $modelInfo = @{} + $Registry[$r] in the dispatcher is a SHALLOW copy, so
+    # the values here are shared, not cloned -- fine because nothing mutates
+    # them, and the same as before this change.
+    $h = @{}
+    foreach ($f in $_.Value.PSObject.Properties) { $h[$f.Name] = $f.Value }
+    # pricing is normalised to a hashtable on purpose: Get-PerReviewerCap and the
+    # cost estimator index it, and a PSCustomObject from ConvertFrom-Json would
+    # work for property access but not for the hashtable operations around it.
+    if ($_.Value.pricing) {
+        $h['pricing'] = @{
+            input_per_m  = $_.Value.pricing.input_per_m
+            output_per_m = $_.Value.pricing.output_per_m
+        }
     }
+    $registryHash[$_.Name] = $h
 }
 
 # Opt-in: route the opencode reviewer aliases over direct HTTP instead of the TUI.

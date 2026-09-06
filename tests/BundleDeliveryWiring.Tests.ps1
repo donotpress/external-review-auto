@@ -160,11 +160,55 @@ Describe 'registry ceilings reach the real dispatch path' -Tag Unit {
         } finally { Remove-Item -LiteralPath $box.Root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    It 'era.ps1 carries the delivery keys into the registry hash it dispatches with' {
-        # Belt and braces for the exact omission: the projection is explicit, so a
-        # future field added to _registry.json is dropped unless named here too.
+    It 'era.ps1 copies EVERY registry field into the hash it dispatches with' {
+        # REWRITTEN 2026-09-06, and the reason matters more than the assertion.
+        #
+        # This used to pin the two delivery keys by name:
+        #     $src | Should -Match 'max_bundle_bytes\s*=\s*\$_\.Value\.max_bundle_bytes'
+        # because era.ps1 projected the registry through an ALLOWLIST and those
+        # two had been omitted. Its own comment named the flaw it was living with:
+        # "a future field added to _registry.json is dropped unless named here
+        # too". That is not a property worth pinning -- it is the bug. It recurred
+        # a third time when `tmux_launch` was added and the tmux backend threw
+        # "preset has no tmux_launch" against an entry that plainly had one.
+        #
+        # era.ps1 now copies every property generically, so the omission is not
+        # possible. What is worth guarding is that nobody reintroduces an
+        # allowlist, which is what this asserts.
         $src = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
-        $src | Should -Match 'max_bundle_bytes\s*=\s*\$_\.Value\.max_bundle_bytes'
-        $src | Should -Match 'max_bundle_tokens\s*=\s*\$_\.Value\.max_bundle_tokens'
+        $src | Should -Match 'foreach \(\$f in \$_\.Value\.PSObject\.Properties\)' `
+            -Because 'the registry projection must copy every field, not an enumerated subset'
+        $src | Should -Not -Match 'max_bundle_bytes\s*=\s*\$_\.Value\.max_bundle_bytes' `
+            -Because 'a per-field allowlist is the defect that dropped api_base, then the delivery ceilings, then tmux_launch'
+    }
+
+    It 'a registry field with no special handling still reaches the dispatched hash' {
+        # The behavioural half. Runs era.ps1's own projection over a synthetic
+        # registry containing a field era has never heard of; if the projection
+        # ever narrows again, this fails without needing to know which field was
+        # dropped.
+        $registry = [pscustomobject]@{
+            'fake-preset' = [pscustomobject]@{
+                backend    = 'tmux'
+                model_id   = 'x/y'
+                pricing    = [pscustomobject]@{ input_per_m = 1.0; output_per_m = 2.0 }
+                a_field_era_has_never_heard_of = 'carried'
+            }
+        }
+        $registryHash = @{}
+        $registry.PSObject.Properties | Where-Object { $_.Name -notlike '_*' } | ForEach-Object {
+            $h = @{}
+            foreach ($f in $_.Value.PSObject.Properties) { $h[$f.Name] = $f.Value }
+            if ($_.Value.pricing) {
+                $h['pricing'] = @{
+                    input_per_m  = $_.Value.pricing.input_per_m
+                    output_per_m = $_.Value.pricing.output_per_m
+                }
+            }
+            $registryHash[$_.Name] = $h
+        }
+        $registryHash['fake-preset']['a_field_era_has_never_heard_of'] | Should -Be 'carried'
+        $registryHash['fake-preset']['pricing'] | Should -BeOfType [hashtable] `
+            -Because 'Get-PerReviewerCap and the cost estimator index pricing as a hashtable'
     }
 }
