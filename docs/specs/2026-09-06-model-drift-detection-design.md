@@ -78,13 +78,19 @@ This repo has been bitten by guessed constants presented as measurements
 (`11e83ef`: "the 600s seat-budget floor was a guess, and it was overriding the
 measurement"); the fix is to label the guess, not to dress it up.
 
-## 4. Architecture — five units
+## 4. Architecture — four units
 
-Separated so that **every unit holding logic is reachable without a network**:
-parsing (§4.2), the writer's gate (§4.3) and the comparator (§4.4) are all pure
-or injectable, and only §4.1 touches the outside world.
+Every unit holding logic is reachable without a network: parsing (§4.2) and the
+comparator (§4.3) are pure, and only §4.1 touches the outside world.
 
-### 4.1 Fetch (one per backend) — I/O only, no parsing
+**This revision SUBTRACTS.** Three review rounds added machinery, and the third
+round showed each addition creating the next round's defect: a writer gate whose
+refusal was invisible, an attempt-header to make it visible, and then a finding
+that committing probe failures into a git fixture makes an offline build fail on
+transient network weather. The rule applied below is that **an operational
+failure is reported by the operation, not serialised into a checked-in file.**
+
+### 4.1 Fetch (one per backend) — I/O only
 
 ```
 Get-EraModelRaw-<Backend>  ->  @{ command; exitCode; stdout; stderr; capturedUtc }
@@ -96,77 +102,25 @@ Network. Never invoked from the test suite.
 
 ```
 ConvertFrom-EraModelListing-<Backend> -Stdout <string>
-    ->  @{ models = @{ '<vendor id>' = @{ display; variants; cost; status } } }
+    ->  @{ models = @{ '<vendor id>' = @{ display; variants } } }
 ```
 
-**The parser does NOT report coverage.** An earlier draft had it return its own
-`fields` map. That is the wrong layer: coverage is a static property of what a
-backend's CLI can express, not something a parser discovers, and a parser that
-reports its own trustworthiness can be wrong about it in the direction that
-matters. Coverage lives in the static table at §5 and is passed to the
-comparator (§4.4).
+**Collect only what §6 consumes, plus `display` for human-readable reports.**
+`status`, `limit` and `cost` are dropped from the shape: nothing compares them in
+v1, and "collected but unbudgeted" is the very thing §5 forbids. When pricing
+comparison is designed (§11), `cost` returns with a finding that reads it.
 
-Splitting fetch from parse is not tidiness — §7 shows three genuinely different
-formats, and leaving that logic inside a network-only function makes it
-untestable without a network, which is the `BroadScopeGate` failure §8 cites.
+The parser does **not** report coverage — that is a static property of a
+backend's CLI, not something a parser discovers, and a parser that reports its
+own trustworthiness can be wrong in the direction that matters. Coverage is §5.
 
-### 4.3 Snapshot writer — refuses to write THE MODEL LIST, never writes nothing
-
-Parse result → `tests/fixtures/models-<backend>.json`.
-
-**A writer that always writes reproduces §3 inside the detector**: a probe that
-fails or truncates would stamp a fresh `_captured`, turn the build green, and
-emit missing models the comparator reports as `model-withdrawn` errors.
-
-**But a writer that writes *nothing* on failure reproduces it too**, in the
-opposite direction: the capture pipeline dies, no file changes, and the offline
-test happily reports `no drift vs a snapshot captured <date>` until the staleness
-threshold trips — up to `MaxSnapshotAgeDays` of a dead probe reading as health.
-An earlier draft had exactly this hole, and made it worse by recording
-`exitCode` / `stderrExcerpt` / `rawLineCount` **only on accepted writes** — that
-is, only when `exitCode` is 0 by construction and nobody needs them.
-
-So the writer **always updates an attempt header, and separately decides whether
-to replace the model list**:
-
-```jsonc
-{
-  "_captured":    "2026-09-04",   // moves ONLY on an accepted capture
-  "_command":     "...",
-  "_lastAttempt": {               // ALWAYS updated, accepted or refused
-    "utc": "...", "exitCode": 1, "rejectedReason": "parse yielded 0 models",
-    "stderrExcerpt": "...", "rawLineCount": 0
-  },
-  "models":   { ... },            // replaced ONLY on an accepted capture
-  "notObserved": [ ... ]          // registry ids the probe looked for and did not find
-}
-```
-
-It **refuses to replace the model list** when the probe exited non-zero, or the
-parse yielded zero models. Those two are cheap, certain, and are most of the
-value — an earlier draft added a third, a `MaxModelCountDropFraction` hard
-refusal, and the round-4 panel was right that it overshot: a legitimate vendor
-cull larger than the fraction would be refused on *every* subsequent run, the old
-snapshot would stand, staleness would eventually trip, and there was no way
-forward. The drop check is kept as a **refusal that names its override** —
-`-AcceptDrop` — so a real cull is one acknowledged flag, not a deadlock.
-`MaxModelCountDropFraction` remains a **POLICY, not a measurement** (§3),
-proposed 0.25.
-
-**`notObserved` exists because key-absence is not a measurement.** The writer is
-given the registry's expected id set for that backend, so "the probe looked for
-this id and did not see it" is recorded positively. Without it, a model missing
-because the vendor withdrew it is byte-identical to one missing because the
-listing was truncated or a namespace was never covered — a never-asked question
-recorded as a negative answer, which is §1's whole subject.
-
-### 4.4 Comparator — pure function
+### 4.3 Comparator — pure function
 
 ```
 Compare-EraModelRegistry
     -Registry             <obj>
     -Snapshots            <map: backend -> snapshot>
-    -BackendCapabilities  <map: backend -> field coverage, the STATIC table of §5>
+    -BackendCapabilities  <map: backend -> the STATIC row of §5>
     -DefaultPanelSources  <map: source-name -> string[]>
     -Now                  <datetime>
   -> findings[]
@@ -175,122 +129,150 @@ Compare-EraModelRegistry
 No file reads, no CLI calls, no clock of its own.
 
 `-BackendCapabilities` is separate from `-Snapshots` because **`claude` has no
-snapshot by construction**, so a comparator iterating snapshots can never
-enumerate it and could never emit `backend-unmeasurable` for the one backend that
-needs it. Coverage must come from a source that lists every backend, including
-those with no probe.
+snapshot by construction**, so a comparator iterating snapshots could never
+enumerate it. `-DefaultPanelSources` is a map, not a merged array: merging
+destroys the disagreement `default-panel-mismatch` exists to report. `-Now` is
+injected so staleness is testable on literals.
 
-`-DefaultPanelSources` is a **map, not a merged array**: merging destroys the
-disagreement `default-panel-mismatch` exists to report.
+### 4.4 Refresh command — writes snapshots, reports its own failures
 
-`-Now` is injected so the staleness finding is testable on literals.
+Runs fetch → parse → write, then **runs the comparator and prints the report**.
+A refresh that only writes a file is not a detection event.
 
-### 4.5 Test / reporter
+It **refuses to replace a model list** when the probe exited non-zero or the
+parse yielded zero models, and **exits non-zero telling the operator so**. It
+does *not* record the failure inside the snapshot. An earlier draft did, to make
+the refusal visible to the offline comparator; the round-4 panel showed that
+turns a transient network drop into a red offline build and dirties a committed
+fixture with network weather. A failed refresh is an operational failure of the
+refresh command, and the refresh command is what reports it.
 
-Consumes findings, prints the report, asserts. Offline and deterministic. The
-report **must** carry the age-qualified verdict from §3 — never a bare "no
-drift", always `no drift vs a snapshot captured <date> (<n> days old)` — and must
-name every backend whose coverage is `unmeasured`.
+A model-count drop beyond `MaxModelCountDropFraction` is a **warning printed to
+the operator running the refresh**, not a refusal. The earlier hard refusal
+deadlocked on a legitimate vendor cull; a human is already standing in front of
+this command, and a 20-model withdrawal list is self-evidently suspicious to
+them. `MaxModelCountDropFraction` remains a **POLICY, not a measurement** (§3),
+proposed 0.25.
+
+**`notObserved` is CUT.** It was added so absence could be recorded positively.
+It did not work: it is computed at capture time against that day's registry and
+compared later against the current one, so a preset added after the last capture
+is absent from `models` *and* from `notObserved`, and would be reported as a
+withdrawal of a model that exists. Nothing in §6 ever read it — the
+`collected`-is-not-`compared` trap of §5, committed by the fix that added it.
+Absence is key-absence under `models`, and the `model-withdrawn` message names
+the snapshot's `_captured` date so a reader can see whether the preset predates
+it.
+
+### 4.5 Reporter
+
+Consumes findings, prints, asserts. Offline and deterministic. Must carry §3's
+age-qualified verdict — never a bare "no drift", always `no drift vs a snapshot
+captured <date> (<n> days old)` — and must name every backend whose coverage is
+`unmeasured` and every backend skipped as unconsumed.
 
 ## 5. Coverage is a static table, and `collected` is not `compared`
 
-A field the probe can see but which no §6 finding consumes is **not** being
-checked. Calling it "checked" is §3's trap committed by this design itself.
+A field the probe can see but which no §6 finding consumes is **not** checked.
 
 - `compared` — a §6 finding branches on it;
-- `collected` — recorded, nothing compares it yet;
+- `collected` — recorded for human reading, nothing compares it;
 - `unmeasured` — this backend's CLI cannot express it;
 - `n/a` — no such concept for this backend.
 
-| Backend | Command | ids | display | variants | pricing |
-|---|---|---|---|---|---|
-| `opencode` | `opencode models --verbose` | **compared** | collected | **compared** | **collected** |
-| `agy` | `agy models` | **compared** | collected | n/a (tier is in the id) | **unmeasured** |
-| `cmdc` | `cmdc --list-models` | collected (unconsumed) | n/a | n/a | **unmeasured** |
-| `claude` | *(none exists)* | **unmeasured** | unmeasured | unmeasured | unmeasured |
+| Backend | Command | probe? | consumed? | ids | display | variants |
+|---|---|---|---|---|---|---|
+| `opencode` | `opencode models --verbose` | yes | yes | **compared** | collected | **compared** |
+| `agy` | `agy models` | yes | yes | **compared** | collected | n/a (tier is in the id) |
+| `cmdc` | `cmdc --list-models` | yes | **no** | collected | n/a | n/a |
+| `claude` | *(none exists)* | **no** | yes | **unmeasured** | unmeasured | unmeasured |
 
-This table is the `-BackendCapabilities` input (§4.4). It is **static and
-hand-maintained**, not probe output.
+`probe?` and `consumed?` are columns, not prose. An earlier draft stated the
+exemption rule in §6 as "unmeasured OR unconsumed" while the table carried no
+consumption column, so a literal implementer had nothing to branch on.
 
-**Pricing is `collected`, not `compared`, and there is no `pricing-changed`
-finding in v1.** An earlier draft promoted it and the round-4 panel showed the
-promotion was unimplementable as written: opencode's `cost` is
-`{input, output, cache}` while the registry's `pricing` is
-`{input_per_m, output_per_m}`, and nothing specified the field mapping, the
-units, cache handling, or what "differs" means. A literal implementer would
-either emit a standing warning every run — the "warning nobody reads" failure
-this document cites — or silently compare a guessed subset. That is a claim of
-verification with undefined semantics, which is precisely the offence the
-round-2 finding was raised against, reinstated by its own fix.
+This table is the `-BackendCapabilities` input, **static and hand-maintained**.
+§8 pins its completeness: a backend the registry references with no row here
+would otherwise produce *zero* findings — a clean bill of health for a backend
+nobody looked at, which is §1's shape inside the detector.
 
-The honest v1 state is `collected`, with the mapping named as future work (§11).
-Note what this costs: nothing, in evidence terms. Pricing is `unmeasured` for
-agy and cmdc anyway, and the one pricing figure this repo *knows* is wrong —
-gemini 3.8's, inherited unverified from 3.6 — is on an agy preset and invisible
-to a comparison of opencode `cost` regardless.
+**Pricing is absent from this table in v1.** Round 2 correctly said calling it
+"checked" while nothing compared it was a false claim; round 3's fix promoted it
+to `compared` with no field mapping, units, cache handling or tolerance, which
+committed the same offence at one remove. It is now not collected at all (§4.2),
+and the mapping is named as future work (§11). This costs nothing in evidence
+terms: pricing is `unmeasured` for agy and cmdc anyway, and the one figure this
+repo *knows* is wrong — gemini 3.8's, inherited unverified from 3.6 — is on an
+agy preset and invisible to an opencode `cost` comparison either way.
 
 ## 6. Findings and severity
 
 | Finding | Meaning | Severity |
 |---|---|---|
-| `model-withdrawn` | registry preset names an id absent from the snapshot | **error** if in the default panel, else **warning** |
-| `variant-undeclared` | registry asks for a variant the model does not declare | **error, always** |
-| `snapshot-stale` | `_captured` older than `MaxSnapshotAgeDays` | **error** |
-| `snapshot-rejected` | `_lastAttempt` records a refused capture | **error** |
-| `snapshot-missing` | no snapshot for a backend that **has a probe and is consumed** | **error** |
-| `backend-unmeasurable` | backend coverage says `ids = unmeasured` | **info**, always emitted |
-| `model-unconsumed` | snapshot lists models no preset uses | **info** (normal) |
+| `model-withdrawn` | a **consumed** backend's registry preset names an id absent from `models` | **error** if in the default panel, else **warning** |
+| `variant-undeclared` | the registry's variant map lists a variant the model does not declare | **error, always** |
+| `retired-withdrawn` | a `retired` preset's model is gone | **warning** (see below) |
+| `snapshot-stale` | a **consumed** backend's `_captured` is older than `MaxSnapshotAgeDays` | **error** |
+| `snapshot-missing` | no snapshot for a backend with `probe? = yes` and `consumed? = yes` | **error** |
+| `backend-unmeasurable` | `probe? = no` (only `claude`) | **info**, always emitted |
+| `backend-unconsumed` | `consumed? = no` (only `cmdc`) | **info**, always emitted |
 | `default-panel-mismatch` | the default-panel sources disagree | **error** |
 
-### Severity keys on runtime loudness, not on the default panel alone
+`snapshot-rejected` and `model-unconsumed` are **CUT**. The first belonged to the
+refresh command, which now reports its own failures (§4.4). The second would have
+emitted ~68 info rows per run from cmdc's unconsumed snapshot alone.
 
-An earlier draft keyed everything on default-panel membership, reasoning that a
-stale non-default preset *"fails loudly at the vendor when someone named it"*.
-**True for withdrawal, false for variants**, and the counter-evidence ships in
-this repo:
+### Two exemptions, keyed on two different columns
+
+An earlier draft collapsed these into one rule keyed on `unmeasured`, which was
+then claimed to cover `cmdc` — whose ids are `collected`, not `unmeasured`.
+Calling collected data "unmeasurable" is itself the instrument-for-subject
+substitution this design exists to prevent, so they are now separate:
+
+- **`probe? = no`** (`claude`) → `backend-unmeasurable`, and no absence or
+  staleness findings. Four of era's 25 presets are claude-backed and permanently
+  unverifiable this way; the report says so on every run.
+- **`consumed? = no`** (`cmdc`) → `backend-unconsumed`, and no absence or
+  staleness findings. Its snapshot is captured so the data exists when a backend
+  is written; nothing compares it, and it must not red-build the suite by ageing
+  past the staleness threshold.
+
+§3's staleness rule is therefore scoped to **consumed** backends.
+
+### Severity keys on runtime loudness, not the default panel alone
+
+An earlier draft keyed everything on panel membership, reasoning a stale
+non-default preset *"fails loudly at the vendor when named"*. **True for
+withdrawal, false for variants**, and the counter-evidence ships here:
 
 > `tests/OpencodeVariantDeclared.Tests.ps1:3-19` — *"opencode DOES NOT VALIDATE
-> VARIANT NAMES... an undeclared variant is SILENTLY IGNORED, not rejected...
-> There is no runtime signal to check, which is why the guard has to be a test."*
+> VARIANT NAMES... SILENTLY IGNORED, not rejected... There is no runtime signal
+> to check, which is why the guard has to be a test."*
 
 A withdrawn model exits non-zero with `Model not found`. An undeclared variant
-exits 0 and returns a normal-looking review at the wrong reasoning effort —
-silent by default *and* when named. Keying it on the panel would also have been
-a **strictness regression** against that file's sweep (`:164-189`), which
-iterates the whole `_opencode_model_map` and asserts `Should -BeNullOrEmpty`.
+exits 0 and returns a normal-looking review at the wrong reasoning effort.
 
-**`variant-undeclared` checks both contracts**, because the bundle contains
-both: the variant era's preference loop actually *chooses* (`:74-103`) and every
-variant *listed* in the map (`:164-189`). Checking only the chosen one would
-miss an inert entry that is one preference-loop edit away from live, which is
-the stated reason the sweep exists.
+**`variant-undeclared` checks the variant MAP, not era's chosen variant.** The
+map sweep is strictly stronger — it covers every listed variant, including inert
+entries one preference-loop edit away from live, which is why
+`tests/OpencodeVariantDeclared.Tests.ps1:164-189` sweeps the whole map. Checking
+the *chosen* variant would additionally require the comparator to know era's
+preference order, which lives in `backends/opencode.ps1` and is already
+reimplemented once in that test — reproducing inside the detector the
+two-copies-of-one-rule hazard the test itself warns about.
 
 ### Panel membership when the sources disagree
 
-`model-withdrawn` severity keys on panel membership, and
-`default-panel-mismatch` exists precisely because the two sources can disagree —
-so membership is undefined exactly during the incident it matters in. **Rule:
-membership is the UNION of the sources.** Fail toward error.
-
-### Exemption: unmeasurable OR unconsumed
-
-A backend emits `backend-unmeasurable` **instead of** — never alongside —
-`snapshot-missing`, `snapshot-stale`, `snapshot-rejected` and `model-withdrawn`
-when its coverage is `ids = unmeasured` (`claude`) **or** when no era backend
-consumes it (`cmdc`, whose ids are `collected` but which no preset dispatches
-to — the earlier draft's exemption was keyed on `unmeasured` alone and therefore
-did not actually cover `cmdc`, which it claimed to). REST backends (§10) are
-exempt on the same "no probe" grounds until their phase lands.
+Membership is the **UNION** of the sources. It is undefined exactly during the
+incident `default-panel-mismatch` reports, so it fails toward error.
 
 ### Retired presets
 
-A preset marked `retired` in the registry is **exempt from `model-withdrawn`**
-(its absence is expected and recorded) but **not** from `variant-undeclared`,
-matching `tests/OpencodeVariantDeclared.Tests.ps1`, which excuses a retired
-preset's absence (`:79-93`) while its sweep still checks retired map entries
-(`:164-189`). Note the live caveat: `retired` is read by tests only and by
-nothing at runtime, which is why the `ox-alpha` preset was deleted rather than
-left flagged.
+`retired` is read by tests and by **nothing at runtime** — which is why the
+`ox-alpha` preset was deleted rather than left flagged. So a silent exemption
+would mark green a preset that still dispatches and still fails at the vendor,
+which is the `ox-alpha` incident exactly. A retired preset whose model is gone
+therefore emits `retired-withdrawn` (warning), not silence.
 ## 7. Probe details, as measured 2026-09-06
 
 **agy** — `agy models`. First line is an ANSI-coloured `Fetching available
@@ -316,113 +298,99 @@ data is there if a backend is written. The report must label it
 no listing flag. `--model` accepts a value but cannot enumerate.
 
 ## 8. Test strategy
-## 8. Test strategy
 
 - **Comparator tests** — pure, on literals, TDD, red first. One per finding in
-  §6, explicitly including `pricing-changed`'s absence, `snapshot-rejected`,
-  `model-unconsumed`, the union rule for a disagreeing panel, retired-preset
-  handling, and both `variant-undeclared` contracts (chosen and swept). An
-  earlier draft's plan omitted three of its own finding types.
-- **Parser tests** — pure, on committed golden stdout captures per backend,
-  including the ANSI preamble `agy` emits and whatever stream it arrives on.
-- **Fixture-shape test** — every snapshot parses and carries `_captured`,
-  `_command`, `_lastAttempt`. **And enforces §9's binding rules**: every entry
-  under `models` has a `variants` key whose value is an array, never `null`; a
-  minimum entry count is pinned. Without this, a writer bug that emits
-  `variants: null` for a present model makes
-  `tests/OpencodeVariantDeclared.Tests.ps1:105-114` read it as absent and skip
-  it — silently disabling the guard, by the same mechanism as the 2026-08-26 →
-  09-04 variant incident.
-- **No network in the suite.** The repo has already had to fix a stated
-  "no network or live backend spawning" property that was false.
-- **Refresh is a separate, explicit command** that **runs the comparator and
-  prints the report**. A refresh that only writes a file is not a detection
-  event, and the moment a human is actually looking is the moment a verdict is
-  worth most.
+  §6, including both exemptions, the union rule for a disagreeing panel, and
+  `retired-withdrawn`.
+- **Parser tests** — pure, on committed golden stdout per backend, including the
+  ANSI preamble `agy` emits and whichever stream it arrives on (§11).
+- **Capabilities-completeness test** — the §5 table's backend set equals the set
+  of backends the registry references. Without it, a new backend with no row
+  produces zero findings and reads as healthy.
+- **Fixture-shape test** — every snapshot parses and carries `_captured` and
+  `_command`. Shape rules are **per-backend**: `variants` must be an array and
+  never `null` only for backends whose §5 row says `variants` is `compared`
+  (opencode). Applying it universally would force `agy` and `cmdc` — whose
+  variants are `n/a` — to fake `[]`, which then feeds false variant checks.
+  **No minimum entry count**: a count floor here is a second hard gate with no
+  override, and would red-build a legitimate cull that the refresh command
+  already warned a human about.
+- **No network in the suite.** The repo has already had to fix a stated "no
+  network or live backend spawning" property that was false.
 
 **What the staleness threshold does and does not buy.** It bounds *neglect*, not
 drift. Effective detection latency is the time to the next refresh, so a
 default-panel seat withdrawn the day after a capture stays green for up to
-`MaxSnapshotAgeDays` — the `ox-alpha` harm at a larger multiplier. The threshold
-is kept, but it is **not** the mechanism protecting the default panel; cadence
-is, and default-panel backends need one materially tighter than the threshold.
-Shipping the threshold *as if* it were the protection would be the over-claim §3
-exists to prevent.
+`MaxSnapshotAgeDays` — the `ox-alpha` harm at a larger multiplier. It is kept,
+but cadence protects the default panel, not the threshold. Shipping the
+threshold *as if* it were the protection would be the over-claim §3 prevents.
 
 ## 9. Migration: fold in the existing opencode fixture
 
 `tests/fixtures/opencode-declared-variants.json` (captured 2026-09-04, 43
-entries) already holds `opencode models --verbose` data. Two files holding the
-same vendor data can disagree — the drift problem reproduced inside the drift
-detector — so the new `models-opencode.json` supersedes it.
+entries) holds `opencode models --verbose` data. Two files holding the same
+vendor data can disagree — the drift problem inside the drift detector — so
+`models-opencode.json` supersedes it.
 
-**Migrate by RE-PROBING, not by converting.** The old fixture holds variants
-only; the §4.2 shape also carries `display`, `cost` and `status`, which a
-conversion cannot invent. And stamping converted old data with a fresh
-`_captured` would be §3's trap exactly; carrying the old date forward means
-shipping a snapshot already older than the proposed 30-day policy on day one. A
-fresh probe avoids both.
+**Migrate by re-probing.** The old fixture holds variants only; a conversion
+cannot invent `display`. Stamping converted old data with a fresh `_captured`
+would be §3's trap; carrying the old date forward ships a snapshot already older
+than the 30-day policy on day one.
 
-**The earlier draft claimed "its assertions do not change — only where it reads
-from". That was false**, and the error was load-bearing. The old contract is
-three-valued and its `_README` says so: `[...]` = declares these, `[]` = declares
-none, `null` = absent from `opencode models`. Three assertions branch on it
-(`:79-93`, `:105-114`, `:176-178`), and the sweep states why — *"absent is not
-the same fact as 'declares nothing'"*. The accessor also changes
+**The acceptance check does not compare the new capture to the old fixture.**
+Two earlier drafts tried and both were wrong — the first ran the old test against
+a converted file it cannot read, the second asserted key-set equality between a
+fresh probe and a snapshot taken days earlier, which asserts vendor stability:
+the precise thing this design exists to disprove, and a failure that fires
+exactly when the tool is working. Instead, split it:
+
+1. **Parser correctness** is verified in a golden test against the *committed
+   2026-09-04 stdout capture* — a fixed input with a fixed expected output, which
+   is the only comparison that is legitimately an equality.
+2. **The fresh capture** is accepted on schema validity plus every currently
+   active preset resolving.
+3. **Any difference** between the old fixture's `declared` map and the new
+   capture is printed as a drift report for a human to sign off — it is
+   information, not an assertion.
+
+The old contract was three-valued and its `_README` says so: `[...]` = declares
+these, `[]` = declares none, `null` = absent. Three assertions branch on it
+(`:79-93`, `:105-114`, `:176-178`), and the accessor changes
 (`$Snap.declared.$mid` → `$Snap.models.$mid.variants`), so the assertions change.
-
-Binding rules:
-
-1. **Absence is key-absence under `models`**, and is additionally recorded
-   positively in `notObserved` (§4.3) so "looked for and not found" is
-   distinguishable from "never covered".
-2. **Present-with-no-variants is `[]`**, never `null`. Enforced by the
-   fixture-shape test (§8), not by convention.
-3. The `_README` convention text is carried into the new file.
-4. The test's accessors are rewritten and its absent-branch becomes a
-   key-existence check. This is an assertion change and is described as one.
-
-**Acceptance check:** a conversion-equivalence script that rebuilds the old
-three-valued `declared` map from the new file and asserts key-set and per-model
-array equality, run before the old fixture is deleted. An earlier draft said to
-run "the old test against a converted fixture", which is impossible — the old
-test reads `.declared` and would fail for reasons unrelated to correctness. That
-sentence was a survivor of the retracted "assertions do not change" draft: the
-same section-to-section drift this document has now produced twice, which is why
-this revision was written as a whole rather than patched section by section.
+An earlier draft claimed they did not; that is retracted. Carry the `_README`
+convention text into the new file, and keep absence as key-absence.
 
 This lands as its own commit so a regression is attributable.
 
 ## 10. Not in scope
 
 - REST backends (`openaicompat` ×8, `anthropic` ×3, `geminiapi` ×2 — 13 of 25
-  presets). Most expose an OpenAI-style `/v1/models`, but that needs API keys
-  present, which makes coverage machine-dependent. §4.1/§4.2 is the extension
-  point.
+  presets). Most expose an OpenAI-style `/v1/models`, but that needs API keys,
+  making coverage machine-dependent. §4.1/§4.2 is the extension point.
 - Any automatic edit to `backends/_registry.json`.
 - Any change to which models the default panel uses.
 
 ## 11. Known-unresolved
 
 1. **`gemini-flash-35` is dead right now.** `agy models` lists 3.8/3.7/3.6/3.1-pro
-   and no 3.5. `tests/SpecReview.Tests.ps1` still asserts it deliberately — that
-   test pins what the registry *says*, and the registry is wrong in a way no
-   existing test can see. This design closes that gap.
-2. **Pricing comparison is deferred**, and with it the only field whose drift
-   §2 calls highest-consequence. Closing it needs a defined mapping from
-   opencode `cost{input,output,cache}` to registry
-   `pricing{input_per_m,output_per_m}`, a unit convention, cache handling and an
-   equality tolerance — none of which exist yet. **agy pricing cannot be closed
-   this way at all**: `agy models` prints no rates, so `gemini` 3.8's inherited,
-   unverified figure stays unverifiable by this mechanism and needs a different
-   one.
+   and no 3.5. `tests/SpecReview.Tests.ps1` still asserts it deliberately — it
+   pins what the registry *says*, and the registry is wrong in a way no existing
+   test can see. This design closes that gap.
+2. **Pricing comparison is deferred, and pricing is not even collected in v1.**
+   Closing it needs a defined mapping from opencode `cost{input,output,cache}` to
+   registry `pricing{input_per_m,output_per_m}`, a unit convention, cache
+   handling and an equality tolerance. **agy pricing cannot be closed this way at
+   all** — `agy models` prints no rates — so gemini 3.8's inherited, unverified
+   figure needs a different mechanism entirely. This is the largest known gap:
+   §2 calls pricing the highest-consequence drift and v1 does not check it.
 3. **`MaxSnapshotAgeDays = 30` and `MaxModelCountDropFraction = 0.25` are
    declared policies**, not derived. See §3.
-4. **The writer's stderr rule is under-specified.** "wrote to stderr in a way the
-   parser does not recognise" is not implementable as prose; the allowed stderr
-   patterns per backend need enumerating in the golden tests, and it is unstated
-   whether `agy`'s ANSI `Fetching available models...` preamble arrives on stdout
-   or stderr.
+4. **`agy`'s ANSI `Fetching available models...` preamble** — it is unstated
+   whether it arrives on stdout or stderr, and the golden parser test must pin
+   whichever it is.
+5. **`retired` is enforced by nothing at runtime.** `retired-withdrawn` reports
+   the symptom; the underlying gap is that era will still dispatch a retired
+   preset. Fixing that is a separate change to era, not to this detector.
 ## External review — round 2 (4-seat panel, 2026-09-06)
 
 `gemini` (Gemini 3.8 Flash High) · `opus` (Claude Opus 5) · `deepseek-flash`
@@ -481,3 +449,41 @@ are now cut back. Nobody argued any round-2 finding should have been *rejected*;
 the criticism was uniformly of the fixes, not the findings. That is a more useful
 result than a rejection would have been, and it is what the round-2 note about an
 8-for-8 confirmation rate was worried about.
+
+---
+
+## External review — round 4 (4-seat panel, 2026-09-06, era round 5)
+
+All four returned; `seat_containment: contained`; 1 citation warning, translated
+by era's own checker (both opencode seats were on the read-tool path this round,
+the bundle having grown past the 51,200-byte attach cap).
+
+This round was asked whether round 3's fixes overshot **and what should be cut**.
+Three of four seats answered the cut question substantively. The verdict was that
+the design had accreted: each round's fix was creating the next round's defect.
+**This revision subtracts.**
+
+| # | Claim | Seats | Disposition |
+|---|---|---|---|
+| 1 | Committing `_lastAttempt` probe failures into a git fixture turns a transient network drop into a red offline build and dirties a checked-in file with network weather — round 3's fix overshot from "unemittable" to "fail-closed" | gemini, muse-spark | **CONFIRMED — `_lastAttempt` and `snapshot-rejected` CUT.** A failed refresh is an operational failure of the refresh command, which now exits non-zero and says so (§4.4). |
+| 2 | `notObserved` is never read by any finding, and creates a new bug: a preset added after the last capture is absent from `models` AND from `notObserved`, so it reports as a withdrawal of a model that exists | opus, gemini, muse-spark (deepseek dissented, wanting it kept with real semantics) | **CONFIRMED — CUT.** It was added to make absence positive and nothing consumed it: §5's own `collected`-is-not-`compared` trap, committed by the fix that added it. Absence is key-absence; the finding message names the `_captured` date so a reader can see whether the preset predates it. |
+| 3 | The `unmeasured OR unconsumed` exemption is incoherent: `cmdc`'s ids are `collected`, so labelling it `backend-unmeasurable` is factually false, and §5's table had no consumption column for an implementer to branch on | opus, gemini, deepseek-flash, muse-spark | **CONFIRMED, all four seats.** Split into two exemptions on two new table columns (`probe?`, `consumed?`) with two findings: `backend-unmeasurable` and `backend-unconsumed`. `model-unconsumed` CUT — it would have emitted ~68 info rows per run from cmdc alone. |
+| 4 | §9's acceptance check asserts key-set equality between a fresh probe and a 2026-09-04 snapshot — i.e. asserts vendor stability, the thing this design exists to disprove, failing exactly when the tool is working | opus, gemini | **CONFIRMED.** opus notes this is the third generation of a defect in the same paragraph. Split into golden-test parser equality (fixed input, legitimately an equality), schema+resolution acceptance for the live capture, and a printed drift report for a human. |
+| 5 | The fixture-shape test's pinned minimum entry count is a second hard gate with no override, re-creating the deadlock `-AcceptDrop` was added to remove | opus | **CONFIRMED — count floor CUT.** The drop check also demoted from refusal to a warning printed to the human already standing in front of the refresh. |
+| 6 | The universal "`variants` is an array, never null" shape rule contradicts the coverage table, where `agy`/`cmdc` variants are `n/a` — an implementer must fake `[]` or red-build them | muse-spark | **CONFIRMED** — shape rules are per-backend, applying only where `variants` is `compared`. |
+| 7 | The static capabilities table is hand-maintained with nothing asserting completeness: a backend with no row produces zero findings and reads as healthy | opus, muse-spark | **CONFIRMED** — §8 adds a completeness test. This was machinery added in round 3 to fix that exact shape of bug, carrying the bug. |
+| 8 | The comparator cannot compute the chosen-variant contract without era's preference order, which lives in `backends/opencode.ps1` and is already reimplemented once in the test | gemini, muse-spark | **CONFIRMED** — chosen-variant check CUT; the map sweep is strictly stronger and avoids a second copy of the preference rule. |
+| 9 | The retired exemption marks green a preset that still dispatches, since `retired` is enforced by nothing at runtime — the `ox-alpha` shape exactly | muse-spark | **CONFIRMED** — `retired-withdrawn` (warning) replaces silent exemption; the underlying runtime gap is named in §11. |
+| 10 | `status`/`limit`/`cost` are collected while nothing consumes them | deepseek-flash, muse-spark | **CONFIRMED** — dropped from the parse shape; `cost` returns when a finding reads it. |
+
+**Net effect: seven things removed, two added.** Removed — `_lastAttempt`,
+`snapshot-rejected`, `notObserved`, `model-unconsumed`, the shape test's count
+floor, the chosen-variant check, and `status`/`limit`/`cost` from the parse
+shape. Added — two table columns, and a completeness test for the table.
+
+**On the oscillation.** Rounds 2→3→4 each fixed the previous round's fix on the
+same sub-problem (the writer's failure path). That is the signature of a
+convergence loop chasing its own tail, and it is why this revision was framed as
+subtraction with an explicit "what should be cut" question rather than another
+pass of the same kind. The question earned its place: three seats used it, and
+seven of the ten dispositions above are deletions.
