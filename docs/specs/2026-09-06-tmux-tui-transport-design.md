@@ -51,6 +51,9 @@ where used.
 | M15 | era's env scrub omits `TMUX_PANE` | `tests/EnvScrub.Tests.ps1:10-19` | 8 vars, `TMUX_PANE` absent |
 | M16 | Cost uses era's **own** bundle token count, never the adapter's `InputTokens` | `workflow.ps1:2957,3007`; `claude.ps1` returns `InputTokens = $null` | only `OutputTokens` must be supplied (§7.2) |
 | M17 | `{{PREVIOUS_ROUND}}` admits up to **80,000 chars** | `workflow.ps1:711` | decides prompt delivery — see M22 |
+| M34 | Does `opencode.db` record the **variant**? | **No.** A `message` row's `data` has `role, agent, time, parentID, mode, path, cost, tokens, modelID, providerID, finish, model, summary` — no variant/effort field |
+| M35 | Does `opencode.db` record **per-message tokens**, with reasoning separable? | **Yes.** 389/400 recent messages carry `{total, input, output, reasoning, cache{write,read}}`; reasoning is non-zero for every model in use, incl. deepseek-v4-flash (107,549 over 161 messages) |
+| M36 | Does `claude` record **per-turn usage** outside era? | **Yes.** Session transcripts under `~/.claude/projects/` carry `input_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens` and `thinking_tokens` — 262 turns in the current session |
 | M32 | Does `opencode` emit a **turn-end event**? | **Yes.** `session.idle`, consumable by a plugin; `~/.config/opencode/plugin/tmux-bell.js` is a working example on this box |
 | M33 | Can `claude` be given a **scoped hook at launch**? | **Yes.** `--settings <file-or-json>` takes a settings file *or an inline JSON string*, so a `Stop` hook can be scoped to one seat |
 | M31 | `read-tool` delivery **succeeded** at 52,042 bytes | round 4 of this very review: `delivery_mode read-tool`, deepseek-flash returned 7,664 chars in 273.7 s, muse-spark 10,636 in 464.3 s | M4 failed at 59,034 bytes in the same mode — so read-tool is not uniformly fatal (§9.1) |
@@ -673,10 +676,16 @@ each a fact about the instrument reported as a fact about the subject.
   otherwise designs away, so it is the last resort, not the first.
 
   **Verification is out-of-band, so this stays testable without reading the
-  pane.** `opencode.db` records the variant actually used per message — that is
-  how the registry's deepseek 32,000-token output-ceiling diagnosis was made. So
-  whatever sets the effort, C6 confirms it from the database, never from the
-  screen. A method that cannot be confirmed there counts as a negative.
+  pane — but it is indirect, and revision 6 overstated it.** `opencode.db` does
+  **not** record the variant: measured, a `message` row's `data` carries
+  `role, agent, time, parentID, mode, path, cost, tokens, modelID, providerID,
+  finish, model, summary` and no variant/effort field anywhere (M34). What it
+  does record is `tokens.reasoning` per message, separable for every opencode
+  model in use (M35). So C6 verifies **behaviourally**: run the same prompt at
+  two claimed effort settings and compare reasoning-token counts. Identical
+  counts mean the setting did not take. That is weaker than reading a recorded
+  value — it is an inference from behaviour — and a method whose effect cannot be
+  shown there counts as unproven rather than as a negative.
 - **C7 — reaping, asserted on processes rather than windows.** Launch a seat,
   kill era mid-dispatch, and assert the watchdog destroys the server at its
   deadline and that **no seat process survives**. M30 already showed
