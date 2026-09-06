@@ -1018,6 +1018,29 @@ function Compare-EraSeatContainment {
     .SYNOPSIS
         Did the working tree move while the seats were running? Takes two
         Get-EraGitState snapshots and returns a verdict.
+
+    .DESCRIPTION
+        WHAT `contained` DOES AND DOES NOT MEAN. This diffs `git status`, so it
+        sees WRITES INSIDE THE WORK TREE and nothing else. It cannot see:
+
+          * a seat READING anything -- prior rounds, a peer's in-flight response,
+            any file on the machine. Reads leave no trace in `git status`.
+          * a write OUTSIDE the work tree.
+          * anything gitignored, including all of `.external-reviews/`, which is
+            filtered below on purpose so era's own artifacts do not read as a
+            breach.
+
+        THIS IS NOT THEORETICAL. On 2026-09-06 era seats stamped the OPERATOR'S
+        tmux windows -- writing their busy state and conversation ids onto panes
+        belonging to another session for 900s at a time -- and this function
+        reported `contained` for every one of those rounds, correctly by its own
+        definition and uselessly for the purpose it was being trusted with. A
+        peer session had to measure it; nothing about it was visible here.
+
+        So `contained` is evidence that the REPO was not modified. It is not
+        evidence that a seat stayed in its lane. Anything relying on the second
+        claim needs a different instrument, and the honest reading of a green
+        verdict is narrow.
     #>
     [CmdletBinding()]
     param($Before, $After)
@@ -1450,6 +1473,21 @@ function Get-EraCostReport {
         if ($null -eq $c) { "{0} ~unknown" -f $r } else { "{0} ~`${1}" -f $r, [Math]::Round([double]$c, 4) }
     }
     $lines.Add("[era] Estimated: " + ($parts -join ' | ') + (" (round ~`${0})" -f [Math]::Round($AggregateCost, 4)))
+    # SAY WHAT THE NUMBER OMITS, WHERE THE NUMBER IS SHOWN. Measured 2026-09-06
+    # across 12 seats against the vendors' own records: era's estimate ran ~3.2x
+    # low ($0.5651 estimated vs $1.8107 recorded), because output is estimated
+    # from the FINAL RESPONSE'S CHARACTERS and that misses two whole categories --
+    # 126,912 reasoning/thinking tokens, and the agentic tool-call turns that
+    # never reach the response file. Per-seat: deepseek-flash 5.5-11.2x,
+    # muse-spark 2.5-4.5x, opus 2.9-3.3x.
+    #
+    # No multiplier is applied here. The sample is n=4 per model, `agy` has no
+    # readable vendor record at all, and a guessed correction would be a second
+    # unmeasured number stacked on the first. What is fixed is the CLAIM: the
+    # line no longer reads as the bill.
+    # Full method and caveats: docs/assessments/2026-09-06-era-cost-estimates-vs-vendor-truth.md
+    # Re-measure any round with: tools/token-truth.py <review-dir> <round>
+    $lines.Add("[era] NOTE: that estimate counts the response text only. Reasoning tokens and agentic tool-call turns are invisible to it; measured ~3.2x low over 12 seats (worst 11.2x). The caps below gate on this number.")
 
     foreach ($r in $ReviewerList) {
         $c = $PerReviewerCosts[$r]

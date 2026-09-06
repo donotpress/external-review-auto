@@ -195,3 +195,19 @@ Describe 'Write-ReviewMetadata records the containment verdict' -Tag Unit {
         $meta.seat_containment.verdict  | Should -Be 'unmeasured'
     }
 }
+
+Describe 'Compare-EraSeatContainment documents what it cannot see' -Tag Unit {
+    # A green verdict from this function was cited as evidence that seats "stayed
+    # contained" while they were, in fact, writing onto another session's tmux
+    # panes. The verdict was correct by its own definition and misleading in use.
+    # The limitation is load-bearing, so it is pinned here: if someone deletes the
+    # explanation, this fails and they have to decide deliberately.
+    It 'says it sees writes only, and names reads as invisible' {
+        $skillRoot = Split-Path $PSScriptRoot -Parent
+        $src = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'workflow.ps1')
+        $fn  = [regex]::Match($src, '(?s)function Compare-EraSeatContainment \{.*?\n\}').Value
+        $fn | Should -Not -BeNullOrEmpty -Because 'the function must exist to be documented'
+        $fn | Should -Match 'READING|reads'
+        $fn | Should -Match 'OUTSIDE the work tree|outside the work tree'
+    }
+}
