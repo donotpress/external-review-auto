@@ -163,3 +163,47 @@ These are inferences, not measurements. Each is where I am most likely wrong.
 Question 7 is the one I would most like a straight answer to. I have not costed
 `backends/cmdc.ps1`, and if it is cheap, it may be the better answer to the only
 argument this design has left.
+
+---
+
+## 8. Round 1 answered question 7, and the answer goes against this design
+
+Four seats, 2/2/6/4 criticals. `deepseek-flash` reduced §7.7 to one checkable
+property rather than a costing exercise: **can `cmdc` be driven
+non-interactively?** If yes, `backends/cmdc.ps1` is a thin process-spawn backend
+that runs anywhere `pwsh` runs, and the transport's last argument is retired.
+
+**Measured: yes.** `cmdc -p --tools-all "…"` with stdin closed and no TTY read
+the 59,034-byte bundle and summarised its actual file list correctly, exit 0.
+era's process-spawn adapters capture **stdout**, so the model never needs a
+file-write tool — which is just as well, because the same run did *not* produce
+the file it was also asked to write.
+
+**`opus` also corrected §7.7's premise.** I claimed a process-spawn `cmdc.ps1`
+would "cross no boundary at all". False: of the six bugs in §4, the
+backslash-eating, the .NET-quoting-on-top, and the non-login PATH are `wsl.exe`
+facts, not tmux facts. A WSL-side `cmdc.ps1` inherits three of them. The
+alternative is cheaper, not free, and §7.7 overstated the gap.
+
+**Three more findings I accept without reservation:**
+
+- **`seat_containment=contained` is a demonstrated false negative and §2 quotes
+  it as evidence** (opus). The cross-session stamping *was* a containment
+  failure, and the instrument reported `contained` throughout because it diffs
+  `git status` and sees writes only. Citing it in the reliability section is the
+  unmeasured-state-as-negative-answer shape this repo keeps finding.
+- **The residual `%1` is bug 6 downgraded, not a separate residual** (opus). Same
+  literal pane id; the fix redirected the socket without stopping seats
+  addressing a stale pane. "Residual" was the wrong classification.
+- **13/13 is a conditional rate against an unconditional 15/16** (opus,
+  deepseek, muse-spark). The excluded class — launches that never reached a seat
+  — is exactly the silent `cmdc` failure of §4, and its count was never
+  disclosed. Not a comparison.
+
+**Revised recommendation.** §6 said "keep it, opt-in, it earns its place through
+`cmdc`". That is no longer supportable: `cmdc` is reachable without it. The
+honest position is that **`backends/cmdc.ps1` should be costed and probably
+built, and this transport should not be extended further until it is.** What the
+transport has that process-spawn does not is a seat that reads its bundle off
+disk with no attach cap — which is a hedge against a failure mode whose trigger
+(§3.2) is still unknown.
