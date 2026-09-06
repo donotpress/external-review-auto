@@ -139,9 +139,17 @@ injected so staleness is testable on literals.
 Runs fetch → parse → write, then **runs the comparator and prints the report**.
 A refresh that only writes a file is not a detection event.
 
-It **refuses to replace a model list** when the probe exited non-zero or the
-parse yielded zero models, and **exits non-zero telling the operator so**. It
-does *not* record the failure inside the snapshot. An earlier draft did, to make
+When the probe exits non-zero or the parse yields zero models, the refresh
+**writes nothing at all** — the snapshot file is not created, modified or
+touched, `_captured` included — and **exits non-zero telling the operator so**.
+
+That one word decides whether this design is safe. If a refused refresh were to
+stamp `_captured` while keeping the old model list, a dead capture pipeline would
+stay green forever and `snapshot-stale` would never fire: §3's trap, reached
+through exactly the door the deleted `snapshot-rejected` used to cover. Because
+the file is left untouched, the existing `_captured` keeps ageing and
+`snapshot-stale` is the backstop. "Refresh exits non-zero" is sufficient only
+with this sentence. An earlier draft did, to make
 the refusal visible to the offline comparator; the round-4 panel showed that
 turns a transient network drop into a red offline build and dirties a committed
 fixture with network weather. A failed refresh is an operational failure of the
@@ -209,10 +217,10 @@ agy preset and invisible to an opencode `cost` comparison either way.
 
 | Finding | Meaning | Severity |
 |---|---|---|
-| `model-withdrawn` | a **consumed** backend's registry preset names an id absent from `models` | **error** if in the default panel, else **warning** |
-| `variant-undeclared` | the registry's variant map lists a variant the model does not declare | **error, always** |
+| `model-withdrawn` | on a backend with `probe? = yes` AND `consumed? = yes`, a registry preset names an id absent from `models` | **error** if in the default panel, else **warning** |
+| `variant-undeclared` | on a backend whose §5 `variants` column is `compared`, `_opencode_model_map` lists a variant the model does not declare | **error, always** |
 | `retired-withdrawn` | a `retired` preset's model is gone | **warning** (see below) |
-| `snapshot-stale` | a **consumed** backend's `_captured` is older than `MaxSnapshotAgeDays` | **error** |
+| `snapshot-stale` | on a backend with `probe? = yes` AND `consumed? = yes`, `_captured` is older than `MaxSnapshotAgeDays` | **error** |
 | `snapshot-missing` | no snapshot for a backend with `probe? = yes` and `consumed? = yes` | **error** |
 | `backend-unmeasurable` | `probe? = no` (only `claude`) | **info**, always emitted |
 | `backend-unconsumed` | `consumed? = no` (only `cmdc`) | **info**, always emitted |
@@ -251,6 +259,15 @@ withdrawal, false for variants**, and the counter-evidence ships here:
 
 A withdrawn model exits non-zero with `Model not found`. An undeclared variant
 exits 0 and returns a normal-looking review at the wrong reasoning effort.
+
+**`variant-undeclared` skips models absent from the snapshot.** A map entry
+whose model is not in `models` is handled by the withdrawal rules alone; the
+finding checks variants only for models actually present. This matches the
+shipping sweep, which does the same thing for the same reason —
+`tests/OpencodeVariantDeclared.Tests.ps1:176-178` skips on both key-absence and
+a `null` declaration, because "absent" and "declares nothing" are different
+facts. Without the rule an implementation either throws on a null reference or
+reports every variant of a withdrawn model as undeclared.
 
 **`variant-undeclared` checks the variant MAP, not era's chosen variant.** The
 map sweep is strictly stronger — it covers every listed variant, including inert
@@ -304,9 +321,14 @@ no listing flag. `--model` accepts a value but cannot enumerate.
   `retired-withdrawn`.
 - **Parser tests** — pure, on committed golden stdout per backend, including the
   ANSI preamble `agy` emits and whichever stream it arrives on (§11).
-- **Capabilities-completeness test** — the §5 table's backend set equals the set
-  of backends the registry references. Without it, a new backend with no row
-  produces zero findings and reads as healthy.
+- **Capabilities-completeness test** — every backend the registry references is
+  either in the §5 table or in a literal, spec-declared out-of-scope list
+  (`openaicompat`, `anthropic`, `geminiapi` — the REST backends of §10). Table
+  rows with `consumed? = no` that the registry does not reference (`cmdc`) are
+  permitted. **A subset relation, not equality**: `cmdc` has a row and no
+  registry entry, the REST backends have registry entries and no row, so
+  equality is red on day one in both directions. Without this test a NEW backend
+  with no row produces zero findings and reads as healthy.
 - **Fixture-shape test** — every snapshot parses and carries `_captured` and
   `_command`. Shape rules are **per-backend**: `variants` must be an array and
   never `null` only for backends whose §5 row says `variants` is `compared`
@@ -487,3 +509,36 @@ convergence loop chasing its own tail, and it is why this revision was framed as
 subtraction with an explicit "what should be cut" question rather than another
 pass of the same kind. The question earned its place: three seats used it, and
 seven of the ten dispositions above are deletions.
+
+---
+
+## External review — round 5 (FINAL, 2026-09-06, era round 6)
+
+`seat_containment: contained`; 0 citation warnings. **Three of four seats
+returned.** `deepseek-flash` produced nothing (exit −1, 0 chars, 621s on the
+read-tool path) — an infrastructure failure of the intermittent
+over-attach-cap delivery mode, recorded here as a *missing seat*, not as
+agreement. This round therefore rests on three opinions, not four.
+
+Verdicts: `muse-spark` **READY TO IMPLEMENT** (0 criticals). `opus` and `gemini`
+**NOT READY**, with three criticals each that turned out to be the same three
+issues, all scoping, all one-sentence fixes.
+
+| # | Claim | Seats | Disposition |
+|---|---|---|---|
+| 1 | Absence and staleness were scoped to "consumed" backends, which includes `claude` — so `claude` presets, `opus` among them, would emit `model-withdrawn` and `snapshot-stale` on day one, contradicting the exemption two sections later. And the completeness test asserted set *equality*, which is red in both directions: `cmdc` has a table row and no registry entry, the REST backends have registry entries and no row | opus, gemini | **CONFIRMED** — `model-withdrawn` and `snapshot-stale` now require `probe? = yes AND consumed? = yes`; the completeness test is a subset relation naming the out-of-scope REST backends literally. |
+| 2 | §4.4 said the refresh "refuses to replace a **model list**", implying other fields might still be written. If `_captured` were stamped on a refusal, a dead capture pipeline stays green forever and `snapshot-stale` never fires — §3's trap through exactly the door the deleted `snapshot-rejected` used to cover | opus, gemini | **CONFIRMED** — a refused refresh now writes **nothing at all**, `_captured` included, so the existing date keeps ageing and staleness is the backstop. opus: "that one word decides whether the subtraction is safe", and both seats independently reached the same sentence. |
+| 3 | `variant-undeclared` named no registry structure, carried no `variants = compared` condition, and had no rule for a map entry whose model is absent from the snapshot — so an implementation would throw on a null reference or report every variant of a withdrawn model as undeclared | opus, gemini | **CONFIRMED** — scoped to `compared` backends, names `_opencode_model_map`, and skips absent models. Verified against the shipping sweep, which skips on both key-absence and a `null` declaration for the same reason (`tests/OpencodeVariantDeclared.Tests.ps1:176-178`). |
+
+**These three fixes have NOT themselves been reviewed.** The conductor protocol
+caps at four review rounds and this was the fourth, so the loop stops here by
+rule rather than because a round returned clean. The spec is one small,
+unreviewed revision past its last review, and all three changes are scoping
+sentences rather than new machinery — but that is the honest status, not
+"converged".
+
+**Trajectory across four rounds:** 8 criticals → 9 → 10 → 3. The first three
+rounds each found defects introduced by the previous round's fixes; the fourth
+found only scoping gaps and one seat called it ready. Round 4's subtraction
+appears to have been the turn, though with `deepseek-flash` absent this round
+that reading rests on three seats.
