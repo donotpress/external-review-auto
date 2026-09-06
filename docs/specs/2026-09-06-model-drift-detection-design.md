@@ -78,42 +78,94 @@ This repo has been bitten by guessed constants presented as measurements
 (`11e83ef`: "the 600s seat-budget floor was a guess, and it was overriding the
 measurement"); the fix is to label the guess, not to dress it up.
 
-## 4. Architecture — four units
+## 4. Architecture — five units
 
-Deliberately separated so the only unit with real logic has no I/O.
+Separated so that **every unit holding logic is reachable without a network**:
+parsing (§4.2), the writer's acceptance gate (§4.3) and the comparator (§4.4) are
+all pure or injectable, and only §4.1 touches the outside world. The earlier
+draft drew four units and claimed the comparator was "the only real logic" — it
+was not, because parsing three dissimilar CLI formats was buried inside the
+network-only probe.
 
-### 4.1 Probe (one per backend)
+### 4.1 Fetch (one per backend) — I/O only, no parsing
 
-Runs the vendor CLI, returns a normalised object. **Network. Never invoked from
-the test suite.**
+Runs the vendor CLI and returns **raw stdout plus process facts**. Nothing else.
+Network. Never invoked from the test suite.
 
 ```
-Get-EraModelSnapshot-<Backend>  ->  @{
-    backend    = 'agy'
-    command    = 'agy models'
-    capturedUtc= '2026-09-06'
-    models     = @{ '<vendor model id>' = @{ display; variants; cost; status } }
-    fields     = @{ ids='checked'; display='checked'; variants='n/a'; pricing='unmeasured' }
+Get-EraModelRaw-<Backend>  ->  @{ command; exitCode; stdout; stderr; capturedUtc }
+```
+
+### 4.2 Parse (one per backend) — **pure, unit-tested on golden stdout**
+
+Raw stdout → normalised model map. **No I/O, so it is testable on committed
+golden literals with no network.**
+
+```
+ConvertFrom-EraModelListing-<Backend> -Stdout <string>  ->  @{
+    models = @{ '<vendor model id>' = @{ display; variants; cost; status } }
+    fields = @{ ids='compared'; display='collected'; variants='n/a'; pricing='unmeasured' }
 }
 ```
 
-`fields` is the honesty mechanism (§5). A probe that cannot see a field says so
-rather than omitting it.
+**Splitting fetch from parse is not tidiness.** §7 shows three genuinely
+different formats — an ANSI preamble plus TAB pairs, a JSON stream, and
+whitespace-column text with section headers. That is real logic, and leaving it
+inside a network-only function makes it untestable without a network — the
+`BroadScopeGate` failure this spec cites at §8 as a thing to avoid, reproduced.
+The earlier draft's claim that the comparator was "the only real logic" was
+false and is retracted.
 
-### 4.2 Snapshot writer
+### 4.3 Snapshot writer — **has an acceptance gate; it is not pure serialisation**
 
-Probe result → `tests/fixtures/models-<backend>.json`. Pure serialisation.
+Parse result → `tests/fixtures/models-<backend>.json`.
 
-### 4.3 Comparator — **pure function, the only real logic**
+**A writer that always writes reproduces §3 inside the detector.** If a probe
+runs unauthenticated, times out, hits a truncated list, or the CLI is missing,
+a naive writer stamps a fresh `_captured` — clearing `snapshot-stale`, turning
+the build green — and emits a snapshot missing most models, which the comparator
+then reports as `model-withdrawn` **errors** against the registry. That is a
+failure of the instrument published as a fact about the subject: exactly what §3
+says this design exists to prevent, arriving through the writer instead of
+through the clock.
+
+So the writer **refuses to write** when:
+
+- the probe exited non-zero, or wrote to stderr in a way the parser does not
+  recognise;
+- the parse yields zero models;
+- the model count fell by more than `MaxModelCountDropFraction` versus the
+  existing snapshot for that backend.
+
+The snapshot records `exitCode`, `stderrExcerpt` and `rawLineCount` so a reader
+can tell a real vendor change from a broken capture. **`MaxModelCountDropFraction`
+is a POLICY, not a measurement**, and carries the same labelling obligation as
+`MaxSnapshotAgeDays` (§3). Proposed initial value **0.25**.
+
+### 4.4 Comparator — pure function
 
 ```
-Compare-EraModelRegistry -Registry <obj> -Snapshots <map> -DefaultPanel <string[]>
-    -> findings[]
+Compare-EraModelRegistry
+    -Registry            <obj>
+    -Snapshots           <map: backend -> snapshot>
+    -DefaultPanelSources <map: source-name -> string[]>
+    -Now                 <datetime>
+  -> findings[]
 ```
 
-No file reads, no CLI calls, no clock — the age check is a separate finding
-produced by passing `Now` in. Fully unit-testable on literals, the same way
-`Compare-EraSeatContainment` is.
+No file reads, no CLI calls, **no clock of its own** — `Now` is injected so the
+staleness finding is testable on literals.
+
+`-DefaultPanelSources` is a **map, not a merged array**. The earlier draft passed
+`-DefaultPanel <string[]>`, which made `default-panel-mismatch` (§6) impossible
+to emit: merging the two sources destroys the disagreement the finding exists to
+report. That row was added during a self-review pass and not propagated to the
+signature — a drift between two parts of this document, which is the failure
+class the document is about.
+
+### 4.5 Test / reporter
+
+Consumes findings, prints the report, asserts. Offline and deterministic.
 
 ### 4.4 Test / reporter
 
@@ -124,16 +176,32 @@ Consumes findings, prints the report, asserts. Offline and deterministic.
 Coverage genuinely differs per backend, so a single per-backend "ok" would lie.
 Measured 2026-09-06:
 
+**`collected` is not `compared`, and the earlier draft conflated them.** A field
+the probe can see but which no finding in §6 consumes is not being checked —
+calling it "checked" in the report is the §3 trap committed by this design
+itself: a claim of verification with no verification behind it. So the states are:
+
+- `compared` — the probe sees it **and** a §6 finding branches on it;
+- `collected` — the probe sees it, nothing compares it yet (recorded for later);
+- `unmeasured` — this probe cannot see it;
+- `n/a` — this backend has no such concept.
+
 | Backend | Command | ids | display | variants | pricing |
 |---|---|---|---|---|---|
-| `opencode` | `opencode models --verbose` | checked | checked | **checked** | **checked** (JSON `cost`) |
-| `agy` | `agy models` | checked | checked | n/a (tier is in the id) | **unmeasured** |
-| `cmdc` | `cmdc --list-models` | checked | **n/a** (prints a capability description, not a display name) | n/a | **unmeasured** |
+| `opencode` | `opencode models --verbose` | **compared** | collected | **compared** | **compared** (JSON `cost`) |
+| `agy` | `agy models` | **compared** | collected | n/a (tier is in the id) | **unmeasured** |
+| `cmdc` | `cmdc --list-models` | collected | n/a (prints a capability description, not a display name) | n/a | **unmeasured** |
 | `claude` | *(none exists)* | **unmeasured** | unmeasured | unmeasured | unmeasured |
 
-Three states, never two: `checked` / `unmeasured` / `n/a`. `unmeasured` means
-"this probe cannot see this field"; `n/a` means "this backend has no such
-concept". Collapsing either into "ok" reintroduces §3.
+`cmdc` is `collected`, not `compared`: nothing consumes it, because no era
+backend dispatches to it (§7).
+
+**Pricing is now `compared` where it can be, because it is the highest-consequence
+drift in the design.** §2's first argument against auto-updating is that pricing
+feeds the spend guard — so a design that collects opencode's `cost` and compares
+nothing is blind to the drift it says matters most. §6 gains `pricing-changed`.
+Where pricing is `unmeasured` (agy, cmdc) the report must say so on every run;
+that gap is real and is named in §11.
 
 **`claude` is permanently `unmeasured` by this mechanism.** The CLI has no
 enumeration subcommand — verified against its full `--help`. Four of era's 25
@@ -147,28 +215,65 @@ The comparator emits findings, each with a severity:
 | Finding | Meaning | Severity |
 |---|---|---|
 | `model-withdrawn` | registry preset names an id absent from the snapshot | **error** if the preset is in the default panel, else **warning** |
-| `variant-undeclared` | registry asks for a variant the model does not declare | **error** if default panel, else **warning** |
+| `variant-undeclared` | registry asks for a variant the model does not declare | **error, always** — see below |
+| `pricing-changed` | snapshot `cost` differs from registry `pricing` where pricing is `compared` | **warning** (never auto-applied, §2) |
 | `snapshot-stale` | `_captured` older than `MaxSnapshotAgeDays` | **error** |
-| `snapshot-missing` | no snapshot file for a backend that has presets | **error** |
+| `snapshot-missing` | no snapshot for a backend **that has a probe** | **error** |
+| `snapshot-rejected` | writer refused a capture (§4.3) and the old snapshot stands | **error** |
 | `backend-unmeasurable` | backend has no enumeration (claude) | **info**, always emitted |
 | `model-unconsumed` | snapshot lists models no preset uses | **info** (this is normal) |
 | `default-panel-mismatch` | `config/defaults.json` and `$EraShippedPanel` disagree | **error** |
 
-**Why severity is keyed on the default panel.** The measured harm was a dead
-seat in the default panel — every bare `/era` dispatching a model that could not
-run, for days. A stale *non-default* preset only bites someone who names it
-explicitly, and it fails loudly at the vendor when they do. Failing the build on
-any drift would turn an unrelated commit red because a vendor deprecated
-something overnight — the `0c6be1d` "a warning that fires on every healthy round
-is a warning nobody reads" failure, in build form.
+### Severity is keyed on runtime loudness, not on the default panel alone
 
-This is not a new convention: `tests/RegistryCapabilities.Tests.ps1` already has
-a test whose entire job is *"the default panel contains no RETIRED preset"*.
-Graduated severity keyed on the default panel is the existing pattern here.
+The earlier draft keyed every severity on default-panel membership, with the
+rationale that a stale non-default preset *"fails loudly at the vendor when
+someone names it"*. **That is true for withdrawal and false for variants**, and
+the difference is measured in this repo:
+
+> `tests/OpencodeVariantDeclared.Tests.ps1:3-19` — *"opencode DOES NOT VALIDATE
+> VARIANT NAMES... an undeclared variant is SILENTLY IGNORED, not rejected...
+> There is no runtime signal to check, which is why the guard has to be a test."*
+
+A withdrawn model produces `Model not found` and a non-zero exit — loud. An
+undeclared variant produces exit 0 and a normal-looking review at the wrong
+reasoning effort — **silent in the default case and silent when named**. So the
+correct discriminator is *"does this failure announce itself at runtime?"*, not
+*"is this preset in the default panel?"*.
+
+Keying variants on the panel would also have been a **strictness regression
+against a test already shipping**: that file's sweep (`:164-189`) iterates the
+whole `_opencode_model_map` — every provider, every entry, not the panel — and
+asserts `$problems | Should -BeNullOrEmpty`, on the stated grounds that *"an
+inert undeclared name is one preference-loop edit away from being a live one"*.
+The 2026-09-04 sweep found four such entries, all inert and all non-default, and
+corrected all four. A comparator that downgraded those to warnings would
+contradict the test it is meant to generalise.
+
+`model-withdrawn` keeps panel-keyed severity, because there the "loud at the
+vendor" argument does hold, and because failing the build on every deprecated
+non-default model would be the `0c6be1d` "warning nobody reads" failure in build
+form. `tests/RegistryCapabilities.Tests.ps1` already carries that convention in
+its *"the default panel contains no RETIRED preset"* test.
+
+### Unmeasurable backends are exempt from absence findings
+
+`claude` has four presets, one of them the default-panel `opus`, and can never
+have a snapshot (§5). Under the earlier draft that made `snapshot-missing` fire
+as an error on day one, and a stub empty snapshot would have made every claude
+preset a `model-withdrawn` error instead. Both were unconditional red builds for
+a backend behaving exactly as designed.
+
+So: a backend whose `fields.ids` is `unmeasured` emits `backend-unmeasurable`
+**instead of** — never alongside — `snapshot-missing`, `snapshot-stale` and
+`model-withdrawn`. The same exemption covers REST backends (deferred, §10) and
+`cmdc` (no era backend consumes it, §7). `snapshot-missing` applies only to a
+backend that **has a probe**.
 
 The default panel is read from **both** `config/defaults.json` and
 `$EraShippedPanel` in `runtimes/_era-defaults.ps1`, which are required to stay in
-lockstep; a mismatch between them is itself a finding.
+lockstep; both are passed to the comparator separately (§4.4) so a mismatch
+between them is itself a finding.
 
 ## 7. Probe details, as measured 2026-09-06
 
@@ -207,7 +312,22 @@ no listing flag. `--model` accepts a value but cannot enumerate.
   (`BroadScopeGate` was spawning real `opencode`). Probes are invoked only by
   the refresh command.
 - **Refresh is a separate, explicit command**, run by a human when a seat
-  misbehaves or the staleness test goes red.
+  misbehaves or the staleness test goes red. **Refresh RUNS THE COMPARATOR and
+  prints the report** — it does not merely write a file. A refresh that only
+  writes is not a detection event, so the one moment a human is actually looking
+  would otherwise produce no verdict, and drift found at capture time would wait
+  for a later test run to be reported.
+
+**What the staleness threshold does and does not buy.** It bounds *neglect*, not
+drift. Effective detection latency is the time to the next refresh, so a
+default-panel seat withdrawn the day after a capture stays green for up to
+`MaxSnapshotAgeDays` — the ox-alpha harm (§1) at a larger multiplier, and that is
+the error-grade case. The threshold is necessary and is kept, but it is **not**
+the mechanism protecting the default panel; refresh cadence is. Default-panel
+backends therefore need a cadence materially tighter than the threshold, by a
+scheduled probe or by refreshing on a schedule the operator sets. Naming that
+cadence is left to implementation, but shipping the threshold *as if* it were the
+protection would be the same over-claim §3 exists to prevent.
 
 ## 9. Migration: fold in the existing opencode fixture
 
@@ -217,10 +337,38 @@ this design runs. Keeping both means two files hold the same vendor data and can
 disagree, which is the drift problem reproduced inside the drift detector.
 
 So: the new `models-opencode.json` supersedes it, and
-`tests/OpencodeVariantDeclared.Tests.ps1` is repointed at the new file. Its
-assertions do not change — only where it reads from. This is the one step that
-touches a currently-passing test, and it should land as its own commit so a
-regression is attributable.
+`tests/OpencodeVariantDeclared.Tests.ps1` is repointed at the new file.
+
+**The earlier draft claimed "its assertions do not change — only where it reads
+from". That was wrong, and the error was load-bearing.** The old fixture's
+contract is *three-valued*, and its `_README` says so explicitly: `[...]` =
+declares these, `[]` = declares none, `null` = **absent from `opencode models`**.
+Three assertions branch on that distinction (`:79-93`, `:105-114`, `:176-178`),
+and the sweep comment states the reason — *"absent is not the same fact as
+'declares nothing', and the snapshot records the difference (null vs [])"*.
+
+The §4.2 shape (`models = @{ id = @{ ... } }`) has no representation for "absent"
+except a missing key, and nothing in the earlier draft stopped the writer
+emitting `variants: null` for a **present** model that declares none — which
+would collapse "present, declares nothing" into "absent" and silently disable the
+`:105-114` guard. The accessor changes shape too
+(`$Snap.declared.$mid` → `$Snap.models.$mid.variants`), so the assertions
+demonstrably change.
+
+Binding rules for the migration:
+
+1. **Absence is key-absence only.** A model absent from `opencode models` has no
+   key under `models`. The writer must never emit a present model with
+   `variants: null`.
+2. **Present-with-no-variants is `[]`**, never `null`.
+3. The `_README` convention text is carried into the new file, not dropped.
+4. The test's accessors are rewritten to `.models.<id>.variants`, and the
+   "absent" branch becomes a key-existence check. This is an assertion change and
+   is described as one.
+
+This is the one step that touches a currently-passing test, and it lands as its
+own commit so a regression is attributable. A pre-migration run of the old test
+against a converted fixture is the acceptance check.
 
 ## 10. Not in scope
 
@@ -243,3 +391,30 @@ regression is attributable.
    Whatever mechanism does verify agy pricing is out of scope here and should be
    named as a separate problem rather than assumed solved by this work.
 3. **`MaxSnapshotAgeDays = 30` is a declared policy**, not derived. See §3.
+
+---
+
+## External review — round 2 (4-seat panel, 2026-09-06)
+
+`gemini` (Gemini 3.8 Flash High) · `opus` (Claude Opus 5) · `deepseek-flash`
+(DeepSeek V4 Flash) · `muse-spark` (Muse Spark 1.3). All four returned; 0
+citation warnings; `seat_containment: contained`.
+
+Disposition per claim. Cross-seat agreement is recorded because three of the
+eight were found independently by three seats.
+
+| # | Claim | Seats | Disposition |
+|---|---|---|---|
+| 1 | `variant-undeclared` must be **error regardless of panel** — opencode does not validate variant names, so it is silent both by default and when named; downgrading it was a strictness regression against the shipping sweep | opus, deepseek-flash, muse-spark | **CONFIRMED** — verified verbatim at `tests/OpencodeVariantDeclared.Tests.ps1:3-19` ("SILENTLY IGNORED, not rejected... no runtime signal to check") and `:164-189` (sweeps the whole `_opencode_model_map`, `Should -BeNullOrEmpty`). §6 rewritten to key severity on **runtime loudness**, not panel membership. |
+| 2 | `snapshot-missing` fails the build on day one: `claude` has presets (incl. default-panel `opus`) and can never have a snapshot | opus, gemini, muse-spark | **CONFIRMED** — §6 now exempts `fields.ids='unmeasured'` backends, which emit `backend-unmeasurable` *instead of* absence findings; `snapshot-missing` scoped to backends with a probe. |
+| 3 | Comparator signature cannot produce two of its own findings: `Now` was not a parameter, and a merged `-DefaultPanel` array destroys the `default-panel-mismatch` it must detect | opus, gemini, muse-spark | **CONFIRMED** — §4.4 takes `-Now` and `-DefaultPanelSources <map>`. Root cause worth recording: the mismatch row was added during the spec self-review and not propagated to the signature — this document drifting against itself. |
+| 4 | The snapshot writer had no acceptance gate, so a failed/partial probe stamps a fresh `_captured` (green) and emits missing models reported as `model-withdrawn` errors — §3's trap reached through the writer | opus | **CONFIRMED** — §4.3 is no longer "pure serialisation": refuses on non-zero exit, empty parse, or a model-count drop over `MaxModelCountDropFraction` (labelled a policy, like `MaxSnapshotAgeDays`), and records `exitCode`/`stderrExcerpt`/`rawLineCount`. New `snapshot-rejected` finding. |
+| 5 | Migration claim "assertions do not change" is false, and it drops the fixture's three-valued contract (`[]` = declares none vs `null` = absent) | opus, gemini | **CONFIRMED** — §9 retracts the claim and adds four binding rules; absence is key-absence only, present-with-no-variants is `[]`. |
+| 6 | Parsing is real logic trapped inside a network-only probe, making it untestable without a network — the `BroadScopeGate` failure this spec itself cites | muse-spark | **CONFIRMED** — split into §4.1 fetch (I/O) and §4.2 parse (pure, golden-stdout tests). The "comparator is the only real logic" claim is retracted. |
+| 7 | `cost`/`status`/`display` are collected but no finding consumes them, while §5 called opencode pricing "checked" — a claim of verification with nothing behind it, and pricing is §2's own highest-consequence drift | deepseek-flash, muse-spark | **CONFIRMED** — §5 now distinguishes `compared` / `collected` / `unmeasured` / `n/a`; §6 gains `pricing-changed` (warning, human-applied). |
+| 8 | The staleness threshold bounds neglect, not drift; and a refresh that only writes a file is not a detection event | deepseek-flash | **CONFIRMED** — §8 now requires refresh to run the comparator and print, and states plainly that cadence, not the threshold, protects the default panel. |
+
+**Zero claims rejected this round.** That is unusual and is itself worth
+flagging: it more likely means the spec had real slack than that the panel was
+uncritical. Three of the eight were caught by three independent seats, which is
+the cross-vendor redundancy the panel exists for.
