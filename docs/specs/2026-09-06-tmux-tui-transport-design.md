@@ -1,6 +1,6 @@
 # tmux TUI transport as an era backend
 
-**Date:** 2026-09-06 · **Revision:** 4 (after rounds 1-3; dispositions in §15)
+**Date:** 2026-09-06 · **Revision:** 5, final (rounds 1-4, the protocol cap; dispositions in §15)
 **Status:** design, unbuilt. Nothing here has been implemented.
 **Scope:** one new backend, `backends/tmux.ps1`, carrying an `opus` seat and a
 `deepseek-flash` seat. `agy` and `cmdc` are out of scope for the first build.
@@ -51,6 +51,7 @@ where used.
 | M15 | era's env scrub omits `TMUX_PANE` | `tests/EnvScrub.Tests.ps1:10-19` | 8 vars, `TMUX_PANE` absent |
 | M16 | Cost uses era's **own** bundle token count, never the adapter's `InputTokens` | `workflow.ps1:2957,3007`; `claude.ps1` returns `InputTokens = $null` | only `OutputTokens` must be supplied (§7.2) |
 | M17 | `{{PREVIOUS_ROUND}}` admits up to **80,000 chars** | `workflow.ps1:711` | decides prompt delivery — see M22 |
+| M31 | `read-tool` delivery **succeeded** at 52,042 bytes | round 4 of this very review: `delivery_mode read-tool`, deepseek-flash returned 7,664 chars in 273.7 s, muse-spark 10,636 in 464.3 s | M4 failed at 59,034 bytes in the same mode — so read-tool is not uniformly fatal (§9.1) |
 | M28 | era's measured stall policy is a **per-turn** silence budget | `docs/assessments/2026-09-04-stall-threshold-measured.md` | productive silences to **570.2 s**; 3.97 % over 300 s |
 
 ### 2.2 The CLIs
@@ -81,6 +82,8 @@ environment the seats will run in. `agy` is not, which is why it is out of scope
 | M24 | How does an **absent server** read? | `no server running on …`, `rc=1` |
 | M25 | Does the **server exit when its last window's command exits**? | **Yes** — and it then reads *identically to M24* |
 | M26 | Does a **sentinel window** preserve the distinction? | **Yes.** Seat row gone, server alive, `rc=0` |
+| M29 | Can a **watchdog window** destroy the whole server on a deadline? | **Yes.** A window running `sh -c 'sleep N; tmux -L <sock> kill-server'` removed the server and every sibling seat; `rc=1` thereafter |
+| M30 | Does `kill-server` reap the seat **process**, or only its window? | **The process.** Measured with a heartbeat file rather than `pgrep`: the seat appended once a second, and wrote **nothing** after the server died |
 | M27 | Does `new-window` report a bad launch **synchronously**? | **No.** `rc=0` for a nonexistent binary; `rc=0` for an over-ceiling argv (stderr says `command too long`), and **no window is created** |
 
 **Four of these deleted or changed a mechanism this spec had adopted.**
@@ -288,47 +291,51 @@ claim than revision 2 made and the one the evidence supports.
 
 ### 5.5 Server, session, window lifecycle, and reaping
 
-- **era's own tmux server: `tmux -L era`** (§2.3), invisible to `tui-workspace`,
-  which addresses its own `$SESSION` on the default socket.
-- **A sentinel window, named exactly `era-sentinel`, is created with the session
-  and outlives every seat.** Without it, M25: the last seat's death kills the
-  server and reads exactly like M24's transport failure. It runs `sleep
-  infinity` — a finite command would reintroduce M25 the moment it returned —
-  and it is matched by exact name, so it is excluded from both the sweep below
-  and every seat-presence test. Because `new-session -A` attaches to an existing
-  session **without recreating an initial window**, era checks for `era-sentinel`
-  after every `new-session -A -d` and recreates it if absent. Round 3 found the
-  sweep killing the sentinel and nothing restoring it, which silently reinstated
-  M25; the exact-name exclusion plus check-and-recreate is the fix.
+- **era's own tmux server, on a per-run socket: `tmux -L era-<hostpid>`** (§2.3),
+  invisible to `tui-workspace`, which addresses its own `$SESSION` on the default
+  socket. A socket per era process means two concurrent runs cannot see, share,
+  or destroy each other's server — which is what let the window-naming scheme
+  below lose its `<hostpid>` component.
+- **One window does both jobs: `era-watchdog`.** It runs
+  `sh -c 'sleep <TimeoutSec + 120>; tmux -L <sock> kill-server'`.
+  - *As a sentinel*, it keeps the server alive for the whole dispatch, so a
+    seat's window vanishing is distinguishable from the server being gone
+    (M25/M26) — the distinction §6 rule 2 rests on.
+  - *As a watchdog*, it destroys the server and every seat at a fixed deadline
+    (M29), and M30 shows that kills the seat **processes**, not merely their
+    windows.
+
+  It is matched by exact name and excluded from every seat-presence test.
 - **era does not use `tui-workspace`** — 123 KB era does not own, untested by
   era, and M13 shows its completion signal comes from a hook installed outside
   era. era's calls are `new-session -A -d` (`-A` so an existing session attaches
   rather than erroring), `new-window`, `list-windows -F`, `kill-window`.
 - **One fresh window per seat per attempt**, named
-  `era-<hostpid>-<slug>-r<N>-<seat>-<attempt-nonce>`, killed when the attempt
-  ends — and the kill is **verified** by re-listing, because an unverified
-  `kill-window` leaves an unattended agent behind. `<hostpid>` is era's own
-  process id, so any process can test the owner's liveness with `Get-Process
-  -Id`. The **attempt nonce** is required because a retry of the same seat and
-  round would otherwise reuse the name, and a leftover row from the previous
-  attempt would falsely satisfy §6's ever-alive latch.
-- **Reaping, because era's own death is not a path era controls.** Windows are
-  detached on a persistent server, so a crashed or interrupted era leaves
-  unattended `--dangerously-skip-permissions` agents with no budget. On **every**
-  launch, before creating anything, era sweeps windows matching
-  `era-<pid>-*` whose `<pid>` is not a live process (`Get-Process -Id`), skipping
-  `era-sentinel`. Encoding the pid **in the window name** is what makes the sweep
-  decidable: revision 3 said "sweep windows whose runid is not live" while
-  providing nothing that mapped a runid to a process, so the sweep had no
-  implementable test — three reviewers found it independently.
-- **`-PidFile` keeps its existing contract and is honestly partial.**
-  `Stop-EraAdapterChild` (`workflow.ps1:894-897`) `[int]::TryParse`s the file, so
-  a non-numeric runid would not throw — it would return `$false` and make the
-  straggler kill a **silent no-op**. The adapter writes the real `wsl.exe` pid.
-  **That kill tears down the launcher and does *not* remove the tmux window**,
-  which belongs to the tmux server in another process tree. So the
-  dispatcher-level straggler kill cannot reach a tmux seat: the adapter must
-  terminate within its own `$TimeoutSec`, and the sweep above is the backstop.
+  `era-<slug>-r<N>-<seat>-<attempt-nonce>`, killed when the attempt ends, with
+  the kill **verified** by re-listing. The **attempt nonce** is required because
+  a retry of the same seat and round would otherwise reuse the name and a
+  leftover row would falsely satisfy §6's ever-alive latch. No pid appears in the
+  name: the socket already scopes ownership.
+- **Reaping is the watchdog, and there is no sweep.** era's own death is not a
+  path era controls, so orphan cleanup must not depend on era being alive to do
+  it. The watchdog does not: it is a deadline already running inside the server
+  it will destroy. If era crashes, is interrupted, or is killed, every seat dies
+  at `TimeoutSec + 120` with **no liveness test, no process identity, and no
+  sweep**. Orphan lifetime is bounded by construction.
+
+  **This replaces the pid-keyed sweep of revisions 3-4, which rounds 3 and 4
+  between them produced six criticals against and which was still unsound**: it
+  needed a liveness test for a `runid` nothing mapped to a process, then a
+  `<hostpid>` that pid reuse can resurrect into "live", a name-parse the spec
+  never pinned against slugs containing dashes, and an ownership question with
+  two incompatible answers. None of those questions exists now, because nothing
+  has to decide *whose* a window is.
+- **`-PidFile` is not declared by this adapter.** `workflow.ps1:2128` passes it
+  only to adapters whose param block declares it, so omitting it is supported and
+  is the honest option. Revision 4 proposed writing the `wsl.exe` pid; round 4
+  measured that `new-window -d` returns immediately, so that pid is dead within
+  milliseconds and `Stop-EraAdapterChild` would either no-op or, after pid reuse,
+  kill an unrelated process. Cleanup is the watchdog's job, not the dispatcher's.
 
 ### 5.6 Staging and promotion
 
@@ -369,10 +376,15 @@ local file stat; none is pane text.
 
 **Launch is confirmed by observation, not by a return code.** M27: `new-window`
 exits 0 for a nonexistent binary and for an over-ceiling argv. era therefore
-polls for the window row to appear within 10 s; if it never does, that is
+polls for the window row **every 250 ms for 10 s**; if it never appears, that is
 `tmux-transport-unavailable` — a launch fault, **not** a seat verdict, and not
 eligible for the bounded re-dispatch. This is also the **ever-alive latch**:
-absence only means death *after* presence has been observed once.
+absence only means death *after* presence has been observed once. The tight
+cadence matters because a seat that starts and dies in seconds (bad model id,
+auth failure) could otherwise vanish between two slow samples and be filed as an
+unrecoverable transport fault; **where the two readings are ambiguous the
+classifier prefers `tmux-seat-exited`**, the recoverable label, because a wasted
+retry is cheaper than a real seat fault reported as broken infrastructure.
 
 **Death is window absence, not `#{pane_current_command}`.** M19: the pane command
 follows any foreground child, so a seat running a `bash` tool would have read as
@@ -393,8 +405,14 @@ partial file is labelled truncation rather than by whatever ended the attempt:
    file: canary present → **success** (no stability needed — the writer is gone);
    file without canary → `tmux-seat-truncated`; no file → `tmux-seat-exited`.
 3. `$TimeoutSec` reached → kill, verify the window is gone, then branch three
-   ways: canary present → **success**; file without canary →
-   `tmux-seat-timeout-partial`; no file → `tmux-seat-timeout`.
+   ways: canary present → **success, with a `Warnings` entry recording that
+   stability never held**; file without canary → `tmux-seat-timeout-partial`; no
+   file → `tmux-seat-timeout`.
+
+   The warning is not cosmetic. A model that writes the canary and keeps
+   appending never satisfies rule 1's stability check, so it burns the full
+   budget and arrives here — and without the warning, the one contract violation
+   §5.3 admits it cannot enforce would be recorded as a clean success.
 
 Round 3 found revision 3's version of rules 2-3 had **no success branch**: a
 model that wrote a complete, canary-valid `review.md` and exited was caught by
@@ -446,11 +464,11 @@ not, this cost is permanent and should be weighed in §14.2.
 | Failure | Detected by | `ExitCode` | `Error` | Recoverable |
 |---|---|---|---|---|
 | Complete review | canary + stability | 0 | — | — |
-| Partial write | file present, canary absent (rules 2-3) | -1 | `tmux-seat-truncated` | yes |
+| Partial write, writer crashed | file present, canary absent (**rule 2 only**) | -1 | `tmux-seat-truncated` | yes |
 | Gone, nothing written | window absent after launch (M18, M26) | -1 | `tmux-seat-exited` | yes |
 | Budget exhausted, partial file | `$TimeoutSec`, canary absent | -1 | `tmux-seat-timeout-partial` | **no** |
 | Budget exhausted, nothing written | `$TimeoutSec`, no file | -1 | `tmux-seat-timeout` | no |
-| Refusal / narration | `Test-EraCaptureAcceptable` | -1 | `agentic-narration-capture` | as today |
+| Refusal / narration | `Test-EraCaptureAcceptable` | -1 | `agentic-narration-capture` | **only if the attempt did not time out** |
 | Never launched | window never appeared (M27) | -1 | `tmux-transport-unavailable` | **no** |
 | tmux/WSL unreachable | sentinel gone, `rc=1` (M24, M26) | -1 | `tmux-transport-unavailable` | **no** |
 
@@ -461,7 +479,19 @@ ceiling — would otherwise burn the bounded re-dispatch budget pretending to be
 flaky seat.
 
 Only `tmux-seat-truncated` and `tmux-seat-exited` are recoverable, and neither
-can be produced by a timeout (§6). The two `yes` rows are added to
+can be produced by a timeout (§6). **`agentic-narration-capture` inherits the
+same condition**: it is reachable from rule 3's success branch, i.e. after a full
+budget has already been spent, and a seat that burned ~800 s must not be
+re-dispatched for another ~800 s merely because its output failed validation.
+Recoverability is therefore conditioned on how the attempt *terminated*, not
+inherited wholesale from the process-spawn backends.
+
+**`tmux-seat-truncated` is rare by construction, not unreachable.** Because an
+interactive TUI does not exit at turn end (§6), a partial write reaches rule 2
+only if the agent actually crashed; every non-crashing partial waits out the
+budget and lands on `tmux-seat-timeout-partial`. That is the intended behaviour —
+a budget-exhausted seat is not retried — but it means truncation-with-retry
+covers crashes only, and the table above says so. The two `yes` rows are added to
 `Get-EraRecoverableFailures`
 (`workflow.ps1:2604`), which keys the re-dispatch on `Error`; any `Error`-string
 allowlist in the metadata schema or its tests must accept the new codes.
@@ -538,11 +568,22 @@ should be rejected**, including the one revisions 1-2 made.
 
 1. A seat that reads the bundle from disk has no attach cap and no delivery-mode
    split, so M4's failure — 59,034 bytes over a 51,200-byte cap, 621 s, zero
-   characters — cannot occur in this shape. **Qualified:** the model still
-   *reads* through a tool with its own limits, and a read-side truncation yields
-   a coherent review **with a valid canary**. The canary certifies the write
-   reached its last line and **nothing about the bundle reaching the model**.
-   Not closed by this design.
+   characters — cannot occur in this shape.
+
+   **This is weaker than revisions 1-4 claimed, and the evidence arrived by
+   accident.** Round 4 of this review overshot the attach cap at 52,042 bytes,
+   so both opencode seats fell to `read-tool` — M4's exact delivery mode — and
+   **both succeeded** (M31). So the honest statement of the motivating case is:
+   read-tool failed once at 59,034 bytes and worked once at 52,042. It is a real
+   failure with an unknown trigger, not a mode that is broken outright, and n=1
+   either way. A design justified mainly by removing it is justified by less than
+   it looked.
+
+   **Also qualified:** the model still *reads* through a tool with its own
+   limits, and a read-side truncation yields a coherent review **with a valid
+   canary**. The canary certifies the write reached its last line and **nothing
+   about the bundle reaching the model**. `ERA-BUNDLE-LINES` (§5.3) is a partial
+   probe, not a fix.
 2. A dead seat is detected within 15 s rather than at budget exhaustion.
 3. A new model becomes a data change — `cmdc`'s 68 models have no era backend at
    all (§13.1). This is the largest single win and it is not a line-count win.
@@ -554,10 +595,24 @@ rescue.
 
 ## 10. The spike
 
-Two seats: `opus-tmux` and `deepseek-flash-tmux`, on the archived
+Three seats, but not equally used, because **`deepseek-flash` costs materially
+more opencode usage than `muse-spark` and the operator has asked for it to be
+used sparingly**:
+
+- **`opus-tmux`** and **`muse-spark-tmux`** carry *all* iteration and every
+  control. `muse-spark` is an opencode seat, so it exercises the identical TUI
+  path — `--prompt`, `--auto`, and the missing `--variant` (M9) — while costing
+  roughly a fifth per Mtok. Nothing about the opencode transport is learned only
+  from deepseek.
+- **`deepseek-flash-tmux` runs exactly once**, last, after both other seats have
+  passed, as the single confirmation against M4. It is the seat that failed round
+  6, so one clean review from it is the measurement; repeating it buys nothing
+  and costs the most.
+
+All three run on the archived
 `.external-reviews/model-drift/round-6-{prompt.md,bundle.xml}` and that round's
-three responses. deepseek-flash is the sharp case — it *failed* round 6 for
-transport reasons (M4), so a real review from it is a measured capability win.
+responses. If the transport cannot get `muse-spark` to a canary-valid review,
+the deepseek run is not attempted at all.
 
 **Controls first; no negative result is believable until they pass.** The prior
 session recorded five window probes that were all wrong and all looked clean —
@@ -581,9 +636,15 @@ each a fact about the instrument reported as a fact about the subject.
   an agent definition (`opencode agent`); a config path named by `opencode models
   --verbose`. Record which were tried and what each returned — a negative is only
   a negative once the set was enumerated in advance.
-- **C7 — reaping.** Launch a seat, kill era mid-dispatch, and assert the next
-  launch's sweep removes the orphaned window. §5.5's sweep is the only thing
-  standing between a crash and an unattended yolo agent.
+- **C7 — reaping, asserted on processes rather than windows.** Launch a seat,
+  kill era mid-dispatch, and assert the watchdog destroys the server at its
+  deadline and that **no seat process survives**. M30 already showed
+  `kill-server` reaps a foreground seat; what remains untested is a seat that
+  **backgrounded a tool child outside the pane's foreground process group**,
+  which would not receive the pty's SIGHUP. Assert with a **heartbeat file**, not
+  `pgrep`: measured this round, a `pgrep -f` pattern matches the two shells
+  running the probe, so a naive check reports a live process that is its own
+  instrument. Bracket the pattern (`[c]laude`) if `pgrep` is used at all.
 
 **Then both seats concurrently**, recording per seat: wall-clock; canary; bytes;
 `Test-EraCaptureAcceptable`; citation-checker result; `seat_containment`;
@@ -600,9 +661,11 @@ spike instrument only; it is not part of §5.6.
 **Pre-registered thresholds.** A seat **passes** iff: canary present;
 `Test-EraCaptureAcceptable` returns `Ok`; the citation checker adds no warning;
 and the response is ≥ 4,000 characters — the smallest real review in the round-6
-archive was muse-spark at 4,226. Against round 6 (opus 7,248; deepseek-flash 0),
-the honest claim for opus is *"a review clearing the same bar"*, **not** "better",
-which two samples cannot support. For deepseek-flash the bar is binary.
+archive was muse-spark at 4,226. Against round 6 (opus 7,248; muse-spark 4,226; deepseek-flash 0), the honest
+claim for opus and muse-spark is *"a review clearing the same bar"*, **not**
+"better", which single samples cannot support. For deepseek-flash the bar is
+binary — and M31 now means even a success there is one data point against one
+failure, not a demonstration that the mode was broken.
 
 The spike is throwaway: it touches no existing backend, `workflow.ps1`, or
 `runtimes/era.ps1`, and adds nothing to the default panel. The full suite (1140
@@ -612,8 +675,11 @@ passed / 0 failed, ~17 min) runs before and after and must be unchanged.
 
 ## 11. Kill criteria
 
-1. **C5, C6 or C7 cannot be run, or C5 or C7 fails.** The seats never worked, or
-   a crash leaks unattended agents; nothing downstream means anything.
+1. **C5 or C7 fails, or C6 cannot be run.** C5 fails only if a seat does not
+   launch or never writes `review.md`; **its quietness measurement has no pass/
+   fail**, because §6 already accepts a never-quiet TUI as a permanent cost, so a
+   noisy TUI must not kill the design. C7 fails if a killed seat leaves a live
+   process.
 2. **`seat_containment` returns `breached`.** Under §5.4 that is a seat writing
    into a repo it was given no path to. **`unmeasured` is not this criterion** —
    it means the instrument failed and the spike is *invalid*, to be re-run.
@@ -641,6 +707,11 @@ Missing 1, 2, 3 or 5 means the answer is §4's option C.
   central bet.** The design's answer is not confidence but detectability.
 - Whether models revise a file after writing the canary (§5.3's contract), and
   whether a turn-ended TUI goes quiet — both now measured by C5.
+- Whether a seat that **backgrounds a tool child** leaves it alive after
+  `kill-server` (C7). M30 settles the foreground case only.
+- What actually caused M4, now that M31 shows the same delivery mode working at
+  52,042 bytes. Until that is known, the design's motivating failure has an
+  unknown trigger.
 - The cost of having no turn-end signal (§6): a seat that finishes without a
   canary burns its full budget. Accepted for the spike, unquantified in
   production.
@@ -688,13 +759,13 @@ Missing 1, 2, 3 or 5 means the answer is §4's option C.
 4. §11.3/§11.4 now resolve their overlap by saying criterion 3 is about transport
    and 4 about fidelity, so a default-effort deepseek review satisfies 3. Is that
    the right reading, or does an unfaithful seat fail the motivating case anyway?
-5. Rounds 1-3 found 16, 11 and 14 criticals — roughly flat per seat, and round
-   3's were almost all defects introduced by round 2's own fixes (the missing
-   success branch, the undecidable sweep, the sentinel the sweep kills). That is
-   the signature of a design being patched rather than converging. **Is the
-   remaining risk in the design, or is it now in the fact that no line of this
-   has ever run?** If the latter, the next round should be the spike, not a
-   fifth revision.
+5. Rounds 1-4 found 16, 11, 14 and 11 criticals (4.0 → 3.7 → 3.5 → 2.75 per
+   seat). Round 3's and round 4's were dominated by defects in the *reaping
+   subsystem added in response to round 2* — six criticals against one mechanism
+   that was still unsound when revision 5 deleted it. **The remaining risk is no
+   longer in the design; it is that no line of this has ever run.** The next step
+   is the spike, not a fifth review round — which is also where the protocol cap
+   lands.
 
 ---
 
@@ -717,21 +788,40 @@ confinement, and `NewDirty` is not empty for every path because era writes
 `$ResponsePath` itself. Rejected across both: a `/proc` CPU-time stall signal, a
 semantic check on the review, and worktree-per-seat.
 
-### Round 3 — 3/6/2/3 criticals
+### Round 3 — 3/6/2/3 criticals, and Round 4 — 4/4/2/1
 
-Notable because **almost every finding is a defect introduced by round 2's own
-fixes**, which is the signature §14.5 now asks about.
+Both rounds were dominated by defects in **fixes from the previous round**, and
+between them produced six criticals against one mechanism: the reaping sweep
+added in response to round 2. Revision 5 deleted it rather than patching it a
+third time.
 
-| # | Finding | Raised by | Disposition |
+| # | Finding | Round / raised by | Disposition |
 |---|---|---|---|
-| 1 | Rules 2-3 had **no success branch**: a model that wrote a complete canary'd file and exited fell through `else` to `tmux-seat-exited`. Near-success got the non-retryable label while garbage got retried | opus, deepseek | **CONFIRMED — §6** rules 2-3 branch three ways, canary first, no stability needed once the writer is gone. Directly caused by round 1's stat-first fix; the fix labelled by cause and only *then* looked at the file |
-| 2 | A timed-out seat with a partial file was labelled `tmux-seat-truncated`, which is **recoverable** — so a budget-exhausted seat could be re-dispatched for another full budget, indefinitely | deepseek | **CONFIRMED — §6, §7.1.** New `tmux-seat-timeout-partial` keeps the diagnosis without inheriting recoverability. Neither timeout code is recoverable |
-| 3 | The reaping sweep had **no implementable liveness test**: it keyed on a `runid` that nothing mapped to a process | opus, gemini, muse-spark | **CONFIRMED — §5.5.** era's own pid is encoded in the window name, so any process can test it with `Get-Process -Id` |
-| 4 | Putting a runid in `-PidFile` breaks the existing consumer | gemini, muse-spark | **CONFIRMED; mechanism corrected. Measured:** `Stop-EraAdapterChild` (`workflow.ps1:894-897`) uses `[int]::TryParse`, so a runid would **not** throw as predicted — it returns `$false`, making the straggler kill a **silent no-op**, the worse failure. The adapter writes the real `wsl.exe` pid; §5.5 states that killing it does not remove the window |
-| 5 | The sweep kills the sentinel, and `new-session -A` never recreates it — silently reinstating M25 | opus, muse-spark | **CONFIRMED — §5.5.** `era-sentinel` is exact-named, runs `sleep infinity`, is excluded from the sweep and from presence tests, and is checked-and-recreated after every `new-session -A` |
-| 6 | The "written more than once" control **cannot fail**, because era tears down the moment the canary is stable | gemini | **CONFIRMED — §10.** The spike waits 120 s after the canary before teardown. A vacuous control is a never-asked question recorded as a negative answer |
-| 7 | Interactive TUIs never exit, so a turn ending without a canary burns the full `$TimeoutSec` — the direct cost of round 2 deleting the stall rule | gemini, muse-spark | **CONFIRMED, ACCEPTED, NOT PATCHED (§6).** No turn-end signal exists without pane text (§11.5) or a hook era does not own (M13). C5 now measures whether a turn-ended TUI goes quiet. Adding a mechanism now would re-add what round 2 removed, on no evidence |
-| 8 | Window names lacked a per-attempt nonce, so a leftover row from attempt 1 falsely satisfies the ever-alive latch | muse-spark | **CONFIRMED — §5.5** |
-| 9 | `kill-window` is unverified; a failed kill leaves an unattended agent until the next sweep | muse-spark | **CONFIRMED — §5.5**, the kill is verified by re-listing |
-| 10 | Read-side truncation is silent where M4 was loud; no detection proposed | muse-spark | **CONFIRMED — partially closed.** §5.3 adds `ERA-BUNDLE-LINES`, a two-line prompt probe against the true count, as a **warning, never a gate**: agreement is weak evidence, disagreement strong. The only new detection this round |
-| 11 | Canary-as-contract is unenforced; a canary-valid intermediate can promote | muse-spark | **ACKNOWLEDGED, unchanged.** §5.3 and §12 already record it as unverified; finding 6's fix is what lets the spike measure it. Enforcing before measuring is the accretion §14.5 warns about |
+| 1 | Rules 2-3 had **no success branch**: a model that wrote a complete canary'd file and exited fell to `else` → `tmux-seat-exited`. Near-success got the non-retryable label; garbage got retried | 3 · opus, deepseek | **CONFIRMED — §6** branches three ways, canary first, no stability once the writer is gone |
+| 2 | A timed-out seat with a partial file was labelled `truncated`, which is **recoverable** — a budget-exhausted seat could be re-dispatched indefinitely | 3 · deepseek | **CONFIRMED — §6, §7.1.** New `tmux-seat-timeout-partial`; neither timeout code is recoverable |
+| 3 | The reaping sweep had **no implementable liveness test** (keyed on a `runid` nothing mapped to a process) | 3 · opus, gemini, muse-spark | **CONFIRMED**, fixed in rev 4 by putting era's pid in the window name — and that fix generated findings 6-8 below |
+| 4 | A runid in `-PidFile` breaks the existing consumer | 3 · gemini, muse-spark | **CONFIRMED; mechanism corrected. Measured:** `Stop-EraAdapterChild` (`workflow.ps1:894-897`) uses `[int]::TryParse`, so it would **not** throw as predicted — it returns `$false`, a **silent no-op**, the worse failure |
+| 5 | The sweep kills the sentinel, and `new-session -A` never recreates it — silently reinstating M25 | 3 · opus, muse-spark | **CONFIRMED**, and now moot: §5.5's `era-watchdog` is a single window that is both sentinel and reaper, and there is no sweep to kill it |
+| 6 | `-PidFile` would hold a pid that is **already dead**: `new-window -d` returns in milliseconds, so the `wsl.exe` launcher is gone for the whole attempt; pid reuse could redirect the kill at an unrelated process | 4 · opus, muse-spark | **CONFIRMED — §5.5.** The adapter no longer declares `-PidFile` at all (`workflow.ps1:2128` makes that supported). Cleanup is the watchdog's, not the dispatcher's |
+| 7 | The sweep's liveness test is **pid-reuse-unsafe** and is the sole backstop, so a recycled pid makes an orphan permanently unreapable | 4 · opus | **CONFIRMED — sweep DELETED (§5.5).** Replaced by `era-watchdog`, a deadline running *inside* the server it destroys. **M29** measured it removing the server and every seat; **M30** measured, via a heartbeat file, that this reaps the seat *process*. No liveness test, no pid, no identity question survives |
+| 8 | One name schema, two candidate pid owners; and the sweep's parse was never pinned against slugs containing dashes | 4 · muse-spark | **CONFIRMED — moot.** The socket (`tmux -L era-<hostpid>`) now scopes ownership, so no pid appears in a window name and nothing parses one |
+| 9 | "The adapter must terminate within its own `$TimeoutSec`" was an obligation with no mechanism | 4 · muse-spark | **CONFIRMED — §5.5.** The watchdog is the mechanism, and it does not depend on the adapter, or on era, still being alive |
+| 10 | Launch-vs-instant-crash is a sampling race, and it decides recoverable vs not | 4 · muse-spark | **CONFIRMED — §6.** Launch polls every 250 ms for 10 s, and ambiguity resolves to the **recoverable** label |
+| 11 | `agentic-narration-capture` stays recoverable even when reached after a full budget burn — the same defect finding 2 fixed | 4 · opus | **CONFIRMED — §7.1.** Recoverability is conditioned on how the attempt terminated |
+| 12 | A model that writes the canary then keeps appending never stabilises, burns the budget, and rule 3 records it as a clean success | 4 · opus | **CONFIRMED — §6.** Rule 3's success branch sets a `Warnings` entry that stability never held |
+| 13 | §7.1 attributed `tmux-seat-truncated` to "rules 2-3", but rule 3 routes to `timeout-partial`; and since TUIs never exit, truncation is near-unreachable | 4 · gemini | **CONFIRMED — §7.1** attributes it to rule 2 only and states it covers crashes alone. The behaviour is intended; the table was wrong |
+| 14 | Kill criterion 1 fired on C5, but C5 is defined as an observation with no failure threshold — and §6 already *accepts* a never-quiet TUI | 4 · gemini | **CONFIRMED — §11.1.** C5 fails only on no-launch or no-write; quietness has no pass/fail |
+| 15 | `kill-window` verifies *window* death, never *process* death; a backgrounded tool child outside the pane's pgrp survives, and a windowless orphan is invisible | 4 · deepseek | **CONFIRMED, partially closed. M30** shows `kill-server` does reap a foreground seat. The backgrounded-child case stays open and is now C7's assertion, using a heartbeat file — because `pgrep -f` matches the shells running it (measured), which would report the instrument as the orphan |
+| 16 | The "written more than once" control **cannot fail**, since era tears down the moment the canary is stable | 3 · gemini | **CONFIRMED — §10.** The spike waits 120 s after the canary. A vacuous control records a never-asked question as a negative answer |
+| 17 | Interactive TUIs never exit, so a turn ending without a canary burns the full budget — the cost of round 2 deleting the stall rule | 3 · gemini, muse-spark | **CONFIRMED, ACCEPTED, NOT PATCHED (§6).** No turn-end signal exists without pane text (§11.5) or a hook era does not own (M13). C5 measures whether a quiet TUI makes a cheap rule available later |
+| 18 | Read-side truncation is silent where M4 was loud | 3 · muse-spark | **CONFIRMED — partially closed.** §5.3's `ERA-BUNDLE-LINES` is a two-line probe against the true count, a **warning, never a gate** |
+| 19 | Window names lacked a per-attempt nonce; `kill-window` was unverified | 3 · muse-spark | **CONFIRMED — §5.5** |
+
+### What round 4 measured about the design's own premise
+
+Round 4's bundle overshot the 51,200-byte attach cap at 52,042, so both opencode
+seats fell to `read-tool` — **M4's exact delivery mode — and both returned full
+reviews** (M31). That is evidence against this design's motivating case,
+collected by accident, and §9.1 now carries it: read-tool failed once at 59,034
+bytes and worked once at 52,042. The failure is real; the diagnosis "read-tool is
+the problem" is not established.
