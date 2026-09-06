@@ -1826,7 +1826,43 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         # an hour to the wrong theory.
         if ($repomixResult -match '(?i)PermissionError|Permission denied while scanning') {
             $hint = ''
-            if ($repomixResult -match '(?im)path:\s*(.+)$') { $hint = "  reported path : $($matches[1].Trim())`n" }
+            $reported = ''
+            if ($repomixResult -match '(?im)path:\s*(.+)$') {
+                $reported = $matches[1].Trim()
+                $hint = "  reported path : $reported`n"
+            }
+
+            # A UNC / WSL-NATIVE REPO IS A DIFFERENT FAULT WITH THE SAME ERROR,
+            # and the two need OPPOSITE fixes. era runs as WINDOWS pwsh (there is
+            # no native Linux build on this box -- `pwsh` in WSL is a shim that
+            # execs pwsh.exe), and a Windows process CANNOT hold a UNC path as
+            # its working directory. Given `\wsl.localhost\...` it silently
+            # falls back to C:\Windows, and repomix then scans THAT and aborts
+            # on the first unreadable directory it meets.
+            #
+            # So `reported path : C:\Windows` on a repo that is not under a
+            # drive letter is not a locked application at all -- nothing is
+            # holding C:\Windows. Telling the operator to add an ignore pattern
+            # sends them to fix a directory they never asked era to read.
+            # Mapping a drive does not help either: PowerShell's ProviderPath
+            # normalises `W:\...` back to the UNC form.
+            #
+            # Reported by a peer session on 2026-09-06, which measured it twice
+            # and correctly identified the misdiagnosis before I did.
+            $rootIsUnc = $repoRoot -match '^\\\\' -or $repoRoot -match '(?i)wsl\.localhost|wsl\$'
+            if ($rootIsUnc -or $reported -match '(?i)^C:\\Windows\\?$') {
+                Stop-EraWithError ("repomix could not scan the tree, and the repo root is not on a Windows drive.`n" +
+                    $hint +
+                    "  repo root    : $repoRoot`n" +
+                    "  what happened: era runs as WINDOWS pwsh, and a Windows process cannot hold a UNC path as its working directory. " +
+                    "It falls back to C:\Windows, so repomix scanned that instead of your repo and aborted on the first unreadable directory.`n" +
+                    "  NOT the cause: a locked application, and NOT an ignore-pattern problem. Nothing is holding C:\Windows.`n" +
+                    "  NOT a fix    : mapping a drive (net use W: \\wsl.localhost\Ubuntu). PowerShell normalises W:\... back to the UNC form.`n" +
+                    "  the fix      : stage the files on a Windows drive and run era there — copy them under %TEMP%, `git init`, and dispatch " +
+                    "with -IncludeFiles. Verified 2026-09-06: the identical file that fails under /home passes every gate under /mnt/c.`n" +
+                    "Nothing was dispatched and nothing was spent.")
+            }
+
             Stop-EraWithError ("repomix could not scan the tree: a directory is locked or unreadable, and repomix aborts the whole run on it.`n" +
                 $hint +
                 "  usual cause  : a LIVE application holding its own data directory — a running Chrome/puppeteer profile is the common one.`n" +

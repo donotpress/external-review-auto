@@ -114,3 +114,37 @@ Describe 'era.ps1 repomix guard' -Tag Unit {
         $doc | Should -Not -Match '(?i)known limitation.{0,120}Stop-Job'
     }
 }
+
+Describe 'a UNC / WSL-native repo root is diagnosed as itself, not as a locked directory' -Tag Unit {
+    # TWO FAULTS, ONE repomix ERROR, OPPOSITE FIXES. era runs as Windows pwsh
+    # (there is no native Linux build here -- `pwsh` in WSL execs pwsh.exe), and
+    # a Windows process cannot hold a UNC path as its cwd: given
+    # \\wsl.localhost\... it falls back to C:\Windows, repomix scans THAT, and
+    # aborts on the first unreadable directory. The old message blamed a locked
+    # application and told the operator to add an ignore pattern -- for a
+    # directory they never asked era to read.
+    #
+    # Reported by a peer session on 2026-09-06 that measured it twice and named
+    # the misdiagnosis. Reproduced and fixed the same day; the identical file
+    # that fails under /home passes every gate staged under /mnt/c.
+    BeforeAll {
+        $script:EraSrc = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+    }
+
+    It 'branches on a UNC repo root before falling through to the locked-directory advice' {
+        $script:EraSrc | Should -Match 'wsl\.localhost'
+        $script:EraSrc | Should -Match 'repo root is not on a Windows drive'
+    }
+
+    It 'tells the operator the drive-mapping workaround does NOT work' {
+        # PowerShell's ProviderPath normalises W:\... back to the UNC form, so a
+        # mapped drive fails identically. The peer tried it first.
+        $script:EraSrc | Should -Match 'NOT a fix.*net use'
+    }
+
+    It 'still keeps the locked-directory advice for the non-UNC case' {
+        # Guards against the new branch swallowing the original diagnosis, which
+        # is correct for the fault it was written for (a live Chrome profile).
+        $script:EraSrc | Should -Match 'a LIVE application holding its own data directory'
+    }
+}
