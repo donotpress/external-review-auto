@@ -52,12 +52,32 @@ function Get-EraCmdcDistro {
     [CmdletBinding()]
     param()
     if ($script:EraCmdcDistro) { return $script:EraCmdcDistro }
+    # THE DEFAULT DISTRO, NOT THE FIRST LISTED. `wsl -l -q` order is not the
+    # default; `wsl -l -v` marks the default with a leading `*`. Measured
+    # 2026-09-06: this box has three (Ubuntu, Ubuntu-22.04, docker-desktop) and
+    # the default happens to be first, so first-listed worked BY LUCK. On a box
+    # where it is not, era would dispatch into a distro that may lack cmdc, pass
+    # the staging-visibility probe anyway -- /mnt/c is visible from every distro
+    # -- and then fail with the misleading "cmdc is not installed". Raised by
+    # deepseek-flash in the 2026-09-06 review of this file.
     try {
-        $raw = & wsl.exe -l -q 2>$null
-        $first = @($raw | ForEach-Object { ($_ -replace "`0", '').Trim() } |
-                   Where-Object { $_ }) | Select-Object -First 1
-        if ($first) { $script:EraCmdcDistro = $first }
+        $verbose = & wsl.exe -l -v 2>$null
+        foreach ($line in @($verbose)) {
+            $t = ($line -replace "`0", '').TrimEnd()
+            if ($t -match '^\s*\*\s+(\S+)') { $script:EraCmdcDistro = $Matches[1]; break }
+        }
     } catch { $script:EraCmdcDistro = $null }
+    if (-not $script:EraCmdcDistro) {
+        # Fall back to first-listed rather than to nothing: omitting -d entirely
+        # would let each call pick independently, which is the failure this
+        # function exists to prevent.
+        try {
+            $raw = & wsl.exe -l -q 2>$null
+            $first = @($raw | ForEach-Object { ($_ -replace "`0", '').Trim() } |
+                       Where-Object { $_ }) | Select-Object -First 1
+            if ($first) { $script:EraCmdcDistro = $first }
+        } catch { $script:EraCmdcDistro = $null }
+    }
     return $script:EraCmdcDistro
 }
 
@@ -103,31 +123,48 @@ function Invoke-EraCmdcRun {
         [Parameter(Mandatory)][string]$WorkDir,
         [int]$TimeoutSec = 700
     )
-    $name = 'era-cmdc-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.sh'
-    $win  = Join-Path $WorkDir $name
-    # LF only: bash rejects CRLF scripts with "\r: command not found", and
-    # Set-Content supplies CRLF on Windows.
-    [System.IO.File]::WriteAllText($win, ($ScriptBody -replace "`r`n", "`n"))
-
+    # THE SCRIPT GOES IN ON STDIN, AND NOTHING BUT `bash` CROSSES ON THE
+    # COMMAND LINE. Three earlier shapes all failed, each in a different place:
+    #
+    #   1. the path as a bare argument  -> `$` and `#` in it were shell-parsed
+    #      (`era$probe#x` arrived as `era#x`, exit 127). Measured.
+    #   2. the path single-quoted       -> fixed that, and BROKE SPACES: .NET
+    #      wraps a spaced argument in double quotes of its own, so bash saw
+    #      "'...'" and the single quotes became literal. Measured.
+    #   3. quoting harder               -> not attempted; two independent quoting
+    #      layers compose, and adding a third is how this file got here.
+    #
+    # With `wsl.exe -- bash` and the body on stdin there is no path, no quoting
+    # and no shell parsing to get wrong -- the argument vector is a constant.
+    # This is the reviewer's suggestion from the 2026-09-06 round, taken after
+    # the cheaper fix was measured and found to move the bug rather than remove
+    # it. The seat still gets `< /dev/null` of its own, so it never consumes the
+    # script bash is reading.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = 'wsl.exe'
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
+    $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $distro = Get-EraCmdcDistro
     if ($distro) { $psi.ArgumentList.Add('-d'); $psi.ArgumentList.Add($distro) }
     $psi.ArgumentList.Add('--')
     $psi.ArgumentList.Add('bash')
-    $psi.ArgumentList.Add((ConvertTo-EraCmdcWslPath -WindowsPath $win))
 
-    foreach ($v in @('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID',
-                     'CLAUDE_CODE_GIT_BASH_PATH', 'AI_AGENT', 'ANTIGRAVITY_AGENT',
-                     'ANTIGRAVITY_SOURCE_METADATA', 'OPENCODE_YOLO', 'TMUX', 'TMUX_PANE')) {
-        $null = $psi.Environment.Remove($v)
-    }
+    # NO WINDOWS-SIDE ENV SCRUB HERE, BECAUSE IT WOULD DO NOTHING. Windows
+    # environment variables do NOT cross into WSL unless named in WSLENV, and
+    # WSLENV is unset on this box. Measured 2026-09-06:
+    #     CLAUDECODE=1 wsl.exe -- printenv CLAUDECODE   ->   (empty)
+    # So removing these from the wsl.exe child's Windows environment is a no-op
+    # for the Linux process, and a test asserting it was false assurance. Raised
+    # by opus in the review of this file. The scrub that actually bites is the
+    # `unset` at the top of the script body (see Invoke-CmdcReview).
 
     $p = [System.Diagnostics.Process]::Start($psi)
+    # LF only: bash rejects CRLF script lines with "\r: command not found".
+    $p.StandardInput.Write(($ScriptBody -replace "`r`n", "`n") + "`n")
+    $p.StandardInput.Close()
     # Read both streams asynchronously BEFORE waiting. A synchronous
     # ReadToEnd on one stream while the child fills the other deadlocks on the
     # pipe buffer -- the failure mode era's other adapters record at length.
@@ -140,6 +177,57 @@ function Invoke-EraCmdcRun {
         return @{ Rc = -1; Out = ''; Err = 'timed out'; TimedOut = $true }
     }
     return @{ Rc = $p.ExitCode; Out = $outTask.Result; Err = $errTask.Result; TimedOut = $false }
+}
+
+function Get-EraCmdcScriptBody {
+    <#
+    .SYNOPSIS
+        The exact bash the seat runs. Pure: same inputs, same string, no I/O.
+
+    .DESCRIPTION
+        EXTRACTED SO IT CAN BE TESTED ON ITS OUTPUT. The tests used to grep this
+        file's SOURCE for `--tools-all` and `bash -lc` -- and both strings also
+        appear in comments explaining them, so deleting the real flag left every
+        test green while every seat silently lost its file-read tool. Raised by
+        opus in the 2026-09-04 review of this backend: "these assert a conclusion
+        rather than replaying the mechanism".
+
+        ONE SHELL, NOT TWO. An earlier body ended with
+            exec bash -lc "exec $CMDC -m $qModel$effort ..."
+        which put single-quoted tokens inside a DOUBLE-quoted word, where single
+        quotes do not quote and `$`/backticks still expand. Three of four seats
+        found it. The login shell was only ever needed for PATH -- cmdc is
+        `#!/usr/bin/env node` and node is absent from wsl.exe's non-login PATH --
+        so PATH is imported by value and the seat is exec'd directly.
+        `bash -l <script>` was rejected: a profile's output would land on the
+        seat's STDOUT, which is the review.
+
+        THE ENV SCRUB LIVES HERE, not on the Windows side. Windows variables do
+        not cross into WSL unless named in WSLENV (measured: `CLAUDECODE=1
+        wsl.exe -- printenv CLAUDECODE` prints nothing), so scrubbing the
+        wsl.exe child's environment could never have affected cmdc. `unset` in
+        the script does.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$StageWsl,
+        [Parameter(Mandatory)][string]$ModelId,
+        [AllowNull()][string]$Effort
+    )
+    $qDir    = ConvertTo-EraCmdcQuoted -Value $StageWsl
+    $qModel  = ConvertTo-EraCmdcQuoted -Value $ModelId
+    $effortA = if ($Effort) { ' --effort ' + (ConvertTo-EraCmdcQuoted -Value $Effort) } else { '' }
+    $unset   = 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_SESSION_ID CLAUDE_CODE_GIT_BASH_PATH AI_AGENT ANTIGRAVITY_AGENT ANTIGRAVITY_SOURCE_METADATA OPENCODE_YOLO TMUX TMUX_PANE'
+    return @"
+set -e
+$unset
+cd $qDir
+PATH="`$(bash -lc 'printf %s "`$PATH"')"
+export PATH
+CMDC=`$(command -v cmdc || true)
+if [ -z "`$CMDC" ]; then echo 'era-cmdc: cmdc is not on the login PATH inside WSL' >&2; exit 3; fi
+exec "`$CMDC" -m $qModel$effortA -p --tools-all 'Read instructions.md and follow it exactly.' < /dev/null
+"@
 }
 
 function Invoke-CmdcReview {
@@ -186,20 +274,21 @@ write your complete review to standard output. Do not create or modify any file.
         $probe = Invoke-EraCmdcRun -WorkDir $stage -TimeoutSec 60 `
                     -ScriptBody "test -d $qDir && echo VISIBLE"
         if ($probe.Out.Trim() -ne 'VISIBLE') {
-            throw "WSL cannot see the staging directory '$stage'; cmdc is unreachable from here."
+            # REPORT WHAT ACTUALLY WENT WRONG. This used to discard Rc, Err and
+            # TimedOut and blame the directory for every distinct cause -- a
+            # missing wsl.exe, a wrong distro, a cold-start over the deadline, a
+            # path the shell mangled. One message for four faults sends the
+            # reader to the wrong place three times out of four.
+            $why = if ($probe.TimedOut) { 'the probe timed out' }
+                   else { "rc=$($probe.Rc)" + $(if ($probe.Err.Trim()) { "; stderr: $($probe.Err.Trim())" }) }
+            throw "WSL could not confirm the staging directory '$stage' ($why); cmdc is unreachable from here."
         }
 
         # `--tools-all` is required: a headless run WITHHOLDS tools by default, and
         # this seat's whole job is reading a file off disk.
         $qModel = ConvertTo-EraCmdcQuoted -Value $modelId
         $effort = if ($ModelInfo.cmdc_effort) { " --effort " + (ConvertTo-EraCmdcQuoted -Value $ModelInfo.cmdc_effort) } else { '' }
-        $body = @"
-set -e
-cd $qDir
-CMDC=`$(bash -lc 'command -v cmdc' 2>/dev/null || true)
-if [ -z "`$CMDC" ]; then echo 'era-cmdc: cmdc is not on the login PATH inside WSL' >&2; exit 3; fi
-exec bash -lc "exec `$CMDC -m $qModel$effort -p --tools-all 'Read instructions.md and follow it exactly.' < /dev/null"
-"@
+        $body = Get-EraCmdcScriptBody -StageWsl $stageWsl -ModelId $modelId -Effort $ModelInfo.cmdc_effort
         $r = Invoke-EraCmdcRun -WorkDir $stage -ScriptBody $body -TimeoutSec $TimeoutSec
 
         if ($r.TimedOut) {

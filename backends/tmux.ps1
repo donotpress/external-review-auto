@@ -122,29 +122,26 @@ function Invoke-EraTmuxScript {
         PowerShell, WSL reads them with bash, and the boundary carries one path.
     #>
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$ScriptBody,
-        [Parameter(Mandatory)][string]$ScratchDir
-    )
+    param([Parameter(Mandatory)][string]$ScriptBody)
 
-    $name = 'era-cmd-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.sh'
-    $win  = Join-Path $ScratchDir $name
-    # LF endings: bash rejects a script whose lines end with CR ("\r: command
-    # not found"), and Set-Content on Windows would supply CRLF.
-    [System.IO.File]::WriteAllText($win, ($ScriptBody -replace "`r`n", "`n"))
-    $wsl = ConvertTo-EraWslPathPure -WindowsPath $win
-
+    # THE SCRIPT GOES IN ON STDIN. Nothing but the constant `bash` crosses on
+    # the command line, so there is no path for the shell behind wsl.exe to
+    # parse. Passing the path as an argument was measured to break twice, each
+    # time somewhere new: bare, `$` and `#` in it were expanded (`era$probe#x` ->
+    # `era#x`, exit 127); single-quoted, SPACES broke instead, because .NET wraps
+    # a spaced argument in double quotes of its own and the single quotes became
+    # literal. Two independent quoting layers compose; a third does not fix that.
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName               = 'wsl.exe'
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
+    $psi.RedirectStandardInput  = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError  = $true
     $distro = Get-EraTmuxDistro
     if ($distro) { $psi.ArgumentList.Add('-d'); $psi.ArgumentList.Add($distro) }
     $psi.ArgumentList.Add('--')
     $psi.ArgumentList.Add('bash')
-    $psi.ArgumentList.Add($wsl)
 
     foreach ($v in @('CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SESSION_ID',
                      'CLAUDE_CODE_GIT_BASH_PATH', 'AI_AGENT', 'ANTIGRAVITY_AGENT',
@@ -154,10 +151,12 @@ function Invoke-EraTmuxScript {
     }
 
     $p = [System.Diagnostics.Process]::Start($psi)
+    # LF only: bash rejects CRLF script lines with "\r: command not found".
+    $p.StandardInput.Write(($ScriptBody -replace "`r`n", "`n") + "`n")
+    $p.StandardInput.Close()
     $out = $p.StandardOutput.ReadToEnd()
     $err = $p.StandardError.ReadToEnd()
     $null = $p.WaitForExit(30000)
-    try { Remove-Item -LiteralPath $win -Force -ErrorAction SilentlyContinue } catch { }
     return @{ Rc = $p.ExitCode; Out = $out; Err = $err }
 }
 
@@ -187,7 +186,7 @@ function Test-EraWslPathVisible {
     param([Parameter(Mandatory)][string]$ScratchDir)
     $wsl = ConvertTo-EraWslPathPure -WindowsPath $ScratchDir
     $q = ConvertTo-EraShellQuoted -Value $wsl
-    $r = Invoke-EraTmuxScript -ScratchDir $ScratchDir -ScriptBody "test -d $q && echo VISIBLE"
+    $r = Invoke-EraTmuxScript -ScriptBody "test -d $q && echo VISIBLE"
     return ($r.Out.Trim() -eq 'VISIBLE')
 }
 
@@ -212,7 +211,7 @@ function Get-EraTmuxWindowNames {
         [Parameter(Mandatory)][string]$ScratchDir
     )
     $body = "tmux -L $(ConvertTo-EraShellQuoted -Value $Socket) list-windows -t $(ConvertTo-EraShellQuoted -Value $Session) -F '#{window_name}'"
-    $r = Invoke-EraTmuxScript -ScratchDir $ScratchDir -ScriptBody $body
+    $r = Invoke-EraTmuxScript -ScriptBody $body
     if ($r.Rc -ne 0) { return @{ ServerUp = $false; Names = @() } }
     $names = @($r.Out -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     return @{ ServerUp = $true; Names = $names }
@@ -380,7 +379,7 @@ function Invoke-TmuxReview {
                  "if [ -z `"`$SEAT_BIN`" ]; then echo `"era-tmux: seat binary $qBin is not on the login PATH inside WSL`" >&2; exit 3; fi`n" +
                  "tmux -L $qSock new-session -A -d -s $qSess -n era-watchdog $qWatch`n" +
                  "tmux -L $qSock new-window -d -t $qSessT -n $qWin -c $qDir -- bash -l $qSeatSh`n"
-        $r = Invoke-EraTmuxScript -ScratchDir $scratch -ScriptBody $setup
+        $r = Invoke-EraTmuxScript -ScriptBody $setup
         if ($r.Rc -eq 3) { throw "the seat CLI '$($argvBuilt[0])' is not installed inside WSL; the transport cannot carry this preset. $($r.Err.Trim())" }
         if ($r.Rc -ne 0) { throw "tmux setup failed (rc=$($r.Rc)): $($r.Err.Trim())" }
 
@@ -526,7 +525,7 @@ function Invoke-TmuxReview {
                             "left=`$(tmux -L $qs list-windows -t $qe -F '#{window_name}' 2>/dev/null | grep -v -x 'era-watchdog' | grep -c . || true)`n" +
                             "if [ `"`$left`" = `"0`" ]; then tmux -L $qs kill-server 2>/dev/null; fi`n" +
                             "exit 0`n"
-                $null = Invoke-EraTmuxScript -ScratchDir $scratch -ScriptBody $teardown
+                $null = Invoke-EraTmuxScript -ScriptBody $teardown
             }
         } catch { }
         # RETRY THE SCRATCH REMOVAL. The seat's process holds the directory as its
