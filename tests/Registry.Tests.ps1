@@ -59,6 +59,7 @@ Describe 'Registry: every backend must resolve to a .ps1 file' {
         @{ backend = 'geminiapi' }
         @{ backend = 'anthropic' }
         @{ backend = 'openaicompat' }
+        @{ backend = 'tmux' }
     ) {
         $path = Join-Path $script:SkillRoot "backends/$backend.ps1"
         Test-Path $path | Should -BeTrue -Because "backend '$backend' is referenced from registry but $path doesn't exist"
@@ -97,6 +98,7 @@ Describe 'Registry: function-name resolution from backend name' {
         @{ backend = 'geminiapi';    expectedFn = 'Invoke-GeminiapiReview' }
         @{ backend = 'anthropic';    expectedFn = 'Invoke-AnthropicReview' }
         @{ backend = 'openaicompat'; expectedFn = 'Invoke-OpenaicompatReview' }
+        @{ backend = 'tmux';         expectedFn = 'Invoke-TmuxReview' }
     ) {
         $computed = "Invoke-$((Get-Culture).TextInfo.ToTitleCase($backend))Review"
         $computed | Should -Be $expectedFn

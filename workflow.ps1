@@ -1769,8 +1769,38 @@ function Test-ReviewerListAgainstRegistry {
 }
 
 function Test-BackendCliAvailable {
+    <#
+    .SYNOPSIS
+        Refuse to dispatch a backend whose CLI is not actually reachable.
+
+    .DESCRIPTION
+        THE `tmux` BACKEND IS NOT A WINDOWS CLI AND MUST NOT BE PROBED AS ONE.
+        Its transport is `wsl.exe` -> `tmux` inside WSL, and on this box
+        /etc/wsl.conf sets interop.appendWindowsPath=false, so no Windows PATH
+        lookup could ever find it. A plain `Get-Command tmux` therefore fails on
+        a perfectly working install.
+
+        Checking only for `wsl.exe` would be worse than the wrong check: wsl.exe
+        ships with Windows, so the probe would pass on a machine with no tmux at
+        all and the failure would surface later as a dead seat rather than as a
+        refusal to dispatch. Both halves are checked, and `tmux -V` is the half
+        that can actually be absent.
+    #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$CliName)
+
+    if ($CliName -eq 'tmux') {
+        if (-not (Get-Command 'wsl.exe' -ErrorAction SilentlyContinue)) {
+            throw "Backend CLI 'tmux' needs wsl.exe, which is not on PATH."
+        }
+        $probe = $null
+        try { $probe = (& wsl.exe -- tmux -V 2>$null | Select-Object -First 1) } catch { $probe = $null }
+        if (-not $probe -or $probe -notmatch '^tmux\s') {
+            throw "Backend CLI 'tmux' is not installed inside WSL (`wsl.exe -- tmux -V` returned nothing usable)."
+        }
+        return
+    }
+
     if (-not (Get-Command $CliName -ErrorAction SilentlyContinue)) {
         throw "Backend CLI '$CliName' is not on PATH."
     }
