@@ -51,6 +51,8 @@ where used.
 | M15 | era's env scrub omits `TMUX_PANE` | `tests/EnvScrub.Tests.ps1:10-19` | 8 vars, `TMUX_PANE` absent |
 | M16 | Cost uses era's **own** bundle token count, never the adapter's `InputTokens` | `workflow.ps1:2957,3007`; `claude.ps1` returns `InputTokens = $null` | only `OutputTokens` must be supplied (§7.2) |
 | M17 | `{{PREVIOUS_ROUND}}` admits up to **80,000 chars** | `workflow.ps1:711` | decides prompt delivery — see M22 |
+| M32 | Does `opencode` emit a **turn-end event**? | **Yes.** `session.idle`, consumable by a plugin; `~/.config/opencode/plugin/tmux-bell.js` is a working example on this box |
+| M33 | Can `claude` be given a **scoped hook at launch**? | **Yes.** `--settings <file-or-json>` takes a settings file *or an inline JSON string*, so a `Stop` hook can be scoped to one seat |
 | M31 | `read-tool` delivery **succeeded** at 52,042 bytes | round 4 of this very review: `delivery_mode read-tool`, deepseek-flash returned 7,664 chars in 273.7 s, muse-spark 10,636 in 464.3 s | M4 failed at 59,034 bytes in the same mode — so read-tool is not uniformly fatal (§9.1) |
 | M28 | era's measured stall policy is a **per-turn** silence budget | `docs/assessments/2026-09-04-stall-threshold-measured.md` | productive silences to **570.2 s**; 3.97 % over 300 s |
 
@@ -227,8 +229,9 @@ Envelope appended to era's existing round prompt:
 The review bundle is the file bundle.xml in your current directory.
 Write your complete review to the file review.md in your current directory.
 Do not read, write, or create any other file.
-State, as the first line of review.md, how many lines bundle.xml contains:
-ERA-BUNDLE-LINES: <count>
+State, as the first line of review.md, the LAST file path listed in bundle.xml,
+copied exactly as it appears there:
+ERA-BUNDLE-TAIL: <path>
 Write the last line ONLY when the review is final, and do not edit the file
 afterwards. That last line must be exactly, alone on the line:
 ERA-CANARY-<nonce>
@@ -249,13 +252,14 @@ ERA-CANARY-<nonce>
   a turn-end signal it does not currently have.
 - **Canonical matching.** era compares the last non-empty line, trailing
   whitespace and CR stripped. Both marker lines are removed before validation.
-- **`ERA-BUNDLE-LINES` is a cheap read-truncation probe.** era knows
-  `bundle.xml`'s true line count, so a mismatch is evidence the model saw less
-  than the whole bundle — the silent failure §9.1 concedes the canary cannot
-  catch. It is a **warning, never a gate**: a model can report a count it did not
-  derive, so agreement is weak evidence and disagreement is strong evidence. This
-  is the only new detection added after round 3, and it is two lines of prompt
-  plus one comparison.
+- **`ERA-BUNDLE-TAIL` is a cheap read-truncation probe, and it asks for the tail
+  on purpose.** Revision 5 asked for `bundle.xml`'s **line count**, which was
+  **vacuous**: a TUI agent has a shell, so it runs `wc -l` and reports the true
+  count *however little it actually read*. The probe would have agreed every time
+  and detected nothing — a control that cannot fail, the same defect gemini found
+  in the "written more than once" check (§15 finding 16). Asking for the last
+  path **in the content** cannot be answered by a truncated read. Still a
+  **warning, never a gate**: agreement is weak evidence, disagreement strong.
 
 ### 5.4 Isolation: the seat does not run in the repo
 
@@ -442,18 +446,39 @@ tracks output. It is not the instrument that fails; it is that the rule it would
 drive is worth ~2 minutes on a 13-minute budget, at the cost of a third liveness
 mechanism and a threshold whose validity does not transfer. **So it is deleted.**
 
-**The cost of that deletion, stated plainly.** An interactive TUI does not exit
-when its turn ends — it sits at a prompt. So a seat that finishes its turn
-*without* writing the canary (it answered in chat, refused, or stopped after a
-partial write) never triggers rule 2, and burns the **full `$TimeoutSec`** before
-rule 3 classifies it. Round 3 raised this as the direct consequence of deleting
-the stall rule, and it is accepted rather than patched: for a two-seat spike the
-worst case is one ~800 s wait, and era's dispatcher already bounds a lone
-straggler. **No turn-end rule is added now**, because none is available without
-pane text (§11.5) or an `agent-signal`-style hook era does not own (M13). What
-changes is that **C5 now records whether a turn-ended TUI goes quiet** — if it
-does, a cheap turn-end rule becomes available in a later revision; if it does
-not, this cost is permanent and should be weighed in §14.2.
+**A turn-end signal does exist, and era can own it.** An interactive TUI does not
+exit when its turn ends — it sits at a prompt — so a seat that finishes *without*
+writing the canary (answered in chat, refused, stopped after a partial write)
+would burn the **full `$TimeoutSec`**. Revisions 3-5 accepted that cost, reasoning
+that no signal was available without pane text (§11.5) or the `agent-signal` hook
+era does not own (M13).
+
+**That reasoning conflated two claims and revision 6 corrects it.** M13's finding
+is "do not depend on a hook era does not own" — not "no hook is available". Both
+CLIs expose a first-class turn-end event, and era can install its own, scoped to
+the seat:
+
+- **opencode** emits `session.idle` (M32), consumable by a plugin era writes into
+  the seat's scratch config.
+- **claude** takes `--settings` as an inline JSON string (M33), so a `Stop` hook
+  can be passed at launch with no file to manage and no effect on the operator's
+  own `~/.claude/settings.json`.
+
+Each hook does one thing: `touch <scratch>/turn-ended`. That is **rule 4**:
+
+4. `turn-ended` present and no canary → the model finished without producing a
+   review → kill → `tmux-seat-no-review` (recoverable).
+
+**Why a hook and not a model-written marker.** Asking the model to "always write
+`done.txt` whatever happens" fails on exactly the case that matters: a model that
+refuses or derails is the one least likely to follow an extra instruction. A
+CLI-level hook fires on the *runtime's* turn boundary regardless of what the
+model did, which is the property the classifier needs.
+
+**Residual:** a hook is one more thing that can silently not fire. Rule 4 is
+therefore an *accelerator*, never a gate — `$TimeoutSec` remains the backstop, so
+a hook that never fires costs the old full-budget wait rather than a wrong
+verdict. C5 asserts the hook fires at all.
 
 ---
 
@@ -466,6 +491,7 @@ not, this cost is permanent and should be weighed in §14.2.
 | Complete review | canary + stability | 0 | — | — |
 | Partial write, writer crashed | file present, canary absent (**rule 2 only**) | -1 | `tmux-seat-truncated` | yes |
 | Gone, nothing written | window absent after launch (M18, M26) | -1 | `tmux-seat-exited` | yes |
+| Turn ended, no review | `turn-ended` hook, no canary (M32/M33) | -1 | `tmux-seat-no-review` | yes |
 | Budget exhausted, partial file | `$TimeoutSec`, canary absent | -1 | `tmux-seat-timeout-partial` | **no** |
 | Budget exhausted, nothing written | `$TimeoutSec`, no file | -1 | `tmux-seat-timeout` | no |
 | Refusal / narration | `Test-EraCaptureAcceptable` | -1 | `agentic-narration-capture` | **only if the attempt did not time out** |
@@ -622,20 +648,35 @@ each a fact about the instrument reported as a fact about the subject.
   recorded, including the matched pair M20/M21 and the M25/M26 sentinel result.
 - **C5 — does a seat launch, reach a file write, and go quiet when its turn
   ends?** Assert the window row appears (M27's latch), then that `review.md`
-  appears. Sample `#{window_activity}` every 5 s for the whole attempt **and for
-  120 s after the canary lands**, reporting the longest interval with no epoch
-  change. This is an *observation, not a rule* (§6 adds none), and it decides
+  appears. Assert the seat's **`turn-ended` hook fires** (M32/M33) — §6 rule 4 rests on it,
+  and a hook that silently never fires is the one failure that would restore the
+  full-budget wait. Sample `#{window_activity}` every 5 s for the whole attempt
+  **and for 120 s after the canary lands**, reporting the longest interval with
+  no epoch change. This is an *observation, not a rule* (§6 adds none), and it decides
   whether a cheap turn-end rule is available later. **Observation is limited to
   window existence, the activity epoch, and file stats**; revision 2's "assert
   the model's first tool use occurs" is withdrawn, because the only way to see
   that is pane text, which §11.5 forbids.
 - **C6 — can opencode's reasoning effort be set without `--variant`?** §11.4
   turns on this. Pre-registered search set, in order: a `variant`/`effort`/
-  `reasoning` key under `model` or per-provider in `opencode.json` (measured this
-  round: **no such key is present today**); an `OPENCODE_*` environment variable;
-  an agent definition (`opencode agent`); a config path named by `opencode models
-  --verbose`. Record which were tried and what each returned — a negative is only
-  a negative once the set was enumerated in advance.
+  `reasoning` key under `model` or per-provider in a scratch `opencode.json`
+  (measured: **no such key is present in the current config**); an `OPENCODE_*`
+  environment variable; an agent definition (`opencode agent`); a config path
+  named by `opencode models --verbose`; a plugin (the same mechanism M32 uses);
+  and finally **driving the TUI as a human would** — `tmux send-keys` to whatever
+  in-TUI model/effort selector exists.
+
+  **Whether the TUI has an interactive effort selector at all is UNMEASURED.**
+  Revision 5 reasoned from "no `--variant` flag" (M9) to "effort cannot be set",
+  which does not follow; a probe of the binary's strings was inconclusive, not
+  negative. Note that send-keys reintroduces the launch-readiness race §5.2
+  otherwise designs away, so it is the last resort, not the first.
+
+  **Verification is out-of-band, so this stays testable without reading the
+  pane.** `opencode.db` records the variant actually used per message — that is
+  how the registry's deepseek 32,000-token output-ceiling diagnosis was made. So
+  whatever sets the effort, C6 confirms it from the database, never from the
+  screen. A method that cannot be confirmed there counts as a negative.
 - **C7 — reaping, asserted on processes rather than windows.** Launch a seat,
   kill era mid-dispatch, and assert the watchdog destroys the server at its
   deadline and that **no seat process survives**. M30 already showed
@@ -715,7 +756,10 @@ Missing 1, 2, 3 or 5 means the answer is §4's option C.
 - The cost of having no turn-end signal (§6): a seat that finishes without a
   canary burns its full budget. Accepted for the spike, unquantified in
   production.
-- Whether opencode's reasoning effort is settable at all (C6, M9).
+- Whether opencode's reasoning effort is settable at all (C6, M9) — including
+  whether its TUI has an **interactive** effort selector, which revision 5
+  wrongly treated as settled by the absence of a flag.
+- Whether either turn-end hook (M32/M33) fires reliably in a detached pane.
 - **Read confinement (§5.4).** A seat *can* read the repo by absolute path, and
   `seat_containment` cannot see reads. Mitigated by not handing over a path; not
   enforced, not detectable.
@@ -749,7 +793,10 @@ Missing 1, 2, 3 or 5 means the answer is §4's option C.
    seat can read the repo by absolute path and `seat_containment` cannot see it.
    Is that acceptable for a spike, given today's process seats run **in** the
    repo with the same tools — or does read confinement have to exist before any
-   seat runs unattended?
+   seat runs unattended? A **middle path is uncosted**: give the seat read access
+   to the reviewed source files but not to `.external-reviews/`, which would let
+   it cite real files at real line numbers instead of bundle coordinates, while
+   still keeping prior rounds and peers out of reach.
 2. §6 deletes the stall rule because it is worth ~100-130 s on an ~800 s budget.
    Is that arithmetic right, and is there a case where a wedged seat burning its
    full budget costs more than the third mechanism would?
