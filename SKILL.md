@@ -557,6 +557,40 @@ gap the citation warnings had before they were recorded — plus
 than asserted (the manifest is written before the blind bundle exists, so that
 file was never hashed anywhere).
 
+### The seats run inside the repo, and the round now says whether they touched it
+
+era spawns every seat with permissions bypassed (`--dangerously-skip-permissions`
+on agy, `--allow-dangerously-skip-permissions` on claude, `edit`/`bash` = `allow`
+in the user's opencode config) and sets **no working directory** on any of them —
+so each child inherits `[Environment]::CurrentDirectory`, which is the repo under
+review, because `$repoRoot` is derived from exactly that. Measured 2026-09-05: an
+`opencode run` in a scratch directory ran bash, printed its cwd, and read a file
+that was in no bundle, with nothing in era asking for it. `backends/agy.ps1:369`
+records the same from the other side — "review the code at `<path>`" invited that
+seat "to go exploring the repository".
+
+**The containment is the prompt, not the process.** era's dirty-tree gate reads
+the tree *before* dispatch and never looked again, so there was a precondition
+and no postcondition. There is now: era re-reads git state after the last
+dispatch (deliberately after the agy fallback, which dispatches a second live
+reviewer) and records `seat_containment` at round level in
+`round-N-metadata.json` — `verdict` (`contained` / `breached` / `unmeasured`),
+`new_dirty`, `head_moved`, `before_head`, `after_head`. A breach also prints a
+warning naming each path. HEAD is compared as well as the tree, because a seat
+that *commits* leaves a clean working tree and a dirt-only check calls that
+healthy.
+
+`unmeasured` is a real verdict, not a missing field: outside a git work tree
+`Get-EraGitState` returns `$null`, two nulls diff to nothing, and every check
+answers "clean" — a fact about the instrument published as a fact about the repo.
+era's own artifacts under `.external-reviews/` are filtered out, using the same
+regex as the `-AutoDetect` candidate filter, where that identical oversight once
+had era propose its own review history for review.
+
+This does **not** move the seats out of the repo. It makes the existing boundary
+checkable, and it is the instrument any future boundary has to be verified
+against.
+
 ### `file:line` citations come in two coordinate systems
 
 A repomix bundle prints each file's **own** line number on every content line

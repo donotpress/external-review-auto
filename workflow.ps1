@@ -1013,6 +1013,63 @@ function Get-NextReviewRound {
     return $prior + 1
 }
 
+function Compare-EraSeatContainment {
+    <#
+    .SYNOPSIS
+        Did the working tree move while the seats were running? Takes two
+        Get-EraGitState snapshots and returns a verdict.
+    #>
+    [CmdletBinding()]
+    param($Before, $After)
+
+    # FAIL TO 'unmeasured', NEVER TO 'contained'. Get-EraGitState returns $null
+    # outside a work tree and when git is missing. Two nulls diff to nothing and
+    # $null -eq $null, so every check below answers "clean" -- a fact about the
+    # instrument dressed as a fact about the repo. Same shape as the three
+    # fail-open catches opencode.ps1 records (token gate, bundle line counts,
+    # bundle sizing): a read failure must not be indistinguishable from a real
+    # measurement.
+    if ($null -eq $Before -or $null -eq $After) {
+        $which = if ($null -eq $Before -and $null -eq $After) { 'neither snapshot could be taken' }
+                 elseif ($null -eq $Before) { 'the pre-dispatch snapshot could not be taken' }
+                 else { 'the post-dispatch snapshot could not be taken' }
+        return [pscustomobject]@{
+            Verdict    = 'unmeasured'
+            NewDirty   = @()
+            HeadMoved  = $false
+            BeforeHead = $null
+            AfterHead  = $null
+            Reason     = "$which (not a git work tree, or git is not on PATH); containment was not checked."
+        }
+    }
+
+    # era's OWN artifacts are written between the two snapshots, so they are
+    # guaranteed to show up in the second one. Dropping them is the same fix,
+    # against the same directory, as the -AutoDetect candidate filter at
+    # runtimes/era.ps1:1189 -- where the identical oversight once had era
+    # "propose its own review history for review". Same regex, deliberately.
+    $newDirty = @(Compare-Object -ReferenceObject @($Before.Dirty) -DifferenceObject @($After.Dirty) |
+        Where-Object { $_.SideIndicator -eq '=>' } |
+        ForEach-Object { $_.InputObject } |
+        Where-Object {
+            # Porcelain is 'XY <path>': two status chars, a space, then the path,
+            # quoted when it contains a space or a non-ASCII byte.
+            $p = ($_ -replace '^..\s', '').Trim('"')
+            ($p -replace '\\', '/') -notmatch '(^|/)\.external-reviews(/|$)'
+        })
+
+    $headMoved = ($Before.Head -ne $After.Head)
+
+    return [pscustomobject]@{
+        Verdict    = if ($newDirty.Count -gt 0 -or $headMoved) { 'breached' } else { 'contained' }
+        NewDirty   = $newDirty
+        HeadMoved  = $headMoved
+        BeforeHead = $Before.Head
+        AfterHead  = $After.Head
+        Reason     = $null
+    }
+}
+
 function Write-ReviewManifest {
     [CmdletBinding()]
     param(
@@ -2762,6 +2819,12 @@ function Write-ReviewMetadata {
         # one durable record of a reviewer inventing line numbers was a line in a
         # terminal that nobody keeps.
         [string[]]$CitationWarnings = @(),
+        # The Compare-EraSeatContainment verdict for this round, or $null when
+        # the caller ran no check. Console-only was where citation_warnings
+        # started too, and the reason given for moving them applies unchanged:
+        # a seat writing to the repo under review must not have its only record
+        # be a line in a terminal that nobody keeps.
+        $SeatContainment = $null,
         [string[]]$IncludeFilesList = @(),
         [int]$BundleFileCount = 0,
         [int]$TopicRoundCount = 0,
@@ -2936,6 +2999,25 @@ function Write-ReviewMetadata {
         convergence_warnings = @($ConvergenceWarnings)
         cost_warnings = @($CostWarnings)
         citation_warnings = @($CitationWarnings)
+        # ALWAYS PRESENT, and 'unmeasured' when nothing was checked -- the same
+        # rule, for the same reason, as blind_seat below. An absent key would
+        # make "era could not read the tree" indistinguishable from "this writer
+        # predates the check", and a verdict of 'contained' would be worse than
+        # either: a fact about the instrument published as a fact about the repo.
+        seat_containment = $(
+            if ($null -eq $SeatContainment) {
+                @{ verdict = 'unmeasured'; new_dirty = @(); head_moved = $false
+                   before_head = $null; after_head = $null
+                   reason = 'the caller ran no containment check' }
+            } else {
+                @{ verdict     = $SeatContainment.Verdict
+                   new_dirty   = @($SeatContainment.NewDirty)
+                   head_moved  = [bool]$SeatContainment.HeadMoved
+                   before_head = $SeatContainment.BeforeHead
+                   after_head  = $SeatContainment.AfterHead
+                   reason      = $SeatContainment.Reason }
+            }
+        )
         # Always present, even as $null: "no seat was blinded" and "this writer
         # predates the field" are different facts, and a scorer reading a
         # directory of rounds has to be able to tell them apart.

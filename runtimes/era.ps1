@@ -2372,12 +2372,59 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         foreach ($cl in $cit.Lines) { Write-Host $cl }
     }
 
+    # --- Seat containment: the second half of the dirty-tree gate ------------
+    # The gate above (search -AllowDirtyTree) reads the tree BEFORE dispatch and
+    # never looks again, so era has a precondition and no postcondition. That
+    # asymmetry only became visible once the seats were measured, 2026-09-05:
+    #
+    #   grep -n '\.WorkingDirectory' backends/*.ps1 workflow.ps1 runtimes/era.ps1
+    #     -> no matches. ProcessStartInfo with an empty WorkingDirectory means
+    #        the child inherits [Environment]::CurrentDirectory, and $repoRoot is
+    #        derived from exactly that (see its assignment above). So every seat
+    #        runs INSIDE the repo under review.
+    #   backends/claude.ps1:150   --allow-dangerously-skip-permissions
+    #   backends/agy.ps1:466      --dangerously-skip-permissions
+    #   ~/.config/opencode/opencode.json -> edit/bash/external_directory = allow
+    #
+    # A live probe settled what that permits: `opencode run` in a scratch
+    # directory ran bash, printed its cwd, and read a file that was in no bundle
+    # -- with no era flag asking for any of it. backends/agy.ps1:369 records the
+    # same thing from the other direction, that "review the code at <path>"
+    # invited that seat "to go exploring the repository".
+    #
+    # So the containment is PROMPT TEXT. This does not add a boundary -- moving
+    # the seats out of the repo is a larger change with its own design -- it
+    # makes the existing boundary checkable, and it is the instrument that any
+    # later boundary would have to be verified against.
+    #
+    # PLACED AFTER THE AGY FALLBACK, NOT AFTER THE PANEL. The tighter window --
+    # snapshot the moment Invoke-ReviewerDispatch returns -- is the one this was
+    # first written with, and it is wrong: the fallback block above dispatches a
+    # SECOND live reviewer, so a check that closed before it would have reported
+    # 'contained' for a seat it never watched. That is the failure this whole
+    # function exists to refuse, reintroduced by its own call site. Everything
+    # era itself writes between the two reads lands under .external-reviews,
+    # which Compare-EraSeatContainment filters.
+    $eraGitStateAfter = Get-EraGitState -RepoRoot $repoRoot
+    $seatContainment  = Compare-EraSeatContainment -Before $eraGitState -After $eraGitStateAfter
+    if ($seatContainment.Verdict -eq 'breached') {
+        Write-Host "[era] WARNING: the working tree CHANGED while the reviewers were running." -ForegroundColor Yellow
+        Write-Host "[era]   Seats run inside this repo with permissions bypassed; they are asked, not prevented, to leave it alone." -ForegroundColor Yellow
+        if ($seatContainment.HeadMoved) {
+            Write-Host "[era]   HEAD moved: $($seatContainment.BeforeHead) -> $($seatContainment.AfterHead)" -ForegroundColor Yellow
+        }
+        foreach ($p in $seatContainment.NewDirty) { Write-Host "[era]   changed: $p" -ForegroundColor Yellow }
+        Write-Host "[era]   Recorded as seat_containment in round-$round-metadata.json. Inspect before trusting this round." -ForegroundColor Yellow
+    } elseif ($seatContainment.Verdict -eq 'unmeasured') {
+        Write-Host "[era] Seat containment: not checked ($($seatContainment.Reason))"
+    }
+
     Write-ReviewMetadata -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
         -Mode $Mode -Results $results -Registry $registryHash -BundleTokens $tokenCount `
         -ModelOverrides $modelOverrides -ConvergenceWarnings $convergenceWarnings `
         -CostWarnings $costReport.Warnings -CitationWarnings $citationWarnings -IncludeFilesList @($IncludeFiles) -BundleFileCount $bundleFileCount `
         -TopicRoundCount $topicRoundCount -DeliveryModes $deliveryModes -BundleBytes ([long]$bundleBytes) `
-        -BundleOverrides $bundleOverrides
+        -BundleOverrides $bundleOverrides -SeatContainment $seatContainment
 
     # --- Void-round gate (2026-08-10) ----------------------------------------
     # A round could burn the whole budget, write artifacts, and still exit 0
