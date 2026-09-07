@@ -148,29 +148,64 @@ a real but ordinary porting job — plus packaging, since PowerShell 7 has Linux
 builds and none is installed here (`/home/joshua/.local/bin/pwsh` is a shim that
 execs `pwsh.exe`). Nothing here estimates that job's size; it was not measured.
 
-## An incidental finding, flagged not acted on
+## SETTLED: agy DOES write stdout under era's own spawn
 
-`backends/agy.ps1:4` states "agy --print does NOT write stdout — responses must
-be retrieved from the session transcript", and the adapter carries a transcript
-poller and run-id matcher to work around it.
+`backends/agy.ps1:4` and `:10` state that "agy --print does NOT write stdout —
+responses must be retrieved from the session transcript". **That is stale.**
 
-**Measured: agy 1.1.27 driven from Linux bash writes the response to stdout.**
-Stream-separated to be sure:
+The first version of this document reported stdout working only from a bash
+spawn on Linux and explicitly refused to act on it, because the adapter's claim
+is about a different condition: era's Windows `.NET ProcessStartInfo` spawn.
+**That condition has now been measured directly.**
 
-```
-$ "$AGY" ... --print "Reply with exactly the token STDOUT-SEPARATION-OK ..." \
-      1>out.txt 2>err.txt
-exit 0
-STDOUT: 21 bytes  → "STDOUT-SEPARATION-OK"
-STDERR: 0 bytes
-```
+The probe replicates the adapter's spawn exactly — `UseShellExecute=$false`,
+`CreateNoWindow=$true`, all three streams redirected, stdin closed immediately,
+the same agent env-var scrub, and the same `CopyToAsync` async drain to a file.
 
-All four print-mode runs in this document returned their answer on stdout.
+**Positive control first**, because a null result is worthless from an
+instrument that captures nothing:
 
-**This is not yet a contradiction of the adapter.** What is measured is that
-stdout carries the response *when agy is spawned from bash on Linux*. It was
-**not** measured whether stdout is empty under era's actual spawn (Windows .NET
-`ProcessStartInfo`, redirected handles, no console) — which is the condition the
-adapter's comment describes, and which may differ, or may be version drift since
-the comment was written. Anyone who wants to simplify that adapter must measure
-the Windows-.NET case first; the transcript poller stays until then.
+| run | exit | stdout | stderr |
+|---|---|---|---|
+| control — `cmd.exe /c echo CONTROL-STDOUT-OK` | 0 | **19 B**, correct | 0 |
+| subject — `agy --print` (trivial prompt) | 0 | **20 B** `DOTNET-STDOUT-PROBE` | 0 |
+| subject — `agy --print` (**full agentic review**) | 0 | **1,458 B / 21 lines** | 0 |
+
+The agentic run is the one that matters: a 26,304-byte, 401-file bundle named in
+the prompt (era's real delivery shape), requiring an actual file-read tool call.
+Stdout carried the **complete** review — the canary value only obtainable by
+opening the file, the file count exactly right at 401, and the defect correctly
+named. The transcript was written too (59,388 bytes), so this is not
+stdout *instead of* the transcript; both are populated.
+
+### What this does and does not license
+
+**It does NOT license deleting the transcript polling**, and the reason is not
+caution — it is that the poll loop has a **second job the comment does not
+mention**. Besides capture, it is the LIVENESS signal: it watches transcript
+mtime to set `$activitySeen` / `$lastActivityTime`, which drive the Tier-1
+"nothing ever started" and Tier-2 "went quiet" stall detectors and the straggler
+abandonment.
+
+`CopyToAsync` yields nothing until the process exits, so stdout **cannot**
+provide liveness. Delete the polling and era loses stall detection on this seat
+entirely — a hung agy would burn the full bundle-scaled timeout instead of being
+abandoned early.
+
+So the accurate statement is narrower than "the machinery is dead weight":
+
+* the **capture** path could take stdout as the primary source and keep the
+  transcript scrape as fallback (the run-id matcher exists because transcripts
+  are shared and ambiguous — a problem stdout simply does not have);
+* the **liveness** path must stay regardless.
+
+### Still unmeasured, and load-bearing for any rewrite
+
+* **Large responses.** 1,458 bytes is a real review but a small one. Whether
+  stdout stays complete for a many-KB review is untested.
+* **Concurrency.** The panel runs four seats as ThreadJobs in one pwsh process;
+  every measurement here is a single process.
+
+**OWNER: whoever attempts the simplification.** Both must be measured first.
+Nothing in `backends/agy.ps1` was changed on the strength of this probe.
+
