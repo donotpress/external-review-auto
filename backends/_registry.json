@@ -704,7 +704,7 @@
       "--prompt",
       "Read {instructions} and follow it exactly."
     ],
-    "notes": "muse-spark over the tmux TUI transport (backends/tmux.ps1). OPT-IN ONLY: not in config/defaults.json, so a bare /era never selects it. Paired with the `muse-spark` preset for A/B -- same model, same pricing, different transport. ⚠ THE TUI HAS NO --variant FLAG (measured 2026-09-06: present on `opencode run`, absent on the TUI), so this seat runs at opencode's DEFAULT reasoning effort while `muse-spark` sends --variant xhigh. Measured across 7 tmux runs, reasoning tokens were 2,799-8,608 against a single process-spawn observation of 9,221 -- the run-to-run spread is wide enough that no effort difference is demonstrated, and none is ruled out. A project opencode.json variant key was tried and showed no reliable effect (one run above the no-config range, one below). Treat the effort setting as UNPROVEN, not as equivalent. `--pure` was added and then removed: it stopped the operator's tmux-bell plugin signalling into era's socket, but on the plugin-set axis rather than the environment one, and it would also disable the turn-end plugin the design wants era to ship. The signal problem is now handled in backends/tmux.ps1's teardown, which pauses between kill-window and kill-server so a dying seat's last hooks land on a LIVE socket."
+    "notes": "muse-spark over the tmux TUI transport (backends/tmux.ps1). OPT-IN ONLY: not in config/defaults.json, so a bare /era never selects it. Paired with the `muse-spark` preset for A/B -- same model, same pricing, different transport. ⚠ THE TUI HAS NO --variant FLAG (measured 2026-09-06: present on `opencode run`, absent on the TUI), so this seat runs at opencode's DEFAULT reasoning effort while `muse-spark` sends --variant xhigh. Measured across 7 tmux runs, reasoning tokens were 2,799-8,608 against a single process-spawn observation of 9,221 -- the run-to-run spread is wide enough that no effort difference is demonstrated, and none is ruled out. A project opencode.json variant key was tried and showed no reliable effect (one run above the no-config range, one below). Treat the effort setting as UNPROVEN, not as equivalent. `--pure` was added and then removed: it stopped the operator's tmux-bell plugin signalling into era's socket, but on the plugin-set axis rather than the environment one, and it would also disable the turn-end plugin the design wants era to ship. The signal problem is now handled in backends/tmux.ps1's teardown, which pauses between kill-window and kill-server so a dying seat's last hooks land on a LIVE socket. NOTE 2026-09-06: the sibling `longcat-tmux` preset was DELETED the day it was added. cmdc gained a process-spawn backend (backends/cmdc.ps1) hours later, which reaches the same model with no server, no windows, no watchdog and no cross-session blast radius -- so carrying the same model over this transport as well was strictly worse and only invited someone to pick the wrong one."
   },
   "opus-tmux": {
     "backend": "tmux",
@@ -725,26 +725,6 @@
       "Read {instructions} and follow it exactly."
     ],
     "notes": "opus over the tmux TUI transport (backends/tmux.ps1). OPT-IN ONLY: not in config/defaults.json. ⚠ USES --dangerously-skip-permissions, NOT the --allow- form the `opus` preset uses: measured 2026-09-06, --allow-dangerously-skip-permissions only makes bypass AVAILABLE, which is useless for an unattended interactive seat with nobody to answer the prompt. That is a real escalation of the flag; against it, the seat's cwd is a scratch directory holding three files and no repository, where the process-spawn `opus` seat runs IN the repo. NOT YET RUN: every spike measurement so far is muse-spark. Unverified end to end."
-  },
-  "longcat-tmux": {
-    "backend": "tmux",
-    "model_id": "meituan/longcat-2.0:free",
-    "pricing": {
-      "input_per_m": 0.0,
-      "output_per_m": 0.0
-    },
-    "supports_file_read": true,
-    "supports_streaming": false,
-    "tmux_launch": [
-      "cmdc",
-      "-m",
-      "{model_id}",
-      "--permission-mode",
-      "auto-accept",
-      "-t",
-      "Read {instructions} and follow it exactly."
-    ],
-    "notes": "LongCat 2.0 (free) via the cmdc CLI over the tmux TUI transport. THIS PRESET IS THE POINT OF THE TRANSPORT: cmdc exposes 68 models and has NO era backend of its own -- no backends/cmdc.ps1, no adapter -- so reaching it is a registry entry rather than ~1,000 lines. Verified end to end 2026-09-06: read the archived 59,034-byte round-6 bundle, wrote a canary-valid 5-section review in 115s with the correct ERA-BUNDLE-TAIL. Pricing 0/0 is REAL, not a placeholder -- models.dev lists this model as free. ⚠ NO OTHER cmdc MODEL IS ADDED HERE, deliberately: `cmdc --list-models` prints ids and descriptions but NO RATES, so pricing for the paid 67 is unmeasured, and era's cost estimates were measured the same day to run ~3.2x low already (docs/assessments/2026-09-06-era-cost-estimates-vs-vendor-truth.md). Inventing a rate would feed a cap that is already wrong. ✅ cmdc ALSO SOLVES M9, the opencode TUI's missing --variant: `cmdc --effort high` is accepted AND CONFIRMED (\"Reasoning effort set to high for DeepSeek V4 Flash\"), and REFUSED where unsupported (\"LongCat 2.0 has no adjustable reasoning effort\", exit 0) -- loud both ways, where opencode silently ignores an undeclared variant. LongCat itself takes no --effort, which is why the flag is absent from this launch line."
   },
   "longcat": {
     "backend": "cmdc",
