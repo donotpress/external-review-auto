@@ -73,6 +73,36 @@ Describe "the cmdc adapter's contract with the dispatcher" -Tag Unit {
         }
     }
 
+    It 'the effort-refusal branch matches BOTH shapes cmdc actually emits' {
+        # cmdc refuses a bad --effort in two different wordings (both measured
+        # 2026-09-06, exit 1, stdout empty, text on stderr). Matching only the
+        # first sent the second down the generic "cmdc failed" path, where a
+        # registry typo read as a flaky seat.
+        #
+        # THIS TEST STRIPS COMMENTS FIRST, ON PURPOSE. The explanatory comment
+        # above the branch quotes both strings verbatim, so a grep over the raw
+        # file would pass on the comment that explains the check rather than on
+        # the check -- the exact false-positive shape that has bitten this repo
+        # before. Comments out, then the captured pattern is exercised AS A
+        # REGEX against the two real messages.
+        $src = Get-Content (Join-Path $script:SkillRoot 'backends/cmdc.ps1')
+        $code = $src | Where-Object { $_ -notmatch '^\s*#' }
+        $line = $code | Where-Object { $_ -match '\$r\.Rc -ne 0 -and \$r\.Err -match' }
+        @($line).Count | Should -Be 1 -Because 'exactly one effort-refusal branch should exist in code (not counting comments)'
+
+        $line -match "-match\s+'([^']+)'" | Should -BeTrue -Because 'the branch should test a single-quoted pattern'
+        $pattern = $matches[1]
+
+        # The two messages, verbatim from cmdc 1.50.0.
+        'LongCat 2.0 has no adjustable reasoning effort.' | Should -Match $pattern -Because 'model with no effort knob (measured: longcat + --effort high)'
+        'Unknown effort "medium". Supported: low, high, max.' | Should -Match $pattern -Because 'model with an effort knob, wrong level (measured: zai-org/glm-5.3 + --effort medium)'
+
+        # ...and it must still be a targeted pattern, not a catch-all that would
+        # swallow every other non-zero exit as an effort bug.
+        'cmdc: connection reset by peer' | Should -Not -Match $pattern
+        'Error: model not found' | Should -Not -Match $pattern
+    }
+
     It 'does NOT declare -PidFile' {
         (Get-Command Invoke-CmdcReview).Parameters.ContainsKey('PidFile') | Should -BeFalse
     }

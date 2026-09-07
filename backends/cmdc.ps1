@@ -304,22 +304,35 @@ write your complete review to standard output. Do not create or modify any file.
             throw "cmdc is not installed inside WSL (it is not on the login PATH); this preset cannot be dispatched."
         }
         # AN UNSUPPORTED --effort IS A PRESET BUG, NOT A MODEL FAILURE, and cmdc
-        # is loud about it: exit 1 with "<Model> has no adjustable reasoning
-        # effort" on stderr. Measured 2026-09-06 against `longcat` with
-        # cmdc_effort=high. Named distinctly so it reads as the registry mistake
-        # it is rather than a flaky seat -- and NOT recoverable, because a
-        # re-dispatch sends exactly the same unsupported flag.
+        # is loud about it. It has TWO distinct refusals, and matching only the
+        # first sent the second down the generic-failure path where it read as a
+        # flaky seat. Both measured 2026-09-06, exit 1, stdout EMPTY, text on
+        # stderr:
+        #
+        #   model has no effort knob at all  -> "LongCat 2.0 has no adjustable
+        #                                        reasoning effort."
+        #     (`longcat` with cmdc_effort=high)
+        #   model HAS one, level is wrong    -> "Unknown effort \"medium\".
+        #                                        Supported: low, high, max."
+        #     (`zai-org/glm-5.3` with cmdc_effort=medium -- glm-5.3 declares
+        #      low/high/max and no medium)
+        #
+        # The second is the likelier registry typo now that presets carry
+        # per-model effort levels, and cmdc names the valid set in the message,
+        # so it is worth surfacing verbatim. Named distinctly so either reads as
+        # the registry mistake it is rather than a flaky seat -- and NOT
+        # recoverable, because a re-dispatch sends exactly the same bad flag.
         #
         # This is the behaviour M9 wanted and opencode does not have: opencode
         # silently ignores an undeclared --variant and runs at default effort
         # while era believes it asked for maximum. cmdc refuses.
-        if ($r.Rc -ne 0 -and $r.Err -match 'no adjustable reasoning effort') {
+        if ($r.Rc -ne 0 -and $r.Err -match 'no adjustable reasoning effort|Unknown effort') {
             return @{
                 Response = $null; ExitCode = -1; Error = 'cmdc-effort-unsupported'; ContentOk = $false
                 CaptureMethod = 'cmdc'; InputTokens = $null; OutputTokens = 0
                 WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
                 TruncationWarning = $null; Stderr = $r.Err
-                Warnings = @($warnings + ("preset '$($ModelInfo.preset)' sets cmdc_effort='$($ModelInfo.cmdc_effort)' but $modelId does not support it (" + $r.Err.Trim() + "). Remove cmdc_effort from the preset; a re-dispatch would send the same flag."))
+                Warnings = @($warnings + ("preset '$($ModelInfo.preset)' sets cmdc_effort='$($ModelInfo.cmdc_effort)', which $modelId refused (" + $r.Err.Trim() + "). Fix or remove cmdc_effort on the preset; a re-dispatch would send the same flag."))
             }
         }
         if ($r.Rc -ne 0) {
