@@ -42,6 +42,7 @@ trigger: /external-review-auto
 | **anthropic** | `ANTHROPIC_API_KEY` (https://console.anthropic.com/) | `opus-api`, `sonnet-api`, `haiku-api` |
 | **openaicompat** | per-preset (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, …) | `deepseek-api`, `deepseek-reasoner-api`, `minimax-api`; extensible via `_registry.json` to Groq/Together/OpenRouter/any OpenAI-compatible endpoint |
 | **opencode (HTTP, v1.8)** | `OPENCODE_API_KEY` / `NVIDIA_API_KEY` — **auto-sourced from opencode `auth.json` if unset** | `deepseek-http`, `glm-http`, `minimax-http`, `kimi-http`, `nvidia` — opencode-go models + free NVIDIA NIM over **direct HTTP (no TUI)**. Set `ERA_USE_HTTP_OPENCODE=1` to route the `deepseek`/`minimax` aliases here automatically. |
+| **cmdc** (Command Code CLI) | none — runs on the cmdc subscription | `longcat`, `laguna-free` (both **$0/$0**), `qwen-flash`, `glm-flash`, `minimax-m3`, `glm`, `grok`, `qwen-max`, `kimi` — reaches vendor families era has no other subscription route to (xAI, Qwen, poolside). Process-spawn, headless; **WSL-only on this box**, so it crosses the WSL boundary (`references/wsl-argument-boundary.md`). |
 
 REST adapters bypass the CLI entirely — no subprocess, no TTY exposure, no console pollution, no transcript-file polling. Use them if you want the strongest hermetic guarantees and/or you have direct API keys. Otherwise CLI adapters are fine and free.
 

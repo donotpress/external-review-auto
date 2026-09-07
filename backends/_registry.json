@@ -735,6 +735,98 @@
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "LongCat 2.0 (free) via the cmdc CLI, PROCESS-SPAWN (backends/cmdc.ps1) -- no tmux. cmdc exposes 68 models that had no era backend at all. `cmdc -p --tools-all` runs headless with stdin closed and no TTY; `--tools-all` is REQUIRED because a headless run withholds tools by default and this seat's job is reading a file. Pricing 0/0 is real, not a placeholder. ⚠ cmdc is WSL-ONLY on this box (`where.exe cmdc` finds nothing, where claude and opencode both have Windows installs), so this adapter DOES cross the WSL boundary -- see references/wsl-argument-boundary.md. It does not need tmux, which is a different and much smaller claim than crossing no boundary. Set `cmdc_effort` on a preset to pass --effort; cmdc CONFIRMS or REFUSES it on stdout and the adapter surfaces that as a warning, unlike opencode which silently ignores an undeclared variant."
+    "notes": "LongCat 2.0 (free) via the cmdc CLI, PROCESS-SPAWN (backends/cmdc.ps1) -- no tmux. cmdc exposes 68 models that had no era backend at all. `cmdc -p --tools-all` runs headless with stdin closed and no TTY; `--tools-all` is REQUIRED because a headless run withholds tools by default and this seat's job is reading a file. Pricing 0/0 is real, not a placeholder. ⚠ cmdc is WSL-ONLY on this box (`where.exe cmdc` finds nothing, where claude and opencode both have Windows installs), so this adapter DOES cross the WSL boundary -- see references/wsl-argument-boundary.md. It does not need tmux, which is a different and much smaller claim than crossing no boundary. Set `cmdc_effort` on a preset to pass --effort; cmdc CONFIRMS or REFUSES it on stdout and the adapter surfaces that as a warning, unlike opencode which silently ignores an undeclared variant. ⚠ PROMOTIONAL PRICE, CAN REVERT: https://commandcode.ai/docs/plans/goat marks this model \"Free while it lasts\" (read 2026-09-06). There is no published post-promotion rate, so if it lapses this seat has NO known price at all and must be re-sourced, not estimated. A lapsed promotion makes era's estimate silently wrong in that proportion -- the same latent-wrongness shape as the gemini 2.5-Flash carry-over this registry just corrected. Re-check the source before trusting a cost estimate on this seat."
+  },
+  "laguna-free": {
+    "backend": "cmdc",
+    "model_id": "poolside/laguna-s-2.1-free",
+    "pricing": {
+      "input_per_m": 0.0,
+      "output_per_m": 0.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Poolside Laguna S 2.1, FREE. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. Pricing 0/0 is real, not a placeholder -- the model is listed as FREE by `cmdc --list-models` and priced 0/0 in the routing table, the same shape as `longcat`. This is era's SECOND free seat, which is the main reason to have it: a free seat can be added to a panel without moving the cost estimate. VERIFIED LIVE 2026-09-06: `cmdc --model poolside/laguna-s-2.1-free -p --tools-all` returned the requested token, exit 0. No --effort support (absent from the bundle's effort map), so cmdc_effort is deliberately unset. ⚠ PROMOTIONAL PRICE, CAN REVERT: https://commandcode.ai/docs/plans/goat marks this model \"Free while capacity lasts\" (read 2026-09-06). There is no published post-promotion rate, so if it lapses this seat has NO known price at all and must be re-sourced, not estimated. A lapsed promotion makes era's estimate silently wrong in that proportion -- the same latent-wrongness shape as the gemini 2.5-Flash carry-over this registry just corrected. Re-check the source before trusting a cost estimate on this seat."
+  },
+  "grok": {
+    "backend": "cmdc",
+    "model_id": "xai/grok-4.6",
+    "pricing": {
+      "input_per_m": 2.0,
+      "output_per_m": 6.0
+    },
+    "cmdc_effort": "xhigh",
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "xAI Grok 4.6 via cmdc. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. Adds a vendor family era could not reach at all -- there was no xAI entry in this registry before. cmdc_effort is safe to set: cmdc VALIDATES --effort and the adapter surfaces a refusal as a named preset bug (backends/cmdc.ps1:316), unlike opencode's silently-ignored --variant. Supported levels read from the effort map in the same bundle. grok-4.6 declares low/medium/high/xhigh (grok-4.5 declares only low/medium/high, so do not copy xhigh onto it). NOT YET RUN end to end; the id and price are verified, the seat is not."
+  },
+  "qwen-max": {
+    "backend": "cmdc",
+    "model_id": "qwen/qwen3.8-max",
+    "pricing": {
+      "input_per_m": 2.0,
+      "output_per_m": 6.0
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Qwen 3.8 Max via cmdc. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. Adds a vendor family era could not reach at all. `qwen/qwen3.8-max-0902` is a separate id at the same price if the newer build is wanted. No --effort support (absent from the effort map). NOT YET RUN end to end."
+  },
+  "glm": {
+    "backend": "cmdc",
+    "model_id": "zai-org/glm-5.3",
+    "pricing": {
+      "input_per_m": 1.4,
+      "output_per_m": 4.4
+    },
+    "cmdc_effort": "max",
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "GLM 5.3 via cmdc. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. era's only other GLM seat is `glm-http`, which is glm-5.1 and needs an API key; this one runs on the cmdc subscription and is a newer model. cmdc_effort is safe to set: cmdc VALIDATES --effort and the adapter surfaces a refusal as a named preset bug (backends/cmdc.ps1:316), unlike opencode's silently-ignored --variant. Supported levels read from the effort map in the same bundle. glm-5.3 declares low/high/max -- note there is NO medium, so cmdc_effort='medium' would be refused. NOT YET RUN end to end."
+  },
+  "glm-flash": {
+    "backend": "cmdc",
+    "model_id": "z-ai/glm-5.3-flash",
+    "pricing": {
+      "input_per_m": 0.15,
+      "output_per_m": 0.5
+    },
+    "cmdc_effort": "max",
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "GLM 5.3 Flash via cmdc, 1M context. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. Cheap enough to add as an extra seat without materially moving a round's cost. Note the vendor prefix is `z-ai/`, NOT `zai-org/` as the non-flash GLM ids use -- that asymmetry is in cmdc's own list, not a typo here. cmdc_effort is safe to set: cmdc VALIDATES --effort and the adapter surfaces a refusal as a named preset bug (backends/cmdc.ps1:316), unlike opencode's silently-ignored --variant. Supported levels read from the effort map in the same bundle. declares low/high/max. NOT YET RUN end to end."
+  },
+  "kimi": {
+    "backend": "cmdc",
+    "model_id": "moonshotai/kimi-k3",
+    "pricing": {
+      "input_per_m": 3.0,
+      "output_per_m": 15.0
+    },
+    "cmdc_effort": "max",
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Kimi K3 via cmdc, 1M context, long-horizon. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. era's only other Kimi seat is `kimi-http` (k2.7-code, needs an API key). THE MOST EXPENSIVE MODEL ADDED HERE by a wide margin -- $3/$15 is Opus-class output pricing, 100x the output rate of `qwen-flash`. Do not put it in a default panel without meaning to. cmdc_effort is safe to set: cmdc VALIDATES --effort and the adapter surfaces a refusal as a named preset bug (backends/cmdc.ps1:316), unlike opencode's silently-ignored --variant. Supported levels read from the effort map in the same bundle. declares low/high/max. NOT YET RUN end to end."
+  },
+  "minimax-m3": {
+    "backend": "cmdc",
+    "model_id": "minimaxai/minimax-m3",
+    "pricing": {
+      "input_per_m": 0.3,
+      "output_per_m": 1.2
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "MiniMax M3 via cmdc. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. era's existing `minimax-api` and `minimax-http` seats both require an API key; this reaches a NEWER MiniMax (M3, vs M2.7) on the cmdc subscription instead. No --effort support. NOT YET RUN end to end. ⚠ PROMOTIONAL PRICE, CAN REVERT: https://commandcode.ai/docs/plans/goat marks this model \"-50%\" (\"50% off. See the deal for details.\") (read 2026-09-06). Undiscounted it is $0.60/$2.40 per Mtok, so a lapse DOUBLES the true cost of this seat. A lapsed promotion makes era's estimate silently wrong in that proportion -- the same latent-wrongness shape as the gemini 2.5-Flash carry-over this registry just corrected. Re-check the source before trusting a cost estimate on this seat."
+  },
+  "qwen-flash": {
+    "backend": "cmdc",
+    "model_id": "qwen/qwen3.7-flash",
+    "pricing": {
+      "input_per_m": 0.03,
+      "output_per_m": 0.13
+    },
+    "supports_file_read": true,
+    "supports_streaming": false,
+    "notes": "Qwen 3.7 Flash via cmdc. Pricing per Mtok from TWO independent sources dated 2026-09-06: the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), and https://commandcode.ai/docs/plans/goat. That table was validated against seven registry entries priced from other sources and matched all seven exactly (see the `gemini` preset's notes for the list). Model id copied verbatim from `cmdc --list-models`. THE CHEAPEST NON-FREE MODEL reachable from this box: $0.03/$0.13 per Mtok, about a fifth of deepseek-flash's rate. Useful as a cheap extra opinion where a free seat is not wanted. No --effort support. NOT YET RUN end to end."
   }
 }

@@ -40,6 +40,15 @@ Describe 'Registry: every preset must have required fields' {
         @{ preset = 'deepseek-api' }
         @{ preset = 'deepseek-reasoner-api' }
         @{ preset = 'minimax-api' }
+        @{ preset = 'longcat' }
+        @{ preset = 'laguna-free' }
+        @{ preset = 'grok' }
+        @{ preset = 'qwen-max' }
+        @{ preset = 'glm' }
+        @{ preset = 'glm-flash' }
+        @{ preset = 'kimi' }
+        @{ preset = 'minimax-m3' }
+        @{ preset = 'qwen-flash' }
     ) {
         $entry = $script:Registry.$preset
         $entry | Should -Not -BeNullOrEmpty -Because "preset '$preset' must exist in registry"
@@ -107,5 +116,48 @@ Describe 'Registry: function-name resolution from backend name' {
 
         $content = Get-Content -Raw (Join-Path $script:SkillRoot "backends/$backend.ps1")
         $content | Should -Match "function\s+$expectedFn\s*\{" -Because "backend file must define $expectedFn"
+    }
+}
+
+Describe 'Registry: cmdc presets' {
+    # These assert on registry DATA, never on notes prose -- a test that greps a
+    # comment passes on the comment that explains the thing rather than on the
+    # thing itself, which has already bitten this repo twice.
+
+    BeforeAll {
+        $script:CmdcPresets = @($script:Presets | Where-Object { $_.Value.backend -eq 'cmdc' })
+    }
+
+    It 'has at least one cmdc preset' {
+        $script:CmdcPresets.Count | Should -BeGreaterThan 0
+    }
+
+    It 'cmdc_effort, where set, is a level cmdc accepts' {
+        # cmdc 1.50.0 VALIDATES --effort and refuses an unsupported one, which the
+        # adapter reports as a preset bug (backends/cmdc.ps1:316). A typo here
+        # costs a dispatch, so catch it structurally instead.
+        $valid = @('low', 'medium', 'high', 'xhigh', 'max')
+        foreach ($p in $script:Presets) {
+            $eff = $p.Value.cmdc_effort
+            if ($null -ne $eff -and $eff -ne '') {
+                $valid | Should -Contain $eff -Because "preset '$($p.Name)' sets cmdc_effort='$eff', which cmdc will refuse"
+            }
+        }
+    }
+
+    It 'only a cmdc preset sets cmdc_effort' {
+        # On any other backend the key is inert: nothing reads it, so it would
+        # silently promise a reasoning level the seat never receives.
+        foreach ($p in $script:Presets) {
+            if ($null -ne $p.Value.cmdc_effort -and $p.Value.cmdc_effort -ne '') {
+                $p.Value.backend | Should -Be 'cmdc' -Because "preset '$($p.Name)' sets cmdc_effort but runs on backend '$($p.Value.backend)', which never reads it"
+            }
+        }
+    }
+
+    It 'every cmdc model_id is <provider>/<model>, the form cmdc --list-models prints' {
+        foreach ($p in $script:CmdcPresets) {
+            $p.Value.model_id | Should -Match '^[A-Za-z0-9._-]+/[A-Za-z0-9._:-]+$' -Because "preset '$($p.Name)' model_id '$($p.Value.model_id)' is not in the provider/model form cmdc expects"
+        }
     }
 }

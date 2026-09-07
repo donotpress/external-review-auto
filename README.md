@@ -292,6 +292,47 @@ The opencode-go models are plain HTTP APIs, so they can be reached **directly** 
 - **Reasoning models** (deepseek) are handled: the adapter falls back to `reasoning_content` and honors a per-preset `max_tokens`, so reviews are never silently blank.
 - Not reachable this way: **Gemini 3.1 Pro** (Antigravity-only → keep `agy`) and **Claude** (no HTTP route without an Anthropic key / Zen balance → keep the `claude` CLI).
 
+### cmdc (Command Code CLI)
+
+`cmdc` is a process-spawn, headless backend (`backends/cmdc.ps1`) running on the
+Command Code subscription — **no API key**. It reaches vendor families era has no
+other subscription route to. It is **WSL-only on this box**, so it crosses the WSL
+boundary; see `references/wsl-argument-boundary.md`.
+
+Rates are per Mtok (input / output), from two independent sources dated
+2026-09-06: the model-routing table embedded in the cmdc 1.50.0 bundle, and
+<https://commandcode.ai/docs/plans/goat>. That table was validated against seven
+registry entries priced from other sources and matched all seven exactly.
+
+| Preset | Model | $/Mtok in / out | `--effort` |
+|---|---|---|---|
+| `longcat` | meituan/longcat-2.0:free | **0 / 0** (free) | — |
+| `laguna-free` | poolside/laguna-s-2.1-free | **0 / 0** (free) | — |
+| `qwen-flash` | qwen/qwen3.7-flash | 0.03 / 0.13 | — |
+| `glm-flash` | z-ai/glm-5.3-flash | 0.15 / 0.5 | low\|high\|max |
+| `minimax-m3` | minimaxai/minimax-m3 | 0.3 / 1.2 | — |
+| `glm` | zai-org/glm-5.3 | 1.4 / 4.4 | low\|high\|max |
+| `grok` | xai/grok-4.6 | 2.0 / 6.0 | low\|medium\|high\|xhigh |
+| `qwen-max` | qwen/qwen3.8-max | 2.0 / 6.0 | — |
+| `kimi` | moonshotai/kimi-k3 | 3.0 / 15.0 | low\|high\|max |
+
+- **Two free seats.** `longcat` and `laguna-free` are genuinely $0/$0, so either can
+  join a panel without moving the cost estimate. `laguna-free` was verified live
+  2026-09-06 (exit 0); `longcat` was verified earlier through era end to end.
+- **Three of these prices are promotional and can revert** (source read 2026-09-06):
+  `longcat` is "Free while it lasts", `laguna-free` is "Free while capacity lasts",
+  and `minimax-m3` is 50% off — undiscounted it is $0.60/$2.40, so a lapse *doubles*
+  that seat's real cost. The two free seats have no published post-promotion rate at
+  all. Re-check the source before trusting a cost estimate on any of the three.
+- **`kimi` is the expensive one** — $3/$15 is Opus-class output pricing, 100x
+  `qwen-flash`'s output rate. Do not add it to a default panel by accident.
+- **`cmdc_effort` is safe to set**, unlike opencode's `--variant`: cmdc *validates*
+  `--effort` and refuses an unsupported level, which the adapter surfaces as a named
+  preset bug rather than silently running at default effort. Levels above are read
+  from cmdc's own effort map; a model absent from that map takes no `--effort` at all.
+- Only `longcat` and `laguna-free` have been run end to end. The other seven have
+  verified ids and prices but are **not yet exercised**.
+
 ## Architecture
 
 ```
