@@ -114,6 +114,20 @@ Describe 'The default panel pins current model IDs' -Tag Unit {
         $script:Registry.'gemini-flash-35'.pricing.output_per_m | Should -Be 9.0 -Because 'gemini-flash-35 output'
     }
 
+    It 'an agy preset with an unsourced price says so in its notes' {
+        # gemini-pro-high/low carry $3.5/$10.5 and $1.5/$5.0 with NO provenance --
+        # the same silent-guess shape as the 2.5-Flash carry-over. They were NOT
+        # "corrected" on 2026-09-06 because they could not be sourced: neither the
+        # cmdc routing table nor commandcode.ai prices gemini-3.1-pro (cmdc resells
+        # only the Gemini Flash variants). A guess was not substituted for a
+        # measurement -- so the price stays and the WARNING is what is asserted.
+        # If someone later prices 3.1 Pro properly, this test is the reminder to
+        # replace the warning rather than quietly drop it.
+        foreach ($name in @('gemini-pro-high', 'gemini-pro-low')) {
+            $script:Registry.$name.notes | Should -Match 'NOT MEASURED' -Because "$name has an unsourced price and must say so"
+        }
+    }
+
     It 'no agy seat carries the gemini-2.5-flash REST rate' {
         # Guards the CLASS, not just the two presets above: the defect was a new
         # agy preset inheriting $0.3/$1.2 by copy. If a future agy model is

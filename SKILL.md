@@ -30,7 +30,7 @@ trigger: /external-review-auto
 
 | Backend | Install command | Reviewer presets |
 |---|---|---|
-| **agy** (antigravity CLI) | Platform-specific (see agy docs) | `gemini` (Gemini 3.6 Flash, **in the default panel**), `gemini-pro-high`, `gemini-pro-low`, `gemini-flash-35` |
+| **agy** (antigravity CLI) | Platform-specific (see agy docs) | `gemini` (Gemini 3.8 Flash, **in the default panel**), `gemini-pro-high`, `gemini-pro-low`, `gemini-flash-35` |
 | **Claude Code CLI** | `npm install -g @anthropic-ai/claude-code` | `opus`, `sonnet`, `haiku` |
 | **opencode** | opencode install | `minimax`, `deepseek` |
 
@@ -73,7 +73,7 @@ fallback panel that is never empty.
 Change it with `/era set default <names>` (accepts a panel), or edit the file.
 
 > **Default reviewers (a 4-model panel, run simultaneously):** a bare `/era` with no
-> `-Reviewer` dispatches **`gemini,opus,deepseek-flash,muse-spark`** — Gemini 3.6
+> `-Reviewer` dispatches **`gemini,opus,deepseek-flash,muse-spark`** — Gemini 3.8
 > Flash (agy), Claude Opus 5 (claude CLI), DeepSeek V4 Flash (New) (opencode-go) and
 > Muse Spark 1.3 Contributor (opencode-go). Cross-vendor on purpose: in round 11 one
 > reviewer reviewed the wrong subject entirely while another found a real shipped
@@ -321,7 +321,7 @@ When round N's response contains critical issues:
 | `--doctor` | `-Doctor` | Preflight only: report prereq + backend status (with fix commands) and exit. No dispatch, no install. |
 | `--preflight-only` | `-PreflightOnly` | Build the bundle, run **every** gate (broad scope, dirty tree, per-seat delivery ceilings, cost estimate, blind-seat strip), then stop **before dispatching**. Exit 0, nothing sent, nothing spent. Answers "what would this round cost and would every seat fit?". **Use the flag, not the env var, from WSL** — see `ERA_PREFLIGHT_ONLY` below for why. Unlike `-Doctor`, this exercises the real bundle. |
 | `--mode assessment` | `-Mode assessment` | No spec file required; reviews arbitrary code |
-| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini,opus,deepseek-flash` — Gemini 3.6 Flash + Opus 5 + DeepSeek V4 Flash (New), dispatched simultaneously |
+| `--reviewer <name>` | `-Reviewer <name>` | Comma-separated for multi-reviewer: `gemini,opus`. Default (omitted) = `gemini,opus,deepseek-flash,muse-spark` — Gemini 3.8 Flash + Opus 5 + DeepSeek V4 Flash (New) + Muse Spark 1.3 Contributor, dispatched simultaneously |
 | `--model <hint>` | `-Model <hint>` | Override model: `"gemini 3.1 pro"`, `"deepseek v4 pro"` |
 | `--provider <name>` | `-Provider <name>` | Force a specific opencode provider |
 | `--include <path1,path2>` | `-IncludeFiles path1,path2` | Specific files to bundle (curated by LLM) |
@@ -395,7 +395,7 @@ pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command suggest
 # Update model registry from connected opencode providers
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command update-models
 
-# Default: auto-detect topic, and the 3-reviewer panel (gemini,opus,deepseek-flash) run simultaneously
+# Default: auto-detect topic, and the 4-reviewer panel (gemini,opus,deepseek-flash,muse-spark) run simultaneously
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1
 
 # Explicit topic, Claude Sonnet

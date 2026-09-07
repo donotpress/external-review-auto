@@ -330,8 +330,11 @@ registry entries priced from other sources and matched all seven exactly.
   `--effort` and refuses an unsupported level, which the adapter surfaces as a named
   preset bug rather than silently running at default effort. Levels above are read
   from cmdc's own effort map; a model absent from that map takes no `--effort` at all.
-- Only `longcat` and `laguna-free` have been run end to end. The other seven have
-  verified ids and prices but are **not yet exercised**.
+- **All nine seats verified live 2026-09-06**, each in era's own seat shape
+  (`cmdc -m <model> [--effort X] -p --tools-all`, stdin closed, cwd a staging dir):
+  every one read a file from disk, returned the planted canary, correctly named a
+  planted bug, and exited 0. Every `cmdc_effort` value above was confirmed by cmdc
+  on that run.
 
 ## Architecture
 
