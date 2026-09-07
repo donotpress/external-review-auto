@@ -148,3 +148,38 @@ Describe 'a UNC / WSL-native repo root is diagnosed as itself, not as a locked d
         $script:EraSrc | Should -Match 'a LIVE application holding its own data directory'
     }
 }
+
+Describe 'the UNC refusal prints a recipe and does NOT auto-stage' -Tag Unit {
+    # RULING 2026-09-06, asked for by a peer session that offered to build
+    # auto-staging and leaned against it themselves. The deciding argument is
+    # PROVENANCE, not taste: Write-ReviewManifest records git_head/git_branch/
+    # git_clean as the round's anchor, and a staged copy is a fresh `git init`,
+    # so an auto-staged round would anchor to a SHA that exists nowhere and every
+    # later citation of it would point at a commit nobody can resolve. era's
+    # dirty-tree gate already refuses rather than stash for that exact reason.
+    BeforeAll {
+        $script:EraSrc = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
+    }
+
+    It 'emits a recipe naming the caller''s own slug and include set' {
+        $script:EraSrc | Should -Match 'recipe\s+:'
+        $script:EraSrc | Should -Match '\$incl'
+        $script:EraSrc | Should -Match '\$slug'
+    }
+
+    It 'still REFUSES -- it does not stage, copy or dispatch on the caller''s behalf' {
+        # The whole point. If this branch ever gains a Copy-Item/git init it has
+        # become the thing this ruling rejected.
+        $branch = [regex]::Match($script:EraSrc,
+            '(?s)if \(\$rootIsUnc.*?Nothing was dispatched and nothing was spent\."\)').Value
+        # Assert on SIDE EFFECTS, not on strings: `git init` legitimately appears
+        # in the recipe TEXT, so grepping for it cannot tell a quoted instruction
+        # from an executed command. The first version of this test could not, and
+        # failed on the recipe it was written to protect.
+        $branch | Should -Not -BeNullOrEmpty
+        foreach ($sideEffect in 'Copy-Item', 'New-Item', 'Start-Process', 'Invoke-Expression', 'Remove-Item') {
+            $branch | Should -Not -Match $sideEffect -Because 'the UNC branch must refuse, not stage'
+        }
+        $branch | Should -Match 'Stop-EraWithError'
+    }
+}

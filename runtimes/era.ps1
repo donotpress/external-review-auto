@@ -1851,6 +1851,33 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
             # and correctly identified the misdiagnosis before I did.
             $rootIsUnc = $repoRoot -match '^\\\\' -or $repoRoot -match '(?i)wsl\.localhost|wsl\$'
             if ($rootIsUnc -or $reported -match '(?i)^C:\\Windows\\?$') {
+                # PRINT THE RECIPE, DO NOT RUN IT. era could stage these files
+                # itself -- it knows the include set, and mktemp/copy/init/dispatch
+                # is mechanical. It deliberately does not, and the reason is
+                # PROVENANCE, not taste: Write-ReviewManifest records git_head,
+                # git_branch and git_clean as the round's anchor. A staged copy is
+                # a fresh `git init`, so the manifest would anchor the round to a
+                # SHA THAT EXISTS NOWHERE, and every later citation of that round
+                # would point at a commit nobody can resolve. era's dirty-tree gate
+                # already refuses rather than stash for exactly this reason -- "the
+                # round cannot be anchored to the range it will be cited as
+                # covering" -- and auto-staging would break that same invariant on
+                # every run instead of once.
+                #
+                # So the caller stages, and therefore owns what was reviewed and
+                # what its provenance means. era's job here is to make that one
+                # paste long, not to be clever. (Shape proposed by a peer session
+                # 2026-09-06, which reached the same conclusion independently and
+                # asked first.)
+                $files = if ($IncludeFiles) { ($IncludeFiles -join ' ') } else { '<your-files>' }
+                $incl  = if ($IncludeFiles) { ($IncludeFiles -join ',') } else { '<your-files>' }
+                $slug  = if ($TopicSlug) { $TopicSlug } else { '<slug>' }
+                $recipe =
+                    "  recipe       : run these from the repo, then copy .external-reviews back if you want the artifacts kept:`n" +
+                    "      S=`$(mktemp -d /mnt/c/Users/`$USER/AppData/Local/Temp/era-XXXXXX)`n" +
+                    "      cp --parents $files `"`$S/`" && cd `"`$S`" && git init -q`n" +
+                    "      git add -A && git -c user.email=era@local -c user.name=era commit -qm stage`n" +
+                    "      pwsh '$PSCommandPath' -TopicSlug $slug -IncludeFiles `"$incl`" -Force`n"
                 Stop-EraWithError ("repomix could not scan the tree, and the repo root is not on a Windows drive.`n" +
                     $hint +
                     "  repo root    : $repoRoot`n" +
@@ -1858,8 +1885,9 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                     "It falls back to C:\Windows, so repomix scanned that instead of your repo and aborted on the first unreadable directory.`n" +
                     "  NOT the cause: a locked application, and NOT an ignore-pattern problem. Nothing is holding C:\Windows.`n" +
                     "  NOT a fix    : mapping a drive (net use W: \\wsl.localhost\Ubuntu). PowerShell normalises W:\... back to the UNC form.`n" +
-                    "  the fix      : stage the files on a Windows drive and run era there — copy them under %TEMP%, `git init`, and dispatch " +
-                    "with -IncludeFiles. Verified 2026-09-06: the identical file that fails under /home passes every gate under /mnt/c.`n" +
+                    "  the fix      : stage the files on a Windows drive and run era there. Verified 2026-09-06: the identical file that " +
+                    "fails under /home passes every gate under /mnt/c.`n" +
+                    $recipe +
                     "Nothing was dispatched and nothing was spent.")
             }
 
