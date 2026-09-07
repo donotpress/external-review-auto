@@ -5,12 +5,12 @@
     "agy_model_family": "gemini-3.8-flash",
     "agy_model_tier": "high",
     "pricing": {
-      "input_per_m": 0.3,
-      "output_per_m": 1.2
+      "input_per_m": 1.5,
+      "output_per_m": 7.5
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "agy --dangerously-skip-permissions --print, model 'Gemini 3.8 Flash (High)'. Bundle read from disk via agy tools. BUMPED 3.6 -> 3.8 on 2026-09-05 at the operator's request, verified the same day from `agy models`, which lists gemini-3.8-flash-{high,medium,low} alongside 3.7 and 3.6. PRICING IS CARRIED OVER FROM 3.6 AND IS NOT MEASURED: `agy models` prints ids and display names only, no rates, so $0.3/$1.2 per Mtok is an assumption inherited from the previous seat rather than a figure checked for 3.8. It feeds the cost estimate and the per-reviewer cap, so if 3.8 is priced differently every estimate on this seat is wrong in that proportion. The 3.6 entry below is kept and still selectable by -Model. NOTE 3.5 IS GONE from `agy models` as of the same check, which makes the `gemini-flash-35` preset the same dead-preset shape ox-alpha was."
+    "notes": "agy --dangerously-skip-permissions --print, model 'Gemini 3.8 Flash (High)'. Bundle read from disk via agy tools. BUMPED 3.6 -> 3.8 on 2026-09-05 at the operator's request, verified the same day from `agy models`. PRICING CORRECTED 2026-09-06 from $0.3/$1.2 to $1.5/$7.5 per Mtok. The old figure was NOT a 3.8 rate and was not a 3.6 rate either: $0.3/$1.2 is exactly this registry's own `gemini-api` entry for gemini-2.5-flash, so it was a carry-over from the 2.5 Flash REST rate that survived two model bumps. SOURCES, both dated 2026-09-06 and mutually independent: (1) the model-routing table embedded in the cmdc CLI 1.50.0 bundle (dist/cli.mjs), which prices google/gemini-3.8-flash via vertex at promptCost 1.5 / completionCost 7.5 / cacheReadCost 0.15, identically to 3.7 and 3.6; (2) https://commandcode.ai/docs/plans/goat, which publishes Gemini 3.8 Flash at $1.50 input / $7.50 output per Mtok. WHY THAT SOURCE IS TRUSTED HERE: the same cmdc table was checked against seven registry entries whose prices were obtained independently, and matched all seven exactly -- deepseek-flash 0.14/0.28, deepseek-http 1.74/3.48, muse-spark 0.1/0.2 (cache read 0.002, agreeing to three decimals with the `opencode models --verbose` figure recorded in that preset), longcat 0/0, minimax-http 0.3/1.2, kimi-http 0.95/4.0, glm-http 1.4/4.4. It disagreed with exactly one entry: this one, the entry whose own notes already declared itself unmeasured. WHAT THIS NUMBER IS AND IS NOT: it is the LIST RATE FOR THE MODEL as published by a gateway that resells it, and it is NOT a measurement of what Antigravity bills for this seat. agy runs on a subscription and exposes no per-token cost at all -- measured 2026-09-06 on agy 1.1.27, `agy session stats`, `agy config list` and `agy stats` all return 'unexpected argument' (a bogus subcommand returns the same, so the probe was checked against a control), and tools/token-truth.py still has no agy reader. So this seat's cost remains ESTIMATED, not reconciled; the change is that the estimate now uses the right model's list rate instead of a different model's. UNVERIFIED THIRD-PARTY CLAIM, recorded for the record and NOT relied on: an LLM answer relayed by the operator on 2026-09-06 put Antigravity's real rates at ~$0.75-1.50/M input and ~$3.75-9.00/M output. Nothing here confirms that claim; note only that the two measured sources above ($1.50/$7.50) fall inside the range it gives. The 3.6 entry below is kept and still selectable by -Model. NOTE 3.5 IS GONE from `agy models` as of the 2026-09-05 check, which makes the `gemini-flash-35` preset the same dead-preset shape ox-alpha was."
   },
   "gemini-pro-high": {
     "backend": "agy",
@@ -640,12 +640,12 @@
     "agy_model_family": "gemini-3.5-flash",
     "agy_model_tier": "high",
     "pricing": {
-      "input_per_m": 0.3,
-      "output_per_m": 1.2
+      "input_per_m": 1.5,
+      "output_per_m": 9.0
     },
     "supports_file_read": true,
     "supports_streaming": false,
-    "notes": "Previous Flash default. Kept so a regression can be A/B'd against 3.6."
+    "notes": "Previous Flash default. Kept so a regression can be A/B'd against 3.6. PRICING CORRECTED 2026-09-06 from $0.3/$1.2 to $1.5/$9.0 per Mtok, same carry-over defect as the `gemini` preset and the same two sources -- the cmdc 1.50.0 embedded routing table prices google/gemini-3.5-flash via vertex at 1.5 / 9.0 / cacheRead 0.15. Note the OUTPUT rate differs from 3.6/3.7/3.8 (9.0, not 7.5); it is not a typo. Same caveat as `gemini`: a gateway list rate for the model, not a measurement of Antigravity billing. ⚠ This preset is very likely DEAD: 3.5 is gone from `agy models` as of 2026-09-05."
   },
   "deepseek-flash": {
     "backend": "opencode",

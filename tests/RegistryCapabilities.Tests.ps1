@@ -99,6 +99,37 @@ Describe 'The default panel pins current model IDs' -Tag Unit {
         }
     }
 
+    It 'the agy Gemini Flash seats carry 3.x Flash pricing, not the 2.5 Flash REST rate' {
+        # Measured 2026-09-06, same bug class as the Opus rate above. `gemini` and
+        # `gemini-flash-35` both carried $0.3/$1.2 per Mtok, which is exactly this
+        # registry's own `gemini-api` rate for gemini-2.5-flash -- a carry-over that
+        # survived two model bumps (3.5 -> 3.6 -> 3.8) and left a quarter of the
+        # default panel estimated 5x low on input and 6.25x low on output.
+        # Sources and the "list rate, not a billing measurement" caveat are in the
+        # `gemini` preset's notes; see also references/agy-cost-visibility.md.
+        # NOTE 3.5's OUTPUT rate is 9.0, not 7.5 like 3.6/3.7/3.8. Not a typo.
+        $script:Registry.'gemini'.pricing.input_per_m           | Should -Be 1.5 -Because 'gemini input'
+        $script:Registry.'gemini'.pricing.output_per_m          | Should -Be 7.5 -Because 'gemini output'
+        $script:Registry.'gemini-flash-35'.pricing.input_per_m  | Should -Be 1.5 -Because 'gemini-flash-35 input'
+        $script:Registry.'gemini-flash-35'.pricing.output_per_m | Should -Be 9.0 -Because 'gemini-flash-35 output'
+    }
+
+    It 'no agy seat carries the gemini-2.5-flash REST rate' {
+        # Guards the CLASS, not just the two presets above: the defect was a new
+        # agy preset inheriting $0.3/$1.2 by copy. If a future agy model is
+        # genuinely priced there, this test is the right place to say so
+        # explicitly rather than let the coincidence pass silently.
+        $stale = @()
+        foreach ($p in $script:Registry.PSObject.Properties) {
+            if ($p.Name -like '_*') { continue }
+            if ($p.Value.backend -ne 'agy') { continue }
+            if ($p.Value.pricing.input_per_m -eq 0.3 -and $p.Value.pricing.output_per_m -eq 1.2) {
+                $stale += $p.Name
+            }
+        }
+        @($stale) -join '; ' | Should -BeNullOrEmpty -Because 'an agy preset priced 0.3/1.2 is almost certainly the gemini-2.5-flash carry-over, not a measured rate'
+    }
+
     It 'the default panel names presets that exist in the registry' {
         $defaults = Get-Content -Raw (Join-Path $script:SkillRoot 'config/defaults.json') | ConvertFrom-Json
         foreach ($preset in $defaults.reviewer) {
