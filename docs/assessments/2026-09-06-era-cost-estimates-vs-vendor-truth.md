@@ -74,11 +74,34 @@ worst on both counts.
 
 ## 5. What it affects
 
-`Get-PerReviewerCap` (`workflow.ps1:1387`) and the $15 aggregate cap in
-`runtimes/era.ps1:1999` both gate on the estimate. They are therefore gating on
-a number that ran ~3x low on this sample — a $2 per-reviewer cap is closer to $6
-of real spend, and the aggregate ceiling likewise. The cost *prompt* shown to the
-operator understates by the same factor.
+**Corrected 2026-09-06, same day, after reading the code rather than assuming
+it.** An earlier draft of this section said the per-reviewer and aggregate caps
+"gate on a number that ran ~3x low", implying a live ceiling admitting ~3x more
+than intended. **That is wrong, and the repo had already settled it.**
+`Get-EraCostReport`'s own docstring records the 2026-08-11 decision:
+`Invoke-CostPrompt` returns the full reviewer list immediately when
+`Get-ForceMode` is true, with **no cap check at all** — and SKILL.md instructs
+every caller to pass `-Force`. The `$2`/`$10` per-reviewer caps and the `$15`
+aggregate therefore **never fire in documented usage**. They are advisory, and
+deliberately so: measured across 43 recorded rounds, the worst round was $1.76
+against the $15 cap and the worst single reviewer $1.71 against its $10 cap, so a
+ceiling "would have bought nothing while a wrong one could refuse a legitimate
+large round."
+
+**Does the 3.2x correction overturn that decision? No — and it is worth doing the
+arithmetic rather than assuming.** Those 43 rounds were recorded in
+estimate-units, so the real figures are ~3x higher: worst round ≈ $5.6 against
+$15, worst reviewer ≈ $5.5 against $10. Still no breach, on either cap, even
+corrected. The conclusion survives its own correction.
+
+**What the gap actually costs is visibility, not enforcement** — which is exactly
+what the 2026-08-11 decision named as "the real gap". A reader of era's cost line
+was being told a number ~3x below the bill. That is now stated at the point the
+number is printed (`workflow.ps1:1499`).
+
+**The numbers in that docstring should be read as estimate-units.** Anyone
+re-deriving a safety margin from "worst round $1.76" will be about 3x optimistic;
+the docstring now says so.
 
 **No change is proposed here.** This records the gap; whether to correct the
 estimator (add a reasoning multiplier per model), to reconcile after the fact

@@ -1449,6 +1449,15 @@ function Get-EraCostReport {
         ceiling would have bought nothing while a wrong one could refuse a
         legitimate large round. Visibility was the real gap.
 
+        THOSE FIGURES ARE IN ESTIMATE-UNITS, and the estimate was later measured
+        ~3.2x low (docs/assessments/2026-09-06-era-cost-estimates-vs-vendor-truth.md:
+        reasoning tokens and agentic tool turns never reach the response text this
+        derives from). Corrected, the worst round is ~$5.6 against $15 and the
+        worst reviewer ~$5.5 against $10 -- so the decision SURVIVES its own
+        correction, with less headroom than it looked. Anyone re-deriving a safety
+        margin from $1.76 will be about 3x optimistic. The 2026-08-11 reading that
+        "visibility was the real gap" turned out to be more right than it knew.
+
         Call this UNCONDITIONALLY, before Invoke-CostPrompt, so the numbers are
         on the record whether or not the gate runs.
     #>
@@ -1487,7 +1496,7 @@ function Get-EraCostReport {
     # line no longer reads as the bill.
     # Full method and caveats: docs/assessments/2026-09-06-era-cost-estimates-vs-vendor-truth.md
     # Re-measure any round with: tools/token-truth.py <review-dir> <round>
-    $lines.Add("[era] NOTE: that estimate counts the response text only. Reasoning tokens and agentic tool-call turns are invisible to it; measured ~3.2x low over 12 seats (worst 11.2x). The caps below gate on this number.")
+    $lines.Add("[era] NOTE: that estimate counts the response text only. Reasoning tokens and agentic tool-call turns are invisible to it; measured ~3.2x low over 12 seats (worst 11.2x), so treat it as a floor.")
 
     foreach ($r in $ReviewerList) {
         $c = $PerReviewerCosts[$r]
