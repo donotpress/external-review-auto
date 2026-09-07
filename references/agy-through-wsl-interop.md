@@ -199,13 +199,56 @@ So the accurate statement is narrower than "the machinery is dead weight":
   are shared and ambiguous — a problem stdout simply does not have);
 * the **liveness** path must stay regardless.
 
-### Still unmeasured, and load-bearing for any rewrite
+### Both remaining unknowns are now measured too
 
-* **Large responses.** 1,458 bytes is a real review but a small one. Whether
-  stdout stays complete for a many-KB review is untested.
-* **Concurrency.** The panel runs four seats as ThreadJobs in one pwsh process;
-  every measurement here is a single process.
+The first version of this section listed large responses and concurrency as
+unmeasured and load-bearing. Both were measured 2026-09-07, same harness.
 
-**OWNER: whoever attempts the simplification.** Both must be measured first.
-Nothing in `backends/agy.ps1` was changed on the strength of this probe.
+**Large response — no truncation.** A prompt forcing 400 ordered output lines
+from a 26,091-byte / 400-file bundle:
 
+```
+EXIT=0   STDOUT_BYTES=20,091
+matching module lines = 400 (expected 400)
+has m0: True   has m399: True
+END-OF-REVIEW-3TQ9ZK present        <-- truncation detector
+transcript longest content = 20,090 chars
+stdout - transcript = 1 char        (a trailing newline)
+```
+
+The END marker is the instrument: had stdout been cut short, the tail would be
+missing while the transcript kept it. Instead stdout and the transcript agree to
+within one newline at 20 KB, and every one of the 400 lines is present in order.
+
+**Concurrency — no cross-contamination.** Four seats started as `Start-ThreadJob`
+in ONE pwsh process, which is exactly how the panel runs, each told to emit a
+different canary:
+
+```
+seat 1 pid=71552 exit=0 bytes=15 own-canary=True foreign-canaries=none
+seat 2 pid=72596 exit=0 bytes=15 own-canary=True foreign-canaries=none
+seat 3 pid=64412 exit=0 bytes=17 own-canary=True foreign-canaries=none
+seat 4 pid=63568 exit=0 bytes=15 own-canary=True foreign-canaries=none
+distinct PIDs = 4 (expect 4)
+```
+
+Every seat received its own canary and **no seat saw another's**. Each redirected
+pipe belongs to one process, so the shared-and-ambiguous problem that forced the
+run-id matcher onto the transcript path does not exist on stdout.
+
+### Where that leaves the adapter
+
+The capture path can take **stdout as primary**, with the transcript scrape kept
+as fallback. Nothing above licenses removing the transcript machinery outright,
+for two separate reasons:
+
+* **Liveness** (above) — `CopyToAsync` yields nothing until exit, so the stall
+  detectors still need transcript mtime.
+* **The kill path is untested.** When era kills agy at its hard deadline, stdout
+  is whatever had been flushed, and the transcript may hold more of a partial
+  answer. Every measurement here is of a process that exited on its own. An
+  implementer should measure the killed case before deciding what the fallback
+  owes on that path.
+
+**OWNER: whoever attempts the simplification.** `backends/agy.ps1` is still
+unchanged; this document settles facts and hands over a scoped follow-up.
