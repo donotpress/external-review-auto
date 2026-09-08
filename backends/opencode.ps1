@@ -1431,7 +1431,7 @@ exit code        : $exitCode
 wall clock sec   : $([math]::Round($sw.Elapsed.TotalSeconds,1))
 effective budget : ${effectiveTimeoutSec}s of ${TimeoutSec}s
 stall threshold  : $([math]::Round($stallThresholdMs/1000,1))s  (did NOT fire, or this throw would not be the one reporting)
-first-token sec  : $firstTokenSec
+first-token deadline sec : $firstTokenSec
 stdout bytes     : $($resultText.Length)
 stderr bytes     : $($stderr.Length)
 "@

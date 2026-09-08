@@ -285,4 +285,11 @@ Describe 'Phase 1 must not contradict the stall plan' -Tag Unit {
             ($p.StallThresholdMs / 1000) | Should -Be ($to - 30)
         }
     }
+
+    It 'the exitfail context names the first-token field a deadline, not an arrival' {
+        # 2026-09-08: `first-token sec : 1211` beside `stdout bytes : 0` read as
+        # "a token arrived at 1211s" when the field is the Phase-1 DEADLINE
+        # ($firstTokenSec reconciled up to the stall plan). The label must say so.
+        $script:Src2 | Should -Match 'first-token deadline sec'
+    }
 }
