@@ -21,7 +21,7 @@ BeforeAll {
 
     function script:New-RealRepo {
         <# A real git repo with one commit, so HEAD resolves and status works. #>
-        param([string]$Prefix = 'gate')
+        param([string]$Prefix = 'gate', [switch]$NoGitignore)
         $d = Join-Path $env:TEMP "era-$Prefix-$(New-Guid)"
         New-Item -ItemType Directory -Path $d -Force | Out-Null
         Push-Location $d
@@ -29,8 +29,10 @@ BeforeAll {
             & git init -q 2>&1 | Out-Null
             & git config user.email 't@t.t' 2>&1 | Out-Null
             & git config user.name  'T'     2>&1 | Out-Null
-            # era's own artifacts must never count as dirt.
-            Set-Content -LiteralPath (Join-Path $d '.gitignore') -Value ".external-reviews/`n" -Encoding UTF8
+            if (-not $NoGitignore) {
+                # era's own artifacts must never count as dirt.
+                Set-Content -LiteralPath (Join-Path $d '.gitignore') -Value ".external-reviews/`n" -Encoding UTF8
+            }
             Set-Content -LiteralPath (Join-Path $d 'a.md') -Value '# a' -Encoding UTF8
             & git add -A 2>&1 | Out-Null
             & git commit -q -m init 2>&1 | Out-Null
@@ -39,12 +41,14 @@ BeforeAll {
     }
 
     function script:Invoke-EraIn {
-        param([string]$Repo, [string]$ArgLiteral = '')
+        param([string]$Repo, [string]$ArgLiteral = '', [string]$IncludeFiles = 'a.md,definitely-missing.py', [switch]$PreflightOnly)
         Push-Location $Repo
         try {
+            $extra = @()
+            if ($PreflightOnly) { $extra += '-PreflightOnly' }
             $out = & pwsh -NoProfile -NonInteractive -File $script:EraPath `
-                -TopicSlug 'gate' -Force -IncludeFiles 'a.md,definitely-missing.py' `
-                @($ArgLiteral -split ' ' | Where-Object { $_ }) 2>&1 | Out-String
+                -TopicSlug 'gate' -Force -IncludeFiles $IncludeFiles `
+                @($ArgLiteral -split ' ' | Where-Object { $_ }) @extra 2>&1 | Out-String
             return [pscustomobject]@{ Output = $out; ExitCode = $LASTEXITCODE }
         } finally { Pop-Location }
     }
@@ -160,6 +164,45 @@ Describe 'The gate stands down when it should' -Tag Integration {
             $r = Invoke-EraIn -Repo $repo
             $r.Output | Should -Not -Match 'REFUSING TO DISPATCH'
             $r.Output | Should -Match 'definitely-missing\.py'
+        } finally { Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Describe 'The gate ignores era-owned artifacts even when nothing gitignores them' -Tag Integration {
+    # 2026-09-08: a freshly staged copy has no .gitignore, so Get-EraGitState's
+    # reliance on porcelain (which omits only IGNORED files) made a
+    # -PreflightOnly run arm the gate against the next dispatch: era refused on
+    # its OWN .external-reviews/ directory. Era-authored paths are filtered
+    # explicitly, the same way Compare-EraSeatContainment already filters them.
+    It "era's own .external-reviews directory never counts as dirt" {
+        $repo = New-RealRepo 'ownartifacts' -NoGitignore
+        try {
+            New-Item -ItemType Directory -Path (Join-Path $repo '.external-reviews\prev') -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $repo '.external-reviews\prev\round-1-response.md') `
+                -Value 'prior round' -Encoding UTF8
+            (Invoke-EraIn -Repo $repo).Output | Should -Not -Match 'REFUSING TO DISPATCH'
+        } finally { Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'a -PreflightOnly run does not arm the gate against the next run' {
+        $repo = New-RealRepo 'preflightarm' -NoGitignore
+        try {
+            $first = Invoke-EraIn -Repo $repo -PreflightOnly -IncludeFiles 'a.md'
+            $first.Output   | Should -Not -Match 'REFUSING TO DISPATCH'
+            $first.ExitCode | Should -Be 0
+            $second = Invoke-EraIn -Repo $repo -PreflightOnly -IncludeFiles 'a.md'
+            $second.Output   | Should -Not -Match 'REFUSING TO DISPATCH'
+            $second.ExitCode | Should -Be 0
+        } finally { Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'real untracked dirt still refuses when nothing is gitignored' {
+        # Guard the other direction: the exclusion must cover era's own
+        # directory and nothing else.
+        $repo = New-RealRepo 'realdirt' -NoGitignore
+        try {
+            Set-Content -LiteralPath (Join-Path $repo 'stray.md') -Value 'new' -Encoding UTF8
+            (Invoke-EraIn -Repo $repo).Output | Should -Match 'REFUSING TO DISPATCH'
         } finally { Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

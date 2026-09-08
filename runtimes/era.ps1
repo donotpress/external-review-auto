@@ -294,6 +294,13 @@ function Get-EraGitState {
         as dirt. Untracked-but-not-ignored files DO count: a new source file the
         reviewer reads and the author then commits is exactly the unreviewed
         layer this is meant to catch.
+
+        The gitignore alone is NOT enough (2026-09-08): a freshly staged copy
+        has no .gitignore, so a `-PreflightOnly` run's own .external-reviews/
+        output armed the gate against the next dispatch -- era refusing on its
+        own directory. Era-authored paths are therefore filtered explicitly
+        here, with the same regex Compare-EraSeatContainment uses, so the gate
+        AND the manifest agree on what counts.
     #>
     param([Parameter(Mandatory)][string]$RepoRoot)
 
@@ -303,7 +310,16 @@ function Get-EraGitState {
     $head = & git -C $RepoRoot rev-parse HEAD 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $head) { return $null }
     $branch = & git -C $RepoRoot rev-parse --abbrev-ref HEAD 2>$null
-    $porcelain = @(& git -C $RepoRoot status --porcelain 2>$null | Where-Object { $_ })
+    $porcelain = @(& git -C $RepoRoot status --porcelain 2>$null | Where-Object { $_ } |
+        Where-Object {
+            # Porcelain is 'XY <path>' (two status chars, a space, then the
+            # path, quoted when it contains a space or a non-ASCII byte;
+            # renames are 'XY <old> -> <new>'). Era's own output directory is
+            # never reviewed code, wherever it appears in the tree.
+            $p = ($_ -replace '^..\s', '').Trim('"')
+            if ($p -match ' -> ') { $p = ($p -split ' -> ')[-1].Trim('"') }
+            ($p -replace '\\', '/') -notmatch '(^|/)\.external-reviews(/|$)'
+        })
 
     return [pscustomobject]@{
         Head   = $head.Trim()
@@ -1876,6 +1892,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                     "  recipe       : run these from the repo, then copy .external-reviews back if you want the artifacts kept:`n" +
                     "      S=`$(mktemp -d /mnt/c/Users/`$USER/AppData/Local/Temp/era-XXXXXX)`n" +
                     "      cp --parents $files `"`$S/`" && cd `"`$S`" && git init -q`n" +
+                    "      printf '.external-reviews/`nera-run.log`n' > .gitignore  # else era's own output trips its dirty-tree gate on the next run`n" +
                     "      git add -A && git -c user.email=era@local -c user.name=era commit -qm stage`n" +
                     "      pwsh '$PSCommandPath' -TopicSlug $slug -IncludeFiles `"$incl`" -Force`n"
                 Stop-EraWithError ("repomix could not scan the tree, and the repo root is not on a Windows drive.`n" +
