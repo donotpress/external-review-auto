@@ -7,19 +7,23 @@
     and merges them into backends/_registry.json under _opencode_model_map.
 #>
 
-function Invoke-UpdateModels {
+function Resolve-OpencodeProviderNames {
+    <#
+    .SYNOPSIS
+        Parse `opencode providers list` output into provider display names.
+    .DESCRIPTION
+        Pure function over the raw captured lines (ANSI included), extracted
+        from Invoke-UpdateModels so the discovery parser is unit-testable
+        without spawning opencode. Takes the lines exactly as `& opencode
+        providers list 2>&1` yields them; returns display names like
+        'MiniMax (minimax.io)', unfiltered (blacklist applied by the caller).
+    #>
     [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)][string]$SkillRoot,
-        [string[]]$ProviderBlacklist = @('nvidia')
-    )
-    Test-ThreadJobAvailable
-    Write-Host "Fetching opencode providers..."
-    $providersOutput = & opencode providers list 2>&1
+    param([string[]]$Lines)
     $providerNames = @()
     $inProviders = $false
     $providersExited = $false
-    foreach ($line in $providersOutput) {
+    foreach ($line in $Lines) {
         $clean = $line -replace '\x1b\[[0-9;]+m', ''
         # Group header `┌  Credentials ...` must be checked BEFORE the
         # boundary regex (the line both starts with `┌` and contains content).
@@ -34,21 +38,74 @@ function Invoke-UpdateModels {
             }
             continue
         }
+        # PIPE-FALLBACK SECTION EXIT (2026-09-08). Through a pipe opencode.exe
+        # emits an ASCII-fallback alphabet, not box drawing: section headers
+        # arrive as `T  <Word>` (`T  Environment`) and footers as an em-dash
+        # run. Neither matches the corner class above, so without this the
+        # section never closes: the header falls into the collection branch
+        # below, splits to parts[0]='T', and 'T' is collected as a provider
+        # while every real provider is lost. A `T` plus whitespace can never
+        # open a provider line (those are bulleted), so this is exit-only.
+        if ($clean -match '^\s*T\s+\S') {
+            if ($inProviders) {
+                $inProviders = $false
+                $providersExited = $true
+            }
+            continue
+        }
 
         if ($inProviders) {
-            # Strip leading bullet markers (`●`, `○`, `•`) + their trailing whitespace
-            $stripped = $clean -replace '^\s*[●○•]\s*', ''
+            # Strip the leading border/bullet glyph run, whatever alphabet it
+            # is in. Terminal and UTF-8 pipes use `●`/`○`/`•`; Windows-pwsh
+            # decodes the pipe bytes as ibm437, so U+2022 arrives mangled as
+            # three non-ASCII chars no literal class can name portably. Any
+            # non-alphanumeric run is border, never provider: every real
+            # provider name opens alphanumerically.
+            $stripped = $clean -replace '^\s*[^a-zA-Z0-9]+\s*', ''
             $parts = $stripped -split '\s{2,}'
             if ($parts.Count -ge 1) {
                 $candidate = $parts[0] -replace '\s+(api|oauth)$', ''
                 $candidate = $candidate.Trim()
-                if ($candidate -and $candidate.Length -gt 0 -and $candidate -match '[a-zA-Z]' -and $candidate -notmatch '^\d+\s' -and $candidate -notmatch '_KEY$' -and $candidate -ne 'Environment') {
+                # Length guard: a section header that slips the exit above
+                # (`T  Environment` -> 'T') is one glyph. No provider name is.
+                if ($candidate -and $candidate.Length -gt 1 -and $candidate -match '[a-zA-Z]' -and $candidate -notmatch '^\d+\s' -and $candidate -notmatch '_KEY$' -and $candidate -ne 'Environment') {
                     $providerNames += $candidate
                 }
             }
         }
     }
-    $providerNames = $providerNames | Select-Object -Unique
+    return @($providerNames | Select-Object -Unique)
+}
+
+function Get-OpencodeProviderModelCount {
+    <#
+    .SYNOPSIS
+        How many models a provider map entry holds, as a single int.
+    .DESCRIPTION
+        Fresh-fetch entries are hashtables (`.Count`); entries read back from
+        backends/_registry.json via ConvertFrom-Json are PSCustomObjects.
+    #>
+    [CmdletBinding()]
+    param($Entry)
+    if ($Entry -is [System.Collections.IDictionary]) { return $Entry.Count }
+    # @(...) around .Properties: on the PSMemberInfoIntegratingCollection that
+    # ConvertFrom-Json yields, a bare `.Properties.Count` member-enumerates --
+    # one `1` per model, so 15 models print as fifteen 1s (2026-09-08). The
+    # array wrapper counts the members instead. Hashtable entries (fresh
+    # fetches) keep their own .Count above.
+    return @($Entry.PSObject.Properties).Count
+}
+
+function Invoke-UpdateModels {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$SkillRoot,
+        [string[]]$ProviderBlacklist = @('nvidia')
+    )
+    Test-ThreadJobAvailable
+    Write-Host "Fetching opencode providers..."
+    $providersOutput = & opencode providers list 2>&1
+    $providerNames = @(Resolve-OpencodeProviderNames -Lines @($providersOutput | ForEach-Object { "$_" }))
     Write-Host "Found providers: $($providerNames -join ', ')"
 
     $providerNames = $providerNames | Where-Object { $_.ToLower() -notin $ProviderBlacklist }
@@ -235,7 +292,7 @@ function Invoke-UpdateModels {
     Write-Host "`nUpdated opencode model registry:"
     foreach ($p in $existingMap.Keys) {
         $entry = $existingMap[$p]
-        $providerModelCount = if ($entry -is [System.Collections.IDictionary]) { $entry.Count } else { $entry.PSObject.Properties.Count }
+        $providerModelCount = Get-OpencodeProviderModelCount -Entry $entry
         Write-Host "  $p : $providerModelCount models"
     }
     Write-Host "Total new models: $modelCount"
