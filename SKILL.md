@@ -246,6 +246,10 @@ Some `/era` inputs are management commands, not review dispatches. Route these t
   — `-Command set-default` hard-errors on more than one preset), then run
   `era.ps1 -Command set-default -Reviewer <preset>`. Example:
   `/era set default Gemini 3.1 Pro` → `era.ps1 -Command set-default -Reviewer gemini-pro-high`.
+- **`/era exposure`** (also "what did we send out", "what has been reviewed", "show sent reviews") →
+  run `pwsh <skill-root>/runtimes/era.ps1 -Command exposure` (add `-TopicSlug <slug>`
+  to narrow to one topic). Read-only: it lists every built round's manifest receipt —
+  timestamp, commit, reviewers/backends, source counts. **Do NOT dispatch a review.**
 
 ## Handling the response — triage before incorporating
 
@@ -394,6 +398,9 @@ pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command suggest
 
 # Update model registry from connected opencode providers
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command update-models
+
+# Exposure receipts: what source left this machine, to whom, when (no dispatch)
+pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1 -Command exposure
 
 # Default: auto-detect topic, and the 4-reviewer panel (gemini,opus,deepseek-flash,muse-spark) run simultaneously
 pwsh ~/.claude/skills/external-review-auto/runtimes/era.ps1

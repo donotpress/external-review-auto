@@ -1829,6 +1829,97 @@ function Format-EraRoundSummary {
     return "Done. Slowest seat: ${max}s | Tokens: $TokenCount"
 }
 
+function Get-EraExposureReport {
+    <#
+    .SYNOPSIS
+        What source left this machine, to whom, when: one row per built round.
+    .DESCRIPTION
+        Reads round-*-manifest.json receipts under .external-reviews/ (plus a
+        round-*-metadata.json sibling when present, to resolve requested
+        presets to backend/model). READ-ONLY: no dispatch, no round allocation,
+        no manifest writes, so it is safe beside a round in flight. A corrupt
+        receipt is skipped, never fatal: one bad file must not hide the rest.
+        Rows carry the full head sha; the renderer shortens it for display.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [string]$TopicSlug
+    )
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $root = Join-Path $RepoRoot '.external-reviews'
+    if (-not (Test-Path -LiteralPath $root)) { return @() }
+    foreach ($topicDir in @(Get-ChildItem -LiteralPath $root -Directory -ErrorAction SilentlyContinue)) {
+        if ($TopicSlug -and $topicDir.Name -ne $TopicSlug) { continue }
+        foreach ($mf in @(Get-ChildItem -LiteralPath $topicDir.FullName -Filter 'round-*-manifest.json' -File -ErrorAction SilentlyContinue)) {
+            if ($mf.Name -notmatch '^round-(\d+)-manifest\.json$') { continue }
+            $round = [int]$matches[1]
+            try { $m = Get-Content -Raw -LiteralPath $mf.FullName -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+            catch { continue }
+            # ConvertFrom-Json parses ISO timestamps into [datetime], which
+            # stringifies locale-dependently; keep the sortable ISO shape.
+            $stamp = $m.timestamp
+            if ($stamp -is [datetime]) { $stamp = $stamp.ToString('s') }
+            $destinations = @($m.reviewers_requested)
+            $metaPath = Join-Path $topicDir.FullName ("round-$round-metadata.json")
+            if (Test-Path -LiteralPath $metaPath) {
+                try {
+                    $meta = Get-Content -Raw -LiteralPath $metaPath -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    $byPreset = @{}
+                    foreach ($s in @($meta.reviewers)) { $byPreset[$s.preset] = $s }
+                    $destinations = @(@($m.reviewers_requested) | ForEach-Object {
+                        if ($byPreset.ContainsKey($_)) {
+                            $s = $byPreset[$_]
+                            "$_ ($($s.backend)/$($s.model))"
+                        } else { "$_" }
+                    })
+                } catch {}
+            }
+            $rows.Add([pscustomobject]@{
+                TopicSlug          = if ($m.topic_slug) { [string]$m.topic_slug } else { $topicDir.Name }
+                Round              = $round
+                Timestamp          = if ($stamp) { [string]$stamp } else { '' }
+                GitHead            = if ($m.git_head) { [string]$m.git_head } else { '' }
+                GitBranch          = if ($m.git_branch) { [string]$m.git_branch } else { '' }
+                GitClean           = [bool]$m.git_clean
+                ReviewersRequested = @($m.reviewers_requested)
+                Destinations       = @($destinations)
+                SourcesCount       = @($m.sources).Count
+                FilesCount         = @($m.files).Count
+                ManifestPath       = $mf.FullName
+            })
+        }
+    }
+    return @($rows | Sort-Object { $_.Timestamp }, TopicSlug, Round)
+}
+
+function Format-EraExposureReport {
+    <#
+    .SYNOPSIS
+        Render Get-EraExposureReport rows as a greppable receipt listing.
+    #>
+    [CmdletBinding()]
+    param($Rows)
+    $rows = @($Rows)
+    if ($rows.Count -eq 0) {
+        return "No exposure receipts: no round-*-manifest.json under .external-reviews/ (no round has been built here)."
+    }
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('=== era exposure: source sent out for review, by round ===')
+    $lines.Add('')
+    foreach ($r in $rows) {
+        $short = if ($r.GitHead -and $r.GitHead.Length -ge 12) { $r.GitHead.Substring(0, 12) } else { $r.GitHead }
+        $clean = if ($r.GitClean) { 'clean' } else { 'dirty' }
+        $lines.Add("[$($r.TopicSlug)] round $($r.Round)  $($r.Timestamp)  head $short ($($r.GitBranch), $clean)")
+        $lines.Add("  sent to : $((@($r.Destinations) -join '; '))")
+        $lines.Add("  sources : $($r.SourcesCount) file(s), manifest files: $($r.FilesCount)  ($($r.ManifestPath))")
+        $lines.Add('')
+    }
+    $topics = @($rows | ForEach-Object { $_.TopicSlug } | Sort-Object -Unique)
+    $lines.Add("$($rows.Count) round(s) across $($topics.Count) topic(s). Manifests are the provenance record; cite their rounds, not memory.")
+    return ($lines -join "`n")
+}
+
 function Test-ReviewerListAgainstRegistry {
     [CmdletBinding()]
     param(

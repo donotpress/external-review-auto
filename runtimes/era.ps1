@@ -66,7 +66,7 @@ param(
     [string]$AgyModel,
     [string]$Model,
     [string]$Provider,
-    [ValidateSet('', 'update-models', 'doctor', 'list', 'set-default', 'review-this', 'suggest')][string]$Command = '',
+    [ValidateSet('', 'update-models', 'doctor', 'list', 'exposure', 'set-default', 'review-this', 'suggest')][string]$Command = '',
     # -Doctor: preflight only. Prints a consolidated prereq/backend status report
     # (pwsh, ThreadJob, repomix, each backend CLI/API key) and exits without
     # dispatching a review. Never installs anything — it reports the fix commands.
@@ -413,6 +413,16 @@ if ($Command -eq 'list') {
     $listDefault = (Get-EraDefaultReviewer -SkillRoot $skillRoot) -join ', '
     $listRows = Get-EraReviewerList -Registry $rawRegistry -Default $listDefault
     Write-Host (Format-EraReviewerList -Rows $listRows -Default $listDefault)
+    return
+}
+
+# --- exposure command: what source left this machine, to whom, when --------
+if ($Command -eq 'exposure') {
+    # Read-only over .external-reviews/*/round-*-manifest.json: no dispatch,
+    # no round allocation, no manifest writes. Safe beside a round in flight.
+    # -TopicSlug narrows to one topic when given; without it, all topics.
+    $exposureRows = Get-EraExposureReport -RepoRoot $repoRoot -TopicSlug $TopicSlug
+    Write-Host (Format-EraExposureReport -Rows $exposureRows)
     return
 }
 
