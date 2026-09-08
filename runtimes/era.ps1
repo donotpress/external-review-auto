@@ -2551,9 +2551,9 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         Write-Host "The round is usable, but it is a smaller panel than you asked for."
     }
 
-    $firstResult = @($results.Values) | Select-Object -First 1
-    if ($firstResult -and $firstResult.WallClockSec) {
-        Write-Host "Done. Wall clock: $($firstResult.WallClockSec)s | Tokens: $tokenCount"
+    $summaryLine = Format-EraRoundSummary -Results $results -TokenCount $tokenCount
+    if ($summaryLine) {
+        Write-Host $summaryLine
     }
 
     # Reached only on a clean run. The finally block below keeps the repomix

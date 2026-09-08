@@ -1806,6 +1806,29 @@ function Format-EraDoctorReport {
     return ($lines -join "`n")
 }
 
+function Format-EraRoundSummary {
+    <#
+    .SYNOPSIS
+        The end-of-round `Done. ...` line: slowest seat time + token count.
+    .DESCRIPTION
+        This used to print the FIRST hashtable value's WallClockSec under the
+        name `Wall clock` -- one arbitrary seat's time (hashtable order is not
+        dispatch order) wearing a round-level label, off ~6x on the round that
+        named it (119.7s for a 720s+ dispatch, 2026-09-08). The dispatcher's
+        own elapsed is the round's wall clock and already prints per-heartbeat
+        as `[dispatch] Ns elapsed`; this line claims only what it measures:
+        the slowest seat that reported a time. Seats with no WallClockSec
+        (abandoned stragglers, timeout synthetics) are ignored; when none
+        reported, returns $null and the caller prints nothing (as before).
+    #>
+    [CmdletBinding()]
+    param($Results, [int]$TokenCount = 0)
+    $secs = @(@($Results.Values) | ForEach-Object { $_.WallClockSec } | Where-Object { $_ })
+    if ($secs.Count -eq 0) { return $null }
+    $max = ($secs | Measure-Object -Maximum).Maximum
+    return "Done. Slowest seat: ${max}s | Tokens: $TokenCount"
+}
+
 function Test-ReviewerListAgainstRegistry {
     [CmdletBinding()]
     param(
