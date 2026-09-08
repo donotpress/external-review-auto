@@ -10,7 +10,7 @@
 2. **No spec exists, no slug passed:** The LLM should ask the user for a slug and which files to bundle, then invoke era.ps1 with `-TopicSlug` and `-IncludeFiles`.
 3. **Repomix not installed:** `npm install -g repomix`. era.ps1 fails with a clear message.
 4. **Backend CLI not installed:** era.ps1 checks PATH and fails fast: "Backend CLI 'X' is not on PATH."
-5. **ThreadJob module missing:** era.ps1 detects and tells the user: `Install-Module -Name ThreadJob -Force -Scope CurrentUser`.
+5. **ThreadJob module missing:** era.ps1 detects and tells the user: `Install-Module -Name Microsoft.PowerShell.ThreadJob -Force -Scope CurrentUser`. (PS 7.4+ ships it renamed; probing the legacy `ThreadJob` name alone reports MISS on a ready machine, so Doctor probes the `Start-ThreadJob` command instead.)
 6. **Estimated cost exceeds caps:** era.ps1 prompts for confirmation when the estimated dispatch cost exceeds the individual reviewer cap or the aggregate run cap (dollar-based, not token-based). Use `-Force` to skip.
 7. **Orphaned claim file:** If a process was killed mid-run, `round-N-claim.json` is left behind and causes the next dispatch to skip that round number. Manual cleanup: `Remove-Item .external-reviews/<topic>/round-*-claim.json`.
 8. **`.external-reviews/` first time in repo:** Suggest adding to `.gitignore`.

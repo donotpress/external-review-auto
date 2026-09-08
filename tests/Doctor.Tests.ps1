@@ -53,6 +53,35 @@ Describe 'Get-EraDoctorReport' {
     }
 }
 
+Describe 'Get-EraDoctorReport ThreadJob probe' {
+    It 'probes the Start-ThreadJob command, not the legacy module name' {
+        # 2026-09-08: PS 7.4+ ships the module as Microsoft.PowerShell.ThreadJob,
+        # so Get-Module -Name ThreadJob finds nothing on a ready machine and
+        # Doctor reported NOT READY. Get-Command auto-loads from either name.
+        $r = Get-EraDoctorReport -Registry $script:Reg `
+            -CommandExists { param($n) $n -eq 'Start-ThreadJob' } `
+            -ModuleExists  { $false } `
+            -EnvValue      { $null }
+        ($r | Where-Object { $_.name -match 'ThreadJob' }).ok | Should -BeTrue
+    }
+
+    It 'still reports MISS when Start-ThreadJob itself is absent' {
+        $r = Get-EraDoctorReport -Registry $script:Reg `
+            -CommandExists { $false } `
+            -ModuleExists  { $false } `
+            -EnvValue      { $null }
+        ($r | Where-Object { $_.name -match 'ThreadJob' }).ok | Should -BeFalse
+    }
+
+    It 'advises the renamed module in the fix command' {
+        $r = Get-EraDoctorReport -Registry $script:Reg `
+            -CommandExists { $false } `
+            -ModuleExists  { $false } `
+            -EnvValue      { $null }
+        ($r | Where-Object { $_.name -match 'ThreadJob' }).fix | Should -Match 'Microsoft.PowerShell.ThreadJob'
+    }
+}
+
 Describe 'Format-EraDoctorReport' {
     It 'shows the fix for a missing required prereq and reports NOT READY' {
         $rows = Get-EraDoctorReport -Registry $script:Reg -CommandExists { $false } -ModuleExists { $false } -EnvValue { $null }

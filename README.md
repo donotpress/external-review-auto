@@ -123,8 +123,8 @@ brew install powershell                   # macOS
 # 2. repomix
 npm install -g repomix
 
-# 3. ThreadJob module
-Install-Module -Name ThreadJob -Force -Scope CurrentUser
+# 3. ThreadJob module (PS 7.4+ ships it as Microsoft.PowerShell.ThreadJob)
+Install-Module -Name Microsoft.PowerShell.ThreadJob -Force -Scope CurrentUser
 
 # 4. At least one backend — the easiest options:
 #    - Install the agy CLI and sign in (reuses your Google login), OR

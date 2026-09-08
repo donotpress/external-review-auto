@@ -1738,7 +1738,11 @@ function Get-EraDoctorReport {
 
     # --- Core prerequisites ---
     & $row 'PowerShell 7+' 'core' $true ($PSVersionTable.PSVersion.Major -ge 7) "v$($PSVersionTable.PSVersion)" 'winget install Microsoft.PowerShell  (macOS: brew install powershell)' $null
-    & $row 'ThreadJob module' 'core' $true (& $ModuleExists 'ThreadJob') $null 'Install-Module -Name ThreadJob -Force -Scope CurrentUser' $null
+    # Probe the COMMAND, not the module name. PS 7.4+ ships it as
+    # Microsoft.PowerShell.ThreadJob, so Get-Module -Name ThreadJob reported
+    # MISS on a ready machine (2026-09-08); Get-Command auto-loads from either
+    # name, same as the Test-ThreadJobAvailable dispatch guard below.
+    & $row 'ThreadJob (Start-ThreadJob)' 'core' $true (& $CommandExists 'Start-ThreadJob') $null 'Install-Module -Name Microsoft.PowerShell.ThreadJob -Force -Scope CurrentUser' $null
     & $row 'repomix' 'core' $true (& $CommandExists 'repomix') $null 'npm install -g repomix' $null
     & $row 'git (optional: -AutoDetect / -Diff)' 'core' $false (& $CommandExists 'git') $null 'install git from https://git-scm.com (optional)' $null
 
