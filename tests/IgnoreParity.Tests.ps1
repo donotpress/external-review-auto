@@ -86,6 +86,15 @@ Describe 'Get-EraIgnoreSets / Test-EraPathIgnored' -Tag Unit {
         $recognised | Should -Be $pats.Count -Because 'a pattern the parser drops is protection that does not exist'
     }
 
+    It 'the staged-origin receipt never reaches a bundle or a baseline' {
+        # .era-origin is provenance metadata written by the staging recipe, not
+        # review material. Repomix runs with useGitignore=false, so the
+        # .gitignore entry alone cannot keep it out -- the vendor patterns must.
+        $sets = Get-EraIgnoreSets -IgnorePatterns (Get-EraVendorIgnorePatterns)
+        Test-EraPathIgnored -RelPath '.era-origin' -Sets $sets | Should -BeTrue
+        Test-EraPathIgnored -RelPath 'src/app.ts' -Sets $sets | Should -BeFalse
+    }
+
     It 'ignores nothing when given no patterns' {
         $empty = Get-EraIgnoreSets -IgnorePatterns @()
         Test-EraPathIgnored -RelPath 'node_modules/pkg/readme.md' -Sets $empty | Should -BeFalse

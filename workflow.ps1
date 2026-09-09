@@ -132,11 +132,18 @@ function Get-EraVendorIgnorePatterns {
 
         They are also a privacy control: a profile dir carries live session
         cookies and auth tokens, and era uploads its bundle to a third party.
+
+        '.era-origin' (bare: root-only by construction) is the staging recipe's
+        provenance receipt. Repomix runs with useGitignore=false, so the
+        .gitignore entry the recipe writes cannot keep it out of a bundle --
+        only this list can. It names an origin path and SHA: review material
+        for nobody, worthless to a reviewer, and it must never be hashed into
+        a manifest baseline either.
     #>
     [CmdletBinding()]
     param()
     return @('**/node_modules/**', '**/.git/**', '**/__pycache__/**', '*.pyc', '*.duckdb', 'validation_results/**/*.db',
-             '**/puppeteer_user_data/**', '**/chrome_user_data/**', '**/chrome-profile/**')
+             '**/puppeteer_user_data/**', '**/chrome_user_data/**', '**/chrome-profile/**', '.era-origin')
 }
 
 function Get-EraIgnoreSets {
@@ -1159,6 +1166,38 @@ function Write-ReviewManifest {
         $manifest.git_clean  = ($GitState.Dirty.Count -eq 0)
         $manifest.git_dirty  = [array]$GitState.Dirty
     }
+    # A STAGED ROUND'S git_head IS A STAGING SHA, resolvable nowhere. era does
+    # not stage (see the UNC refusal in era.ps1 and its ruling), but when the
+    # caller stages using the recipe era printed, the recipe leaves .era-origin
+    # naming the tree the copy came from. Reading it is what keeps a staged
+    # round citable: without it the manifest anchors to a commit that exists
+    # only in a temp directory, and says git_clean=true while doing it.
+    # .era-origin is gitignored by that same recipe (provenance, not review
+    # material) and excluded from bundles by Get-EraVendorIgnorePatterns, so it
+    # never reaches a reviewer; era reads it from the working directory here.
+    $originFile = if ($RepoRoot) { Join-Path $RepoRoot '.era-origin' } else { $null }
+    if ($originFile -and (Test-Path -LiteralPath $originFile)) {
+        $manifest.staged = $true
+        foreach ($line in (Get-Content -LiteralPath $originFile -ErrorAction SilentlyContinue)) {
+            if ($line -match '^\s*origin_(repo|head|branch|dirty)\s*:\s*(.+?)\s*$') {
+                $manifest["staged_from_$($Matches[1])"] = $Matches[2]
+            }
+        }
+        # THE CALLER WROTE .era-origin, SO CHECK IT. Recording an unverified
+        # SHA would replace "anchored to a commit that exists nowhere" with
+        # "anchored to a commit we did not look for", which is not an
+        # improvement. One subprocess turns the caller's assertion into a
+        # measurement. Failure is data, never fatal: a gone repo, an
+        # unreadable one, or a missing git all leave resolvable=false (or the
+        # field unset when there was nothing to check), and the manifest is
+        # otherwise exactly as it is today.
+        try {
+            if ((Get-Command git -ErrorAction SilentlyContinue) -and $manifest.staged_from_repo -and $manifest.staged_from_head) {
+                $null = & git -C $manifest.staged_from_repo cat-file -e "$($manifest.staged_from_head)^{commit}" 2>&1
+                $manifest.staged_from_resolvable = ($LASTEXITCODE -eq 0)
+            }
+        } catch {}
+    }
     if ($SourceFiles -and $RepoRoot) {
         $manifest.sources = [array]$SourceFiles
         $manifest.source_hashes = @{}
@@ -1887,6 +1926,10 @@ function Get-EraExposureReport {
                 SourcesCount       = @($m.sources).Count
                 FilesCount         = @($m.files).Count
                 ManifestPath       = $mf.FullName
+                # A staged round's GitHead is a staging SHA that resolves
+                # nowhere; the citable anchor is the verified origin beside it.
+                StagedFrom         = if ($m.staged_from_head) { [string]$m.staged_from_head } else { '' }
+                StagedResolvable   = if ($null -ne $m.staged_from_resolvable) { [bool]$m.staged_from_resolvable } else { $null }
             })
         }
     }
@@ -1912,6 +1955,11 @@ function Format-EraExposureReport {
         $clean = if ($r.GitClean) { 'clean' } else { 'dirty' }
         $lines.Add("[$($r.TopicSlug)] round $($r.Round)  $($r.Timestamp)  head $short ($($r.GitBranch), $clean)")
         $lines.Add("  sent to : $((@($r.Destinations) -join '; '))")
+        if ($r.StagedFrom) {
+            $sShort = if ($r.StagedFrom.Length -ge 12) { $r.StagedFrom.Substring(0, 12) } else { $r.StagedFrom }
+            $verdict = if ($r.StagedResolvable -eq $false) { 'NOT RESOLVABLE' } else { 'resolvable' }
+            $lines.Add("  staged from : $sShort ($verdict)")
+        }
         $lines.Add("  sources : $($r.SourcesCount) file(s), manifest files: $($r.FilesCount)  ($($r.ManifestPath))")
         $lines.Add('')
     }

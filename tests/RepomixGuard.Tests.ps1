@@ -167,6 +167,22 @@ Describe 'the UNC refusal prints a recipe and does NOT auto-stage' -Tag Unit {
         $script:EraSrc | Should -Match '\$slug'
     }
 
+    It 'the recipe captures origin provenance before the cd' {
+        # A staged round anchors to a fresh git init. The recipe must leave a
+        # record of what it was staged FROM, or the manifest cites a SHA that
+        # exists nowhere -- the failure the no-auto-stage ruling exists to
+        # prevent, reintroduced by the ruling's own workaround.
+        $branch = [regex]::Match($script:EraSrc,
+            '(?s)if \(\$rootIsUnc.*?Nothing was dispatched and nothing was spent\."\)').Value
+        $branch | Should -Match '\.era-origin'
+        $branch | Should -Match 'origin_head'
+        # captured BEFORE the cd, or it resolves against the staged repo.
+        # Scoped to the recipe: the ruling's own comment above it mentions
+        # `git init` first, so unscoped IndexOf compares against prose.
+        $recipe = $branch.Substring($branch.IndexOf('mktemp'))
+        $recipe.IndexOf('rev-parse HEAD') | Should -BeLessThan $recipe.IndexOf('cd ')
+    }
+
     It 'still REFUSES -- it does not stage, copy or dispatch on the caller''s behalf' {
         # The whole point. If this branch ever gains a Copy-Item/git init it has
         # become the thing this ruling rejected.

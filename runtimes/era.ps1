@@ -1901,9 +1901,13 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 $recipe =
                     "  recipe       : run these from the repo, then copy .external-reviews back if you want the artifacts kept:`n" +
                     "      S=`$(mktemp -d /mnt/c/Users/`$USER/AppData/Local/Temp/era-XXXXXX)`n" +
+                    "      O=`$(git rev-parse --show-toplevel); H=`$(git rev-parse HEAD)`n" +
+                    "      B=`$(git rev-parse --abbrev-ref HEAD); D=`$(git status --porcelain | wc -l)`n" +
                     "      cp --parents $files `"`$S/`" && cd `"`$S`" && git init -q`n" +
-                    "      printf '.external-reviews/`nera-run.log`n' > .gitignore  # else era's own output trips its dirty-tree gate on the next run`n" +
-                    "      git add -A && git -c user.email=era@local -c user.name=era commit -qm stage`n" +
+                    "      printf '.external-reviews/`nera-run.log`n.era-origin`n' > .gitignore  # else era's own output trips its dirty-tree gate on the next run`n" +
+                    "      printf 'origin_repo: %s`norigin_head: %s`norigin_branch: %s`norigin_dirty: %s`n' " +
+                    "`"`$O`" `"`$H`" `"`$B`" `"`$D`" > .era-origin`n" +
+                    "      git add -A && git -c user.email=era@local -c user.name=era commit -qm `"stage from `$H`"`n" +
                     "      pwsh '$PSCommandPath' -TopicSlug $slug -IncludeFiles `"$incl`" -Force`n"
                 Stop-EraWithError ("repomix could not scan the tree, and the repo root is not on a Windows drive.`n" +
                     $hint +
@@ -2094,6 +2098,25 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns -ReviewersRequested $reviewerList
 
     Write-Host "Round $round. Reviewer(s): $($approvedList -join ', ')."
+
+    # Say a staged anchor out loud. The manifest just written is the same
+    # receipt -Command exposure reads; re-read it rather than recomputing.
+    # Display-only and defensive: a receipt that cannot be read must never
+    # break a dispatch.
+    try {
+        $stagedManifest = Get-Content -Raw -LiteralPath (Join-Path $reviewDir "round-$round-manifest.json") -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ($stagedManifest.staged) {
+            if ($stagedManifest.staged_from_resolvable -eq $false) {
+                Write-Host "[era] staged round: origin $($stagedManifest.staged_from_head) NOT RESOLVABLE in $($stagedManifest.staged_from_repo) -- the staging was wrong or the origin has since been rewritten." -ForegroundColor Red
+            } else {
+                $dirtyNote = ''
+                if ($stagedManifest.staged_from_dirty -and $stagedManifest.staged_from_dirty -ne '0') {
+                    $dirtyNote = " (origin had $($stagedManifest.staged_from_dirty) uncommitted file(s) -- this round covers no reproducible range)"
+                }
+                Write-Host "[era] staged round: anchored to $($stagedManifest.staged_from_head) in $($stagedManifest.staged_from_repo)$dirtyNote"
+            }
+        }
+    } catch {}
 
     # --- Default agy --model token (R2-C1 + R4-Gemini-C1; per-reviewer fix) ---
     # The default agy --model token is now resolved PER REVIEWER inside

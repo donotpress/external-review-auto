@@ -98,14 +98,16 @@ Describe 'Pattern/parser contract' -Tag Unit {
         $patterns = @(Get-EraVendorIgnorePatterns)
         $patterns.Count | Should -BeGreaterThan 0
 
-        $recognised = @('^\*\*/[^*/]+/\*\*$', '^[^*]+/\*\*$', '^\*\.[^*/]+$')
+        $recognised = @('^\*\*/[^*/]+/\*\*$', '^[^*]+/\*\*$', '^\*\.[^*/]+$', '^[^*]+$')
         $unparsed = @($patterns | Where-Object {
             $p = $_
             -not ($recognised | Where-Object { $p -match $_ })
         })
         # 'validation_results/**/*.db' is a known, deliberate exception: it names
         # an extension the include globs never match, so the measurer ignoring it
-        # only over-counts, which is the safe direction.
+        # only over-counts, which is the safe direction. Bare exact paths (no
+        # wildcard at all, e.g. '.era-origin') are the SkipExact/SkipDirs shape
+        # Get-EraIgnoreSets documents -- recognised, not unparsed.
         @($unparsed | Where-Object { $_ -ne 'validation_results/**/*.db' }) | Should -BeNullOrEmpty
     }
 

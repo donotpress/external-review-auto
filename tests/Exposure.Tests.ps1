@@ -46,13 +46,19 @@ BeforeAll {
             source_hashes = @{ 'a.md' = 'h3' }
         } | ConvertTo-Json -Depth 10)
         # Second topic, plus a corrupt receipt that must not kill the listing.
+        # The beta receipt is a STAGED round: its git_head is a staging SHA and
+        # the resolvable anchor lives in staged_from_* (provenance fix).
         Set-Content -LiteralPath (Join-Path $beta 'round-1-manifest.json') -Encoding UTF8 -Value (@{
             files = @(); reviewers_requested = @('haiku')
             round = 1; sources = @()
-            git_branch = 'master'; git_head = 'abc123'
+            git_branch = 'master'; git_head = 'f24d6a31525a112514c7061f6edd1d73b2f7df80'
             previous_round = $null; git_dirty = @(); topic_slug = 'beta'
             timestamp = '2026-09-07T00:00:00Z'; git_clean = $true
             source_hashes = @{}
+            staged = $true; staged_from_repo = '/home/joshua/ai-workspace-config'
+            staged_from_head = 'd1548f9abc123d1548f9abc123d1548f9abc1'
+            staged_from_branch = 'main'; staged_from_dirty = '0'
+            staged_from_resolvable = $true
         } | ConvertTo-Json -Depth 10)
         Set-Content -LiteralPath (Join-Path $beta 'round-9-manifest.json') -Encoding UTF8 -Value 'not json {{{'
         return $root
@@ -112,6 +118,25 @@ Describe 'Get-EraExposureReport' {
             Get-EraExposureReport -RepoRoot $root | Should -BeNullOrEmpty
         } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
+    It 'carries the staged anchor alongside the unresolvable staging SHA' {
+        $root = New-ExposureTree
+        try {
+            $row = Get-EraExposureReport -RepoRoot $root | Where-Object { $_.TopicSlug -eq 'beta' }
+            $row.GitHead     | Should -Be 'f24d6a31525a112514c7061f6edd1d73b2f7df80'
+            $row.StagedFrom  | Should -Be 'd1548f9abc123d1548f9abc123d1548f9abc1'
+            $row.StagedResolvable | Should -BeTrue
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'leaves the staged columns empty for unstaged rounds' {
+        $root = New-ExposureTree
+        try {
+            $row = Get-EraExposureReport -RepoRoot $root | Where-Object { $_.TopicSlug -eq 'alpha' -and $_.Round -eq 1 }
+            $row.StagedFrom | Should -BeNullOrEmpty
+            $row.StagedResolvable | Should -BeNullOrEmpty
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 Describe 'Format-EraExposureReport' {
@@ -129,5 +154,14 @@ Describe 'Format-EraExposureReport' {
 
     It 'says plainly when there is nothing to show' {
         Format-EraExposureReport -Rows @() | Should -Match 'No exposure receipts'
+    }
+
+    It 'shows the staged anchor and its verdict on staged rounds' {
+        $root = New-ExposureTree
+        try {
+            $out = Format-EraExposureReport -Rows (Get-EraExposureReport -RepoRoot $root)
+            $out | Should -Match 'd1548f9abc12'
+            $out | Should -Match 'resolvable'
+        } finally { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }

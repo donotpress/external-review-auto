@@ -245,3 +245,106 @@ Describe 'Write-ReviewManifest stamps git state' -Tag Unit {
         $names | Should -Not -Contain 'git_clean'
     }
 }
+
+Describe 'staged rounds record and verify their origin' {
+    # 2026-09-08 provenance fix: a staged round anchors to a fresh git init
+    # whose SHA exists nowhere. The recipe leaves .era-origin naming the real
+    # tree; Write-ReviewManifest carries it through and VERIFIES it with
+    # cat-file, so an unverified anchor cannot replace an unresolvable one.
+    function script:New-StagedRepo {
+        param([string]$Prefix = 'staged', [string]$OriginHead = $null, [string]$OriginBody = $null)
+        $d = Join-Path $env:TEMP "era-$Prefix-$(New-Guid)"
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        Push-Location $d
+        try {
+            & git init -q 2>&1 | Out-Null
+            & git config user.email 't@t.t' 2>&1 | Out-Null
+            & git config user.name  'T'     2>&1 | Out-Null
+            Set-Content -LiteralPath (Join-Path $d 'a.md') -Value '# a' -Encoding UTF8
+            & git add -A 2>&1 | Out-Null
+            & git commit -q -m init 2>&1 | Out-Null
+            $head = (& git rev-parse HEAD 2>$null).Trim()
+        } finally { Pop-Location }
+        $rd = Join-Path $d '.external-reviews\t'
+        New-Item -ItemType Directory -Path $rd -Force | Out-Null
+        $bundle = Join-Path $rd 'b.xml'
+        Set-Content -LiteralPath $bundle -Value 'x' -Encoding UTF8
+        if ($OriginBody) {
+            Set-Content -LiteralPath (Join-Path $d '.era-origin') -Value $OriginBody -Encoding UTF8
+        } elseif ($OriginHead) {
+            $h = if ($OriginHead -eq 'REAL') { $head } else { $OriginHead }
+            Set-Content -LiteralPath (Join-Path $d '.era-origin') `
+                -Value "origin_repo: $d`norigin_head: $h`norigin_branch: master`norigin_dirty: 0`n" -Encoding UTF8
+        }
+        return [pscustomobject]@{ Dir = $d; ReviewDir = $rd; Bundle = $bundle; Head = $head }
+    }
+
+    function script:Write-StagedManifest {
+        param($Repo)
+        $mp = Write-ReviewManifest -ReviewDir $Repo.ReviewDir -Round 1 -TopicSlug 't' `
+            -Files @($Repo.Bundle) -RepoRoot $Repo.Dir
+        return Get-Content -LiteralPath $mp -Raw | ConvertFrom-Json
+    }
+
+    It 'carries staged_from_* through the manifest and resolves the origin' {
+        $r = New-StagedRepo 'carry' -OriginHead 'REAL'
+        try {
+            $m = Write-StagedManifest $r
+            $m.staged | Should -BeTrue
+            $m.staged_from_head   | Should -Be $r.Head
+            $m.staged_from_repo   | Should -Be $r.Dir
+            $m.staged_from_branch | Should -Be 'master'
+            $m.staged_from_dirty  | Should -Be '0'
+            $m.staged_from_resolvable | Should -BeTrue
+        } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'marks an unresolvable origin LOUD instead of asserting it' {
+        $r = New-StagedRepo 'unres' -OriginHead 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef'
+        try {
+            $m = Write-StagedManifest $r
+            $m.staged | Should -BeTrue
+            $m.staged_from_resolvable | Should -BeFalse
+        } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'a malformed .era-origin adds no origin fields' {
+        $r = New-StagedRepo 'malformed' -OriginBody 'garbage{{{'
+        try {
+            $m = Write-StagedManifest $r
+            $m.staged | Should -BeTrue
+            $m.PSObject.Properties.Name | Should -Not -Contain 'staged_from_head'
+            $m.PSObject.Properties.Name | Should -Not -Contain 'staged_from_resolvable'
+        } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'no .era-origin means no staged fields at all' {
+        $r = New-StagedRepo 'plain'
+        try {
+            $m = Write-StagedManifest $r
+            $m.PSObject.Properties.Name | Should -Not -Contain 'staged'
+        } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    It 'a staged -PreflightOnly round says its origin out loud' -Tag Integration {
+        # The recipe gitignores .era-origin (it is provenance, not review
+        # material), so mirror that here; the gate must stay silent on it.
+        $r = New-StagedRepo 'sayit' -OriginHead 'REAL'
+        try {
+            # Mirror the recipe: the provenance file is gitignored AND
+            # committed, so the gate sees a clean tree. An uncommitted
+            # .gitignore is itself dirt, which is correctly refused.
+            Set-Content -LiteralPath (Join-Path $r.Dir '.gitignore') `
+                -Value ".external-reviews/`n.era-origin`n" -Encoding UTF8
+            Push-Location $r.Dir
+            try {
+                & git add -A 2>&1 | Out-Null
+                & git commit -q -m stage 2>&1 | Out-Null
+            } finally { Pop-Location }
+            $out = Invoke-EraIn -Repo $r.Dir -PreflightOnly -IncludeFiles 'a.md'
+            $out.Output   | Should -Match 'staged round'
+            $out.Output   | Should -Not -Match 'NOT RESOLVABLE'
+            $out.ExitCode | Should -Be 0
+        } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
