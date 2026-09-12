@@ -1820,7 +1820,30 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # Output is redirected to files, so partial output SURVIVES a timeout. The
     # Receive-Job drain this replaces could never return anything: the ThreadJob
     # body buffered everything into a local until completion.
+    $repomixStartUtc = [datetime]::UtcNow
     $repomixRun = Invoke-EraRepomix -ConfigPath $configPath -RepoRoot $repoRoot -TimeoutSec $repomixTimeoutSec
+    if ($repomixRun.TimedOut) {
+        # Adopt-or-retry (2026-09-11): a repomix that printed its completion
+        # banner but never exited did the WORK -- adopt the bundle it wrote
+        # rather than failing the round for a stuck EXIT. Anything else gets
+        # exactly ONE retry, then the honest failure below.
+        $adopted = Test-EraRepomixCompleted -PartialOutput $repomixRun.Output `
+            -BundlePath $bundlePath -SinceUtc $repomixStartUtc
+        if ($adopted) {
+            Write-Host "[era] repomix timed out AFTER packing completed; adopting the bundle at '$bundlePath'."
+            $repomixRun = @{ TimedOut = $false; Output = $repomixRun.Output; Error = $null; ExitCode = 0 }
+        }
+        else {
+            Write-Host "[era] repomix timed out with no usable bundle; retrying once."
+            $repomixStartUtc = [datetime]::UtcNow
+            $repomixRun = Invoke-EraRepomix -ConfigPath $configPath -RepoRoot $repoRoot -TimeoutSec $repomixTimeoutSec
+            if ($repomixRun.TimedOut -and (Test-EraRepomixCompleted -PartialOutput $repomixRun.Output `
+                    -BundlePath $bundlePath -SinceUtc $repomixStartUtc)) {
+                Write-Host "[era] repomix timed out AFTER packing completed on retry; adopting the bundle at '$bundlePath'."
+                $repomixRun = @{ TimedOut = $false; Output = $repomixRun.Output; Error = $null; ExitCode = 0 }
+            }
+        }
+    }
     if ($repomixRun.TimedOut) {
         $partialText = Get-EraTruncatedText -Text $repomixRun.Output -MaxChars 4000
         throw ("repomix timed out after ${repomixTimeoutSec}s (process tree killed)." +
@@ -2289,7 +2312,15 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         # Copy-PrimaryResponseAlias.
         $usableSoFar = (Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
             -Results $results -RequestedCount @($reviewerList).Count).UsableCount
-        if (-not (Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar)) {
+        # Dead-transport seats (Test-EraStreamFallbackNeeded): stream-interrupted
+        # agy or zero-output opencode dying inside an otherwise usable round.
+        # The two gates are mutually exclusive (usable==0 vs usable>0).
+        $streamFailed = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'agy-stream-interrupted' })
+        $opencodeDead = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'opencode-no-output' })
+        $standardFire = Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar
+        $streamFire = Test-EraStreamFallbackNeeded -StreamInterruptedCount $streamFailed.Count `
+            -OpencodeNoOutputCount $opencodeDead.Count -UsableCount $usableSoFar
+        if (-not ($standardFire -or $streamFire)) {
             if ($failedRecoverable.Count -gt 0) {
                 Write-Host ("[era] {0} reviewer(s) failed recoverably ({1}), but the round already has {2} usable review(s); skipping the fallback." -f `
                     $failedRecoverable.Count, ($failedRecoverable -join ', '), $usableSoFar)
@@ -2334,18 +2365,28 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
             if ($fallbackPreset) {
                 # Name the actual cause per reviewer rather than guessing at a
                 # single label -- the trigger set now spans several failure kinds.
-                $why = @($failedRecoverable | ForEach-Object {
+                # In stream mode only the dead-transport seats are being
+                # replaced (the standard gate owns the void round, and the two
+                # gates are mutually exclusive), so name that subset.
+                $replacing = if ($streamFire) { @($streamFailed + $opencodeDead | Sort-Object -Unique) } else { $failedRecoverable }
+                $why = @($replacing | ForEach-Object {
                     $e = if ($results[$_].Error) { $results[$_].Error } else { "exit $($results[$_].ExitCode)" }
                     "$_ ($e)"
                 }) -join ', '
-                Write-Host "[era] no usable review from $why -> falling back to '$fallbackPreset'."
+                if ($streamFire) {
+                    Write-Host "[era] dead transport for $why; round already has $usableSoFar usable review(s) -> falling back to '$fallbackPreset' to keep the panel whole."
+                } else {
+                    Write-Host "[era] no usable review from $why -> falling back to '$fallbackPreset'."
+                }
                 # DELIVERY-CHECK THE FALLBACK (2026-08-31 panel, opus finding 2).
                 # The plan ran once, over $reviewerList, before the cost prompt.
                 # This re-dispatch was priced and contract-checked but never
-                # delivery-checked -- and it fires only when EVERY seat failed,
-                # plausibly BECAUSE of delivery, so the response to a delivery
-                # failure was one more unchecked full-bundle upload to a channel
-                # nobody had measured this bundle against.
+                # delivery-checked -- and the standard mode fires only when EVERY
+                # seat failed, plausibly BECAUSE of delivery, so the response to
+                # a delivery failure was one more unchecked full-bundle upload
+                # to a channel nobody had measured this bundle against. (Stream
+                # mode fires with usable seats present, but the check is the
+                # same: never send a bundle down a channel it cannot fit.)
                 $fbPlan = Get-EraBundleDeliveryPlan -ReviewerList @($fallbackPreset) `
                     -Registry $registryHash -BundleBytes ([long]$bundleBytes) -BundleTokens $tokenCount
                 if ($fbPlan.OverCount -gt 0 -and -not $bundleForce) {
@@ -2362,7 +2403,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 # and the blinded seat's replacement still reading the sighted
                 # bundle. See Get-EraFallbackBundleOverrides.
                 $fbOverride = Get-EraFallbackBundleOverrides -BundleOverrides $bundleOverrides `
-                    -FallbackPreset $fallbackPreset -BlindSeat $BlindSeat -Replacing $failedRecoverable
+                    -FallbackPreset $fallbackPreset -BlindSeat $BlindSeat -Replacing $replacing
                 if ($fbOverride.Note) { Write-Host $fbOverride.Note }
                 # Adopt it for the rest of the round so Write-ReviewMetadata
                 # records the fallback seat's arm too. The round map is not read

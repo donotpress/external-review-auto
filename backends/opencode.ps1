@@ -1112,6 +1112,12 @@ function Invoke-OpencodeReview {
         # inside WaitForExit it cannot be interrupted, so this file is the
         # dispatcher's only handle on the process.
         if ($PidFile) { try { Set-Content -LiteralPath $PidFile -Value $opencodeProc.Id -ErrorAction SilentlyContinue } catch {} }
+        # Deadline sidecar for the dispatcher's straggler grace: our own
+        # give-up epoch, so a lone seat that is silent BY DESIGN (raised
+        # first-token deadline on read-tool runs) is not tree-killed at
+        # lone+grace while its own budget is still running. A stale file
+        # from a previous round carries an old epoch and reads as expired.
+        if ($PidFile) { try { Set-Content -LiteralPath "$PidFile.deadline" -Value ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + $effectiveTimeoutSec) -ErrorAction SilentlyContinue } catch {} }
         # Close stdin immediately -- opencode run reads no context from stdin.
         $opencodeProc.StandardInput.Close()
 
@@ -1437,7 +1443,13 @@ stderr bytes     : $($stderr.Length)
 "@
             $exitTail = " Forensic snapshot: $base-*.txt"
         } catch {}
-        throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr$exitTail"
+        # Machine-readable trailer for the dispatcher: exit -1 with ZERO
+        # stdout bytes means the model never emitted anything (same
+        # dead-transport class as agy-stream-interrupted; measured 2026-09-04
+        # and 2026-09-11 on read-tool seats). A mid-answer death keeps its
+        # free-text error -- different fact, different recovery.
+        $noOutputTrailer = " [opencode-no-output stdout=$($resultText.Length) delivery=$(if ($useReadTool) { 'read-tool' } else { 'attach' })]"
+        throw "opencode run failed (exit=$exitCode, model=$modelId): $stderr$exitTail$noOutputTrailer"
     }
 
     # Honest content validation: even on a clean exit, the capture can be a

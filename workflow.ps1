@@ -1005,6 +1005,50 @@ function Test-EraStragglerExpired {
     return ''
 }
 
+function Get-EraStragglerDeferral {
+    <#
+    .SYNOPSIS
+        Epoch seconds to wait until instead of tree-killing now, or $null to
+        kill as today.
+    .DESCRIPTION
+        Deadline sidecar (2026-09-11): an adapter publishes its own give-up
+        epoch to "<pidfile>.deadline" at spawn. A lone seat that is silent BY
+        DESIGN (opencode read-tool runs with a raised first-token deadline)
+        must not be tree-killed at lone+grace while its own budget is still
+        running -- measured on ebook-pipeline round 3, killed 3s before its
+        own 875s budget fired.
+
+        Returns min(sidecar + 20s unwind, budget end). The 20s is the same
+        unwind margin the kill path allows the job ($unwindBy): past its own
+        deadline the adapter still needs a moment to throw, snapshot, and
+        return before the dispatcher moves on.
+
+        Fail-closed toward the old behaviour: absent, unparseable, expired
+        (including stale files from previous rounds, whose epochs are old by
+        construction), and over-budget sidecars all return $null. A second
+        grace expiry reads the same (now past) epoch, so one seat cannot
+        defer twice.
+    .OUTPUTS
+        [long] epoch seconds, or $null.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$PidFile,
+        [Parameter(Mandatory)][long]$NowEpoch,
+        [Parameter(Mandatory)][long]$BudgetEndEpoch
+    )
+    $unwindSec = 20
+    if (-not $PidFile) { return $null }
+    $sidecar = "$PidFile.deadline"
+    if (-not (Test-Path -LiteralPath $sidecar)) { return $null }
+    $raw = Get-Content -LiteralPath $sidecar -Raw -ErrorAction SilentlyContinue
+    $epoch = 0
+    if (-not [long]::TryParse("$raw".Trim(), [ref]$epoch)) { return $null }
+    $target = [Math]::Min($epoch + $unwindSec, $BudgetEndEpoch)
+    if ($target -le $NowEpoch) { return $null }
+    return $target
+}
+
 function Get-NextReviewRound {
     [CmdletBinding()]
     param(
@@ -2340,6 +2384,11 @@ function Invoke-ReviewerDispatch {
         # See Stop-EraAdapterChild for why Stop-Job cannot do this.
         $pidPath  = "$respPath.pid"
         Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+        # The deadline sidecar lives and dies with its pid file: a stale
+        # sidecar reads as expired (fail-closed), but leaving them accumulate
+        # in the topic dir is still litter, and a copied/reused round dir is
+        # the one shape that defeats the fail-closed argument.
+        Remove-Item -LiteralPath "$pidPath.deadline" -Force -ErrorAction SilentlyContinue
         $adapterPath = Join-Path $skillRoot "backends/$($modelInfo.backend).ps1"
         $fnName = "Invoke-$((Get-Culture).TextInfo.ToTitleCase($modelInfo.backend))Review"
         $opencodeProvider = if ($ProviderOverrides.ContainsKey($r)) { $ProviderOverrides[$r] } else { $null }
@@ -2492,6 +2541,9 @@ function Invoke-ReviewerDispatch {
     }
     $budgetSec  = $TimeoutSec + 30
     $sw         = [System.Diagnostics.Stopwatch]::StartNew()
+    # Wall-epoch twin of $sw for the deadline sidecar (epoch arithmetic needs
+    # an absolute clock; the stopwatch only gives elapsed).
+    $loopStartEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $loneSince  = -1
     $stopReason = ''
     $doneStates = @('Completed', 'Failed', 'Stopped')
@@ -2550,25 +2602,44 @@ function Invoke-ReviewerDispatch {
             # running. Kill the CHILD; the adapter's WaitForExit then returns,
             # its finally tree-kills defensively, and the job ends by itself.
             $straggler = @($dispatched | Where-Object { $_.Job.State -notin $doneStates })[0]
-            $killed = $false
-            if ($straggler) { $killed = Stop-EraAdapterChild -PidFile $straggler.PidPath }
-            if ($killed) {
-                Write-Host "[dispatch] Abandoned straggler '$($straggler.Preset)' after ${graceSec}s grace: tree-killed its child process."
-                $unwindBy = (Get-Date).AddSeconds(20)
-                while ($straggler.Job.State -notin $doneStates -and (Get-Date) -lt $unwindBy) {
-                    Start-Sleep -Milliseconds 200
-                }
-                break
+            # Deadline sidecar (2026-09-11): an adapter that published a
+            # give-up epoch later than this grace expiry is still working BY
+            # DESIGN. Move the grace clock so it fires at the adapter's own
+            # deadline instead of killing work it has not given up on. Absent
+            # or expired sidecars fall through to the kill below, exactly as
+            # before -- and a second expiry reads the same (now past) epoch,
+            # so one seat cannot defer twice.
+            $deferUntil = $null
+            if ($straggler -and $straggler.PidPath) {
+                $deferUntil = Get-EraStragglerDeferral -PidFile $straggler.PidPath `
+                    -NowEpoch ($loopStartEpoch + $elapsed) -BudgetEndEpoch ($loopStartEpoch + $budgetSec)
             }
-            # No killable child (a REST adapter, or the PID was never recorded).
-            # Abandoning would mean Stop-Job on a possibly-blocked job, which is
-            # exactly the hang above, so fall back to the ONLY safe behaviour:
-            # wait for the adapter's own timeout, as the +30s budget margin
-            # was always designed to do. Disable the grace so this cannot spin.
-            $who = if ($straggler) { $straggler.Preset } else { 'unknown' }
-            Write-Host "[dispatch] Straggler '$who' has no killable child; waiting out its own timeout instead (grace disabled for this round)."
-            $graceSec   = 0
-            $stopReason = ''
+            if ($deferUntil) {
+                $loneSince = ($deferUntil - $loopStartEpoch) - $graceSec
+                Write-Host "[dispatch] Straggler '$($straggler.Preset)' is still inside its published self-deadline; deferring abandonment (grace now fires at $(($deferUntil - $loopStartEpoch))s elapsed)."
+                $stopReason = ''
+            }
+            else {
+                $killed = $false
+                if ($straggler) { $killed = Stop-EraAdapterChild -PidFile $straggler.PidPath }
+                if ($killed) {
+                    Write-Host "[dispatch] Abandoned straggler '$($straggler.Preset)' after ${graceSec}s grace: tree-killed its child process."
+                    $unwindBy = (Get-Date).AddSeconds(20)
+                    while ($straggler.Job.State -notin $doneStates -and (Get-Date) -lt $unwindBy) {
+                        Start-Sleep -Milliseconds 200
+                    }
+                    break
+                }
+                # No killable child (a REST adapter, or the PID was never recorded).
+                # Abandoning would mean Stop-Job on a possibly-blocked job, which is
+                # exactly the hang above, so fall back to the ONLY safe behaviour:
+                # wait for the adapter's own timeout, as the +30s budget margin
+                # was always designed to do. Disable the grace so this cannot spin.
+                $who = if ($straggler) { $straggler.Preset } else { 'unknown' }
+                Write-Host "[dispatch] Straggler '$who' has no killable child; waiting out its own timeout instead (grace disabled for this round)."
+                $graceSec   = 0
+                $stopReason = ''
+            }
         }
         elseif ($stopReason) { break }
         Start-Sleep -Milliseconds 500
@@ -2626,6 +2697,13 @@ function Invoke-ReviewerDispatch {
                     }
                 }
                 $results[$d.Preset] = $h
+                # Dead-transport decode, parent-side: a coded trailer in the
+                # record promotes Error to the deliberate code so recovery can
+                # key on it; the free-text stays in Warnings/Stderr. Must run
+                # HERE, not in the job's catch -- the job cannot see this
+                # function (see Convert-EraAdapterResultError).
+                $deadCode = Convert-EraAdapterResultError -Result $h
+                if ($deadCode) { $results[$d.Preset].Error = $deadCode }
             }
         } catch {
             $results[$d.Preset] = @{
@@ -2862,6 +2940,108 @@ function Test-EraFallbackNeeded {
     return (($RecoverableCount -gt 0) -and ($UsableCount -eq 0))
 }
 
+function Test-EraStreamFallbackNeeded {
+    <#
+    .SYNOPSIS
+        Should the one bounded fallback re-dispatch run for a dead-transport
+        seat even though the round already has usable reviews?
+    .DESCRIPTION
+        MEASURED 2026-09-11: an agy seat can die -- both in-adapter attempts
+        returning empty MODEL answers behind "stream was interrupted" SYSTEM
+        entries -- while the rest of the panel succeeds. The standard gate
+        above then (correctly, by its own rationale) refuses the fallback and
+        the panel silently shrinks. Same day, same round: an opencode seat
+        can exit -1 with zero stdout bytes (one Read, then silence) -- the
+        same dead-transport class on a different backend.
+
+        This gate covers exactly these cases, and ONLY these: at least one
+        seat failed with a dead-transport code -- `agy-stream-interrupted`
+        (agy backend) or `opencode-no-output` (opencode backend) -- AND the
+        round is otherwise usable. A void round stays owned by the standard
+        gate (which fires on any recoverable failure); any other failure mix
+        without a dead-transport code behaves exactly as before.
+
+        The bounds are inherited, not widened: still ONE fallback dispatch per
+        round, still priced against the fallback preset's per-reviewer cap,
+        still delivery-checked, still disabled by ERA_AGY_FALLBACK=off (the
+        outer gate in era.ps1), and the fallback still runs on the REST
+        transport -- which is the entire point, since the agy transport is the
+        thing that is down.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][int]$StreamInterruptedCount,
+        [int]$OpencodeNoOutputCount = 0,
+        [Parameter(Mandatory)][int]$UsableCount
+    )
+    $deadTransport = ($StreamInterruptedCount -gt 0) -or ($OpencodeNoOutputCount -gt 0)
+    return ($deadTransport -and ($UsableCount -gt 0))
+}
+
+function Convert-EraAdapterResultError {
+    <#
+    .SYNOPSIS
+        Map a collected seat result to a deliberate failure code when its
+        adapter stamped one. Returns the code, or $null.
+    .DESCRIPTION
+        Most adapter exceptions stay free-text (network, auth, bad model id
+        -- things a re-dispatch cannot fix, deliberately excluded from
+        recovery). But an adapter can append a parseable trailer naming a
+        failure whose recovery IS known. Currently one trailer exists:
+
+          [opencode-no-output stdout=N delivery=D]  (opencode.ps1 exit-fail)
+
+        stdout=0 means the model never emitted anything -- the dead-transport
+        class, recoverable via a REST re-dispatch. stdout>0 (died mid-answer)
+        keeps its free-text error: different fact, different recovery.
+
+        Two channels carry one concept ("dead transport -> REST fallback",
+        see Test-EraStreamFallbackNeeded), and they differ on purpose -- do
+        not unify them: opencode throws, so the Stderr trailer is its only
+        channel out; agy returns structured results, so it upgrades its
+        reason in-adapter. A future trailer author registers here, in
+        Convert-EraAdapterResultError, parent-side (the dispatch ThreadJobs
+        cannot see workflow.ps1 functions).
+
+        Runs PARENT-side at result collection: the dispatch ThreadJobs
+        dot-source only their adapter file, so workflow.ps1 functions are
+        not visible inside the job's catch (measured 2026-09-11: calling one
+        from there records "not recognized" INSTEAD of the real error).
+        Matching anchors at the Stderr END, where the adapter put the
+        trailer -- and the in-job truncation preserves head+tail, so a long
+        message keeps it.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][object]$Result)
+    if (-not $Result) { return $null }
+    $text = [string]$Result.Stderr
+    if ([string]::IsNullOrEmpty($text)) { return $null }
+    if ($text -match '\[opencode-no-output stdout=(\d+) delivery=([^\]]+)\]\s*$') {
+        if ([int]$Matches[1] -eq 0) { return 'opencode-no-output' }
+    }
+    return $null
+}
+
+function Get-EraAnsweredBadlyCodes {
+    <#
+    .SYNOPSIS
+        The deliberate failure codes meaning "the bundle WAS reviewed; the
+        answer was rejected". Single source for both classifiers below.
+    .DESCRIPTION
+        Get-EraRecoverableFailures and Get-EraFailureCategory each kept their
+        own literal of this set with a comment promising parity -- and
+        drifted (2026-09-11: 8 codes vs 3). One function, referenced twice.
+        Each code names an ANSWER failure, as opposed to the transport codes
+        ('empty-capture', 'opencode-no-output', 'agy-stream-interrupted', the
+        tmux pair) that mean nothing was reviewed at all.
+    .OUTPUTS
+        [string[]].
+    #>
+    [CmdletBinding()]
+    param()
+    return @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+}
+
 function Get-EraRecoverableFailures {
     <#
     .SYNOPSIS
@@ -2915,8 +3095,18 @@ function Get-EraRecoverableFailures {
     # deliberately ABSENT: a seat that burned its whole budget must not be given
     # another whole budget, which is a defect this repo already fixed once in the
     # tmux design's own terminal conditions.
-    $recoverable = @('response-contract', 'agentic-narration-capture', 'prompt-echo',
-                     'empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated')
+    #
+    # The first three are Get-EraAnsweredBadlyCodes (referenced, not repeated):
+    # a second literal here is how the two lists drifted apart in 2026-09-11.
+    $recoverable = @((Get-EraAnsweredBadlyCodes) +
+                     @('empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated',
+                       # 2026-09-11: an opencode seat that exited -1 with ZERO
+                       # stdout bytes ran but returned no review -- the same
+                       # deliberate-code criterion as the rest of this list.
+                       # Decoded from the adapter's trailer by
+                       # Convert-EraAdapterResultError at result collection;
+                       # free-text opencode exceptions stay excluded.
+                       'opencode-no-output'))
 
     $out = [System.Collections.Generic.List[string]]::new()
     foreach ($r in $ReviewerList) {
@@ -2960,8 +3150,10 @@ function Get-EraFailureCategory {
     param([hashtable]$Result, [bool]$HasArtifact = $false)
     if (-not $Result) { return 'not-delivered' }
     # Deliberate capture-failure codes: the call completed and what came back was
-    # not a review. Same list Get-EraRecoverableFailures uses — keep them in step.
-    $answered = @('response-contract', 'agentic-narration-capture', 'prompt-echo')
+    # not a review. Answered-badly is single-sourced (Get-EraAnsweredBadlyCodes);
+    # the transport codes below intentionally stay 'not-delivered' -- nothing
+    # was reviewed on those paths, which is the opposite fact.
+    $answered = Get-EraAnsweredBadlyCodes
     # A BUNDLE-ACCESS REFUSAL IS NOT AN ANSWER. The detector already worked out
     # which of its three branches fired and put it in NonReviewBranch; this
     # function ignored it and called every agentic-narration-capture
@@ -3763,6 +3955,63 @@ function Get-EraTruncatedText {
     # something longer than what we were given.
     if ($result.Length -ge $Text.Length) { return $Text }
     return $result
+}
+
+function Test-EraRepomixCompleted {
+    <#
+    .SYNOPSIS
+        Did a timed-out repomix run actually finish packing? Pure predicate.
+    .DESCRIPTION
+        MEASURED 2026-09-11 (ebook-pipeline round 3, first attempt): era threw
+        "repomix timed out after 300s" while the partial output showed every
+        phase through "Packing completed successfully!" -- the node process
+        hung at EXIT, after the bundle was written. The retry bundled fine in
+        seconds, so the round died for nothing.
+
+        Adopt requires ALL of: the completion banner in the partial output, a
+        bundle file that exists, is non-empty, and is newer than the repomix
+        start, AND a well-formed tail. The tail check is load-bearing: the
+        banner prints BEFORE the output flush, so a kill between the two
+        leaves banner + fresh + non-empty on a TRUNCATED file -- adopting it
+        would review a fragment in silence (the same silent-truncation class
+        as the opencode 50 KiB cap). The marker is the closing
+        `</instruction>` block: era always sets instructionFilePath on its
+        repomix configs, so every era bundle ends with caller instructions,
+        and a file without that tail did not finish writing.
+    .OUTPUTS
+        [bool].
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$PartialOutput,
+        [Parameter(Mandatory)][string]$BundlePath,
+        [Parameter(Mandatory)][datetime]$SinceUtc
+    )
+    if ([string]::IsNullOrEmpty($PartialOutput)) { return $false }
+    if ($PartialOutput -notlike '*Packing completed successfully*') { return $false }
+    try {
+        $item = Get-Item -LiteralPath $BundlePath -ErrorAction Stop
+        if ($item.Length -le 0) { return $false }
+        if ($item.LastWriteTimeUtc -lt $SinceUtc) { return $false }
+        # Tail check: read only the last 2 KB (never the whole bundle -- this
+        # runs on the already-timed-out path and must stay cheap).
+        $tailBytes = [Math]::Min(2048, $item.Length)
+        $stream = [System.IO.File]::Open($BundlePath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $buf = New-Object byte[] $tailBytes
+            $null = $stream.Seek(-$tailBytes, [System.IO.SeekOrigin]::End)
+            $read = 0
+            while ($read -lt $tailBytes) {
+                $n = $stream.Read($buf, $read, $tailBytes - $read)
+                if ($n -le 0) { break }
+                $read += $n
+            }
+            $tail = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+        } finally { $stream.Dispose() }
+        if ($tail -notlike '*</instruction>*') { return $false }
+    } catch { return $false }
+    return $true
 }
 
 function Measure-EraBroadScope {

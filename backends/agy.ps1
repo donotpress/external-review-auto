@@ -117,6 +117,31 @@ function Find-AgyModelFromHint {
 # _capture-validation.ps1 so both adapters use one battle-tested detector.
 . (Join-Path $PSScriptRoot '_capture-validation.ps1')
 
+function Get-AgyTranscriptBaseline {
+    <#
+    .SYNOPSIS
+        Newest transcript mtime present BEFORE this dispatch spawned, or $null.
+    .DESCRIPTION
+        The liveness poll flags ANY transcript mtime as activity -- including
+        files written by previous sessions long before this dispatch (measured
+        2026-09-11: $lastSeenMtime starts $null, so the first poll treats a
+        stale file as activity and Tier-1 can never fire on a host with agy
+        history). Seeding the seen-mtime from this baseline makes Tier-1
+        reachable again: only growth BEYOND the pre-spawn max counts.
+        A same-tick write could match the baseline and be missed for one poll,
+        but the next write differs -- so this delays detection by one cycle
+        at most, and only in the first seconds.
+    .OUTPUTS
+        [string] the 'O'-format mtime, or $null when no transcripts exist.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$BrainRoot)
+    $latest = Get-ChildItem -Path (Join-Path $BrainRoot '*/.system_generated/logs/transcript*.jsonl') `
+        -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $latest) { return $null }
+    return $latest.LastWriteTime.ToString('O')
+}
+
 function Get-AgyTranscriptResponse {
     <#
     Capture strategies (in priority order):
@@ -226,12 +251,21 @@ function Get-AgyTranscriptResponse {
                 return $null
             }
 
+            # One read per candidate per poll: cache the tails up front so
+            # Pass 1 and Pass 2 scan memory, not disk (was: a full re-read
+            # per pass per poll). Pass ORDER is unchanged -- GUID across ALL
+            # candidates first, path-forms only if no GUID matched anywhere.
+            $cachedTails = @{}
+            foreach ($c in $combined) {
+                $cachedTails[$c.FullName] = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+            }
+
             # Pass 1 (PRIMARY): the GUID is collision-proof. Match it across ALL
             # candidates before considering the (weaker) path-form fallback, so a
             # sibling dispatch sharing the same bundle path can't win on path alone.
             if ($DispatchId) {
                 foreach ($c in $combined) {
-                    $lines = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $lines = $cachedTails[$c.FullName]
                     if (-not $lines) { continue }
                     for ($i = 0; $i -lt $lines.Count; $i++) {
                         if ($lines[$i].Contains($DispatchId)) {
@@ -252,7 +286,7 @@ function Get-AgyTranscriptResponse {
             # the bundle, then return the first PLANNER_RESPONSE after it.
             if ($pathForms.Count -gt 0) {
                 foreach ($c in $combined) {
-                    $lines = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+                    $lines = $cachedTails[$c.FullName]
                     if (-not $lines) { continue }
                     for ($i = 0; $i -lt $lines.Count; $i++) {
                         $hit = $false
@@ -323,6 +357,91 @@ function Get-AgyTranscriptResponse {
         }
     }
     return @{ Response = $null; TranscriptPath = $null; FromFallback = $false; Strategy = $null }
+}
+
+function Get-AgyStreamInterruption {
+    <#
+    .SYNOPSIS
+        Did this dispatch's model stream die interrupted? Returns
+        @{ Interrupted; InterruptionCount; EmptyModelCount; TranscriptPath }.
+    .DESCRIPTION
+        MEASURED 2026-09-11 (ebook-pipeline rounds 1-2: four sessions, two
+        attempts each): agy spawns fine and the prompt reaches the model (the
+        USER entry carries the Run-ID GUID and the bundle path), but EVERY
+        MODEL/PLANNER_RESPONSE is empty (missing or blank content) and each is
+        followed by SYSTEM/ERROR_MESSAGE "Error: The stream was interrupted.
+        Please continue the task you were working on." The transcript poller
+        correctly finds no usable answer, and without this probe the seat
+        reports generic 'stall-or-timeout' -- indistinguishable from a process
+        that never started (bad auth, wrong model, crash).
+
+        The distinction matters because the recovery differs: a process that
+        never started cannot be fixed by re-dispatching, but an interruption
+        loop means the agy TRANSPORT is down for this model while the REST
+        fallback (gemini-api) uses a different transport, so a re-dispatch
+        there can plausibly succeed.
+
+        Interrupted requires BOTH: >=1 post-anchor interruption AND zero
+        non-empty MODEL answers after the anchor. A blip-then-answer is a
+        capture the poller would have found, not a dead seat.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$BrainRoot,
+        [hashtable]$PreExistingSessionDirs = @{},
+        [string]$DispatchId
+    )
+    $none = @{ Interrupted = $false; InterruptionCount = 0; EmptyModelCount = 0; TranscriptPath = $null; SessionDirsSeen = 0 }
+    if (-not $DispatchId -or -not (Test-Path -LiteralPath $BrainRoot)) { return $none }
+
+    $newOnes = Get-ChildItem -LiteralPath $BrainRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { -not $PreExistingSessionDirs.ContainsKey($_.FullName) } |
+        ForEach-Object {
+            Get-ChildItem -Path (Join-Path $_.FullName '.system_generated/logs/transcript_full.jsonl') -ErrorAction SilentlyContinue
+        } |
+        Where-Object { $_ }
+    $existing = Get-ChildItem -Path (Join-Path $BrainRoot '*/.system_generated/logs/transcript_full.jsonl') -ErrorAction SilentlyContinue |
+        Where-Object { $PreExistingSessionDirs.ContainsKey((Split-Path (Split-Path (Split-Path $_.FullName -Parent) -Parent) -Parent)) } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 5
+    $combined = @()
+    if ($newOnes)  { $combined += @($newOnes) }
+    if ($existing) { $combined += @($existing) }
+    $combined = $combined | Where-Object { $_ } | Sort-Object FullName -Unique
+
+    foreach ($c in $combined) {
+        $lines = @(Get-Content -LiteralPath $c.FullName -Tail 5000 -ErrorAction SilentlyContinue)
+        if (-not $lines) { continue }
+        $anchor = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if (-not $lines[$i].Contains($DispatchId)) { continue }
+            try { $entry = $lines[$i] | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            if ($entry.source -like 'USER*' -or $entry.type -eq 'USER_INPUT') { $anchor = $i; break }
+        }
+        if ($anchor -lt 0) { continue }
+        $ints = 0; $empty = 0; $answered = 0
+        for ($j = $anchor + 1; $j -lt $lines.Count; $j++) {
+            try { $entry = $lines[$j] | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+            if ($entry.source -like 'USER*' -or $entry.type -eq 'USER_INPUT') { break }
+            if ($entry.source -eq 'MODEL' -and $entry.type -eq 'PLANNER_RESPONSE') {
+                $text = ''
+                if ($null -ne $entry.content) {
+                    if ($entry.content -is [string]) { $text = $entry.content }
+                    elseif ($entry.content.PSObject.Properties.Name -contains 'text') { $text = [string]$entry.content.text }
+                    else { $text = 'nonstring-content-object' }
+                }
+                if ([string]::IsNullOrWhiteSpace($text)) { $empty++ } else { $answered++ }
+            } elseif ($entry.source -eq 'SYSTEM' -and $entry.type -eq 'ERROR_MESSAGE' -and
+                      ([string]$entry.content -like '*stream was interrupted*')) {
+                $ints++
+            }
+        }
+        if ($ints -gt 0 -and $answered -eq 0) {
+            return @{ Interrupted = $true; InterruptionCount = $ints; EmptyModelCount = $empty; TranscriptPath = $c.FullName; SessionDirsSeen = @($combined).Count }
+        }
+    }
+    $none.SessionDirsSeen = @($combined).Count
+    return $none
 }
 
 function Get-AgyReviewPrompt {
@@ -446,6 +565,9 @@ function _SpawnAndCaptureOnce {
         Get-ChildItem -LiteralPath $brainRoot -Directory -ErrorAction SilentlyContinue |
             ForEach-Object { $preExistingSessionDirs[$_.FullName] = $true }
     }
+    # Transcript liveness baseline, also pre-spawn (see Get-AgyTranscriptBaseline):
+    # anything written after this instant is ours-or-concurrent, never stale.
+    $transcriptBaseline = Get-AgyTranscriptBaseline -BrainRoot $brainRoot
     $dispatchStartUtc = [datetime]::UtcNow
 
     # Launch agy with its OWN private console (NOT inherited). agy is a TUI
@@ -513,7 +635,10 @@ function _SpawnAndCaptureOnce {
     $exitCode        = 0
     $activitySeen    = $false
     $lastActivityTime = [DateTime]::UtcNow
-    $lastSeenMtime   = $null
+    # Seed from the pre-spawn max (see above): without this, a stale
+    # transcript from a previous session reads as activity on the first poll
+    # and Tier-1 is unreachable on any host with agy history.
+    $lastSeenMtime   = $transcriptBaseline
 
     # Adaptive stall tuning (Fix 7). The adapter receives $TimeoutSec
     # (already bundle-scaled by the dispatcher), NOT $BundleTokens. Scale the
@@ -560,14 +685,40 @@ function _SpawnAndCaptureOnce {
                 try { $null = $stderrTask.Wait(1000) } catch {}
                 try { $stderrSink.Flush() } catch {}
                 $stderr = Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue
-                throw "agy showed no transcript activity within ${firstActivitySec}s -- likely failed to start (bad auth, wrong model, or crash). stderr: $stderr"
+                # Skeleton check (2026-09-11 round 3): the process can start far
+                # enough to create session dirs yet never log anything -- not
+                # even the USER entry. Count new session dirs (cheap directory
+                # listing, no file reads) so the retry loop can record whether
+                # agy died before its first write or never started at all.
+                # Best-effort: a diagnostic must never replace the real error.
+                $newDirCount = 0
+                try {
+                    $newDirCount = @((Get-ChildItem -LiteralPath $brainRoot -Directory -ErrorAction Stop |
+                        Where-Object { -not $preExistingSessionDirs.ContainsKey($_.FullName) })).Count
+                } catch {}
+                throw "agy showed no transcript activity within ${firstActivitySec}s -- likely failed to start (bad auth, wrong model, or crash). stderr: $stderr [agy-no-start sessions=$newDirCount]"
             }
 
             # Tier 2: activity previously seen but transcript went stale
             if ($activitySeen -and $idleSec -gt $stallSec) {
                 # Kill($true): tear down the WHOLE tree (see Tier-1 note above).
                 $agyProc.Kill($true)
-                throw "agy stalled -- no transcript activity for ${stallSec}s after initial response began."
+                # Before reporting a generic stall, check whether the transcript
+                # shows the model stream dying interrupted (empty MODEL answers +
+                # "stream was interrupted" SYSTEM entries). That is a different
+                # failure with a different recovery (REST fallback), so it rides
+                # in a parseable trailer the retry loop decodes -- the throw is
+                # this function's only channel back (see R7), and the trailer
+                # keeps plain-string throws meaning exactly what they used to.
+                $evMsg = ''
+                try {
+                    $ev = Get-AgyStreamInterruption -BrainRoot $brainRoot `
+                        -PreExistingSessionDirs $preExistingSessionDirs -DispatchId $dispatchId
+                    if ($ev.Interrupted) {
+                        $evMsg = " [agy-stream-evidence interruptions=$($ev.InterruptionCount) transcript=$($ev.TranscriptPath)]"
+                    }
+                } catch {}
+                throw "agy stalled -- no transcript activity for ${stallSec}s after initial response began.$evMsg"
             }
         }
     } finally {
@@ -606,13 +757,24 @@ function _SpawnAndCaptureOnce {
         -MaxAttempts 3 -DelaySeconds 2
     if ($fb.Response) { $response = $fb.Response; $strategy = $fb.Strategy }
 
+    # No usable answer: probe for the interruption loop so the retry loop can
+    # name the cause. Skipped on success (a capture means the stream lived).
+    $streamEvidence = @{ Interrupted = $false; InterruptionCount = 0; EmptyModelCount = 0; TranscriptPath = $null; SessionDirsSeen = 0 }
+    if (-not $response) {
+        try {
+            $streamEvidence = Get-AgyStreamInterruption -BrainRoot $brainRoot `
+                -PreExistingSessionDirs $preExistingSessionDirs -DispatchId $dispatchId
+        } catch {}
+    }
+
     $sw.Stop()
     return @{
-        Response     = $response
-        ExitCode     = $exitCode
-        Strategy     = $strategy
-        Stderr       = if ($stderrSnapshot) { $stderrSnapshot } else { '' }
-        WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        Response       = $response
+        ExitCode       = $exitCode
+        Strategy       = $strategy
+        Stderr         = if ($stderrSnapshot) { $stderrSnapshot } else { '' }
+        WallClockSec   = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        StreamEvidence = $streamEvidence
     }
 }
 
@@ -759,12 +921,23 @@ function Invoke-AgyReview {
     # and would otherwise kill a retry mid-write). Floor at a sane minimum.
     $perAttemptTimeoutSec = [Math]::Max(30, [int]($TimeoutSec / 2))
 
+    # Deadline sidecar, ONCE per dispatch (not per attempt): our give-up is the
+    # full $TimeoutSec the two half-attempts fit inside. A per-attempt rewrite
+    # would let one seat defer the dispatcher's straggler kill twice, which
+    # Get-EraStragglerDeferral's contract forbids. Lives next to the pid file,
+    # so it is only written when a pid file was requested.
+    if ($PidFile) { try { Set-Content -LiteralPath "$PidFile.deadline" -Value ([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + $TimeoutSec) -ErrorAction SilentlyContinue } catch {} }
+
     # --- Retry loop (≤2 attempts) INSIDE the adapter, pre-write (Fix 3). ---
     $maxAttempts   = 2
     $finalResult   = $null   # the _SpawnAndCaptureOnce result we will write
     $retryCount    = 0
     $retryReason   = $null
     $contentOk     = $false
+    $streamEvidence = $null  # interruption-loop evidence from any failed attempt;
+                             # names the cause AND persists the transcript path.
+    $noStartEvidence = $null # Tier-1 skeleton count from any failed attempt;
+                             # distinguishes never-started from died-silent.
     $firstAttempt  = $null   # preserved discarded-first-attempt audit sub-object;
                              # carries the discarded spend via est_cost_total_usd,
                              # which Write-ReviewMetadata folds into the round total.
@@ -776,14 +949,21 @@ function Invoke-AgyReview {
         # un-caught call meant the single retry healed empty/narration captures but
         # NOT stalls/timeouts, which are the most common historical failures.
         $threwError = $null
+        # Attempt stopwatch: _SpawnAndCaptureOnce's own clock dies with its
+        # throw, so without this every Tier-1/Tier-2 kill records
+        # WallClockSec = 0 and the hung seat vanishes from "Slowest seat"
+        # (workflow.ps1 drops falsy values). Started HERE so the measured
+        # span covers spawn-through-teardown on both paths.
+        $attemptSw = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             $result = _SpawnAndCaptureOnce -BundlePath $BundlePath -PromptPath $PromptPath `
                 -ModelInfo $ModelInfo -TimeoutSec $perAttemptTimeoutSec -ResolvedModelToken $resolvedToken `
                 -PidFile $PidFile
         } catch {
             $threwError = $_.Exception.Message
-            $result = @{ Response = $null; ExitCode = -1; Strategy = $null; Stderr = $threwError; WallClockSec = 0 }
+            $result = @{ Response = $null; ExitCode = -1; Strategy = $null; Stderr = $threwError; WallClockSec = [math]::Round($attemptSw.Elapsed.TotalSeconds, 1) }
         }
+        $attemptSw.Stop()
 
         $resp = $result.Response
         # A bad capture = a thrown stall/timeout, no response at all, OR a captured
@@ -793,6 +973,27 @@ function Invoke-AgyReview {
         $reason = if ($threwError) { 'stall-or-timeout' }
                   elseif (-not $resp) { 'empty-capture' }
                   else { 'agentic-narration-capture' }
+        # Stream-interruption upgrade (2026-09-11): an empty MODEL loop with
+        # "stream was interrupted" SYSTEM entries is a dead agy TRANSPORT, not
+        # a stall and not an empty answer. Evidence arrives two ways -- a
+        # parseable trailer on the Tier-2 throw (the throw is the only channel
+        # back; plain-string throws keep meaning exactly what they used to) or
+        # a StreamEvidence key on a normal null return. Either upgrades a
+        # stall/empty verdict; narration keeps its own code.
+        $threwStream = $null
+        if ($threwError -and $threwError -match '\[agy-stream-evidence interruptions=(\d+) transcript=(.+?)\]\s*$') {
+            $threwStream = @{ Interrupted = $true; InterruptionCount = [int]$Matches[1]; TranscriptPath = $Matches[2].Trim() }
+        }
+        if ($threwError -and $threwError -match '\[agy-no-start sessions=(\d+)\]\s*$' -and $null -eq $noStartEvidence) {
+            $noStartEvidence = [int]$Matches[1]
+        }
+        $attemptStream = $result.StreamEvidence
+        if ((-not $attemptStream) -and $threwStream) { $attemptStream = $threwStream }
+        if ($attemptStream -and $attemptStream.Interrupted -and
+            ($reason -eq 'stall-or-timeout' -or $reason -eq 'empty-capture')) {
+            $reason = 'agy-stream-interrupted'
+        }
+        if ($attemptStream -and $attemptStream.Interrupted) { $streamEvidence = $attemptStream }
 
         if (-not $isBad) {
             # Clean capture -- use it.
@@ -808,6 +1009,13 @@ function Invoke-AgyReview {
             # attempt's spend plus a projected retry would breach the cap.
             if ($null -eq $estInputTokens) {
                 Write-Host "[agy] Skipping retry: the bundle could not be sized, so the replay cannot be priced against this reviewer's `$$perReviewerCap cap. Failing honestly rather than spending blind."
+                # Name the attempt's real cause (mirrors the cap-skip below):
+                # without this the reason stays $null and the failure
+                # defaults to agentic-narration-capture, mislabeling a stall
+                # or an empty capture on the fail-closed path.
+                $finalResult = $result
+                $retryReason = $reason
+                $contentOk   = $false
                 break
             }
             $firstOutTok  = if ($resp) { [int][Math]::Ceiling($resp.Length / 4) } else { 0 }
@@ -864,7 +1072,27 @@ function Invoke-AgyReview {
         $failReason = if ($retryReason) { $retryReason } else { 'agentic-narration-capture' }
         $failWarning = switch ($failReason) {
             'empty-capture'    { 'Captured an empty response (no review found in transcript); retry exhausted or skipped.' }
-            'stall-or-timeout' { 'agy stalled or timed out on every attempt (no usable transcript captured); retry exhausted or skipped.' }
+            'stall-or-timeout' {
+                $base = 'agy stalled or timed out on every attempt (no usable transcript captured); retry exhausted or skipped.'
+                # No-start refinement (2026-09-11 round 3): same code, but the
+                # post-mortem differs -- skeletons mean the process started and
+                # died before its first log write; zero means it never started.
+                if ($null -ne $noStartEvidence) {
+                    if ($noStartEvidence -gt 0) {
+                        "$base Note: $noStartEvidence agy session skeleton(s) were created but nothing was ever logged (started, died before first write)."
+                    } else {
+                        "$base Note: no agy session was created (failed before first write -- auth, model flag, or crash)."
+                    }
+                } else { $base }
+            }
+            'agy-stream-interrupted' {
+                # The transcript path persists here so the next triage does not
+                # need brain forensics: session dir + interruption count are the
+                # whole diagnosis (measured 2026-09-11).
+                $n = if ($streamEvidence) { $streamEvidence.InterruptionCount } else { '?' }
+                $tp = if ($streamEvidence -and $streamEvidence.TranscriptPath) { $streamEvidence.TranscriptPath } else { 'unknown transcript' }
+                "agy model stream was interrupted $n time(s) with no usable answer on every attempt; retry exhausted or skipped. Transcript: $tp"
+            }
             default            { 'Captured agentic-loop narration instead of a review (detector fired); retry exhausted or skipped.' }
         }
         return @{
