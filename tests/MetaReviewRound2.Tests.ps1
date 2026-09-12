@@ -8,6 +8,13 @@ BeforeAll {
     . "$PSScriptRoot/../workflow.ps1"
     . "$PSScriptRoot/../backends/agy.ps1"
 
+    # Hermetic quota: these tests exercise stall/retry/evidence behavior, so
+    # a real exhausted flag on this machine must not reroute them into the
+    # quota fast-fail (see QuotaPreflight.Tests.ps1 for the flag's own tests).
+    # Saved and restored around the file.
+    $script:SavedQuotaOverride = $env:ERA_IGNORE_QUOTA_FLAG
+    $env:ERA_IGNORE_QUOTA_FLAG = '1'
+
     function New-BundleFile {
         param([int]$Chars = 1000)
         $p = Join-Path ([System.IO.Path]::GetTempPath()) ("era-bundle-" + [guid]::NewGuid() + ".xml")
@@ -149,4 +156,9 @@ Describe 'O7/MS1: answered codes single-sourced' -Tag Unit {
             Get-EraFailureCategory -Result @{ ExitCode = -1; Error = $c } | Should -Be 'answered-badly'
         }
     }
+}
+
+AfterAll {
+    if ($null -eq $script:SavedQuotaOverride) { Remove-Item Env:ERA_IGNORE_QUOTA_FLAG -ErrorAction SilentlyContinue }
+    else { $env:ERA_IGNORE_QUOTA_FLAG = $script:SavedQuotaOverride }
 }

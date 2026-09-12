@@ -17,6 +17,13 @@ BeforeAll {
     . (Join-Path $script:SkillRoot 'backends/agy.ps1')
     . (Join-Path $script:SkillRoot 'workflow.ps1')
 
+    # Hermetic quota: these tests exercise stall/evidence behavior, so a real
+    # exhausted flag on this machine must not reroute them into the quota
+    # fast-fail (see QuotaPreflight.Tests.ps1 for the flag's own tests).
+    # Saved and restored around the file.
+    $script:SavedQuotaOverride = $env:ERA_IGNORE_QUOTA_FLAG
+    $env:ERA_IGNORE_QUOTA_FLAG = '1'
+
     function New-StreamSession {
         param([string]$BrainRoot, [string]$RunId, [int]$Interruptions = 3, [bool]$HealthyAnswer = $false)
         $dir = Join-Path $BrainRoot ([guid]::NewGuid().ToString())
@@ -234,4 +241,9 @@ Describe 'Test-EraStreamFallbackNeeded — one targeted re-dispatch for a dead a
         $era | Should -Match 'Test-EraStreamFallbackNeeded'
         ([regex]::Matches($era, '=\s*Invoke-ReviewerDispatch')).Count | Should -Be 2
     }
+}
+
+AfterAll {
+    if ($null -eq $script:SavedQuotaOverride) { Remove-Item Env:ERA_IGNORE_QUOTA_FLAG -ErrorAction SilentlyContinue }
+    else { $env:ERA_IGNORE_QUOTA_FLAG = $script:SavedQuotaOverride }
 }

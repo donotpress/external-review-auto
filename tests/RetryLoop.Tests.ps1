@@ -13,6 +13,13 @@ BeforeAll {
     $script:SkillRoot = Split-Path $PSScriptRoot -Parent
     . (Join-Path $script:SkillRoot 'backends/agy.ps1')
 
+    # Hermetic quota: these tests exercise pre-quota stall/retry behavior, so
+    # a real exhausted flag on this machine must not reroute them into the
+    # quota fast-fail (see QuotaPreflight.Tests.ps1 for the flag's own tests).
+    # Saved and restored around the file.
+    $script:SavedQuotaOverride = $env:ERA_IGNORE_QUOTA_FLAG
+    $env:ERA_IGNORE_QUOTA_FLAG = '1'
+
     function New-Bundle {
         param([int]$Chars = 1000)
         $p = Join-Path ([System.IO.Path]::GetTempPath()) ("era-bundle-" + [guid]::NewGuid() + ".xml")
@@ -193,4 +200,9 @@ Describe 'Invoke-AgyReview — a readable capture from a process that died is no
         $r.ExitCode  | Should -Be 0
         $r.Error     | Should -BeNullOrEmpty
     }
+}
+
+AfterAll {
+    if ($null -eq $script:SavedQuotaOverride) { Remove-Item Env:ERA_IGNORE_QUOTA_FLAG -ErrorAction SilentlyContinue }
+    else { $env:ERA_IGNORE_QUOTA_FLAG = $script:SavedQuotaOverride }
 }

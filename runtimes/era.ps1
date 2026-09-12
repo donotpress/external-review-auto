@@ -2269,8 +2269,10 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # When an agy reviewer fails to produce a usable review (ExitCode != 0) even after
     # its in-adapter retry, re-dispatch to a non-agy fallback so a flaky default
     # reviewer doesn't yield an empty round. Triggers ONLY on an actual agy failure
-    # (healthy runs are byte-identical). Disable with ERA_AGY_FALLBACK=off.
-    if ($env:ERA_AGY_FALLBACK -ne 'off' -and $env:ERA_AGY_FALLBACK -ne '0') {
+    # (healthy runs are byte-identical). Disable with ERA_FALLBACK_PRESET=off
+    # (ERA_AGY_FALLBACK=off still works as the legacy spelling).
+    $fallbackOverride = Get-EraFallbackPresetOverride
+    if ($fallbackOverride -ne 'off' -and $fallbackOverride -ne '0') {
         # Recoverable = a flaky agy capture (the original case) OR an HONEST
         # CAPTURE FAILURE on any backend: the call completed and what came back
         # was not a review. See Get-EraRecoverableFailures for the full list and
@@ -2317,9 +2319,10 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         # The two gates are mutually exclusive (usable==0 vs usable>0).
         $streamFailed = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'agy-stream-interrupted' })
         $opencodeDead = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'opencode-no-output' })
+        $quotaDead = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'agy-quota-exhausted' })
         $standardFire = Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar
         $streamFire = Test-EraStreamFallbackNeeded -StreamInterruptedCount $streamFailed.Count `
-            -OpencodeNoOutputCount $opencodeDead.Count -UsableCount $usableSoFar
+            -OpencodeNoOutputCount $opencodeDead.Count -QuotaExhaustedCount $quotaDead.Count -UsableCount $usableSoFar
         if (-not ($standardFire -or $streamFire)) {
             if ($failedRecoverable.Count -gt 0) {
                 Write-Host ("[era] {0} reviewer(s) failed recoverably ({1}), but the round already has {2} usable review(s); skipping the fallback." -f `
@@ -2334,7 +2337,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
             # $approvedList, so excluding only that list let the fallback
             # resurrect the very reviewer they had just declined to pay for.
             $fallbackExclude = @(@($reviewerList) + @($approvedList) | Sort-Object -Unique)
-            $fallbackPreset = Resolve-EraAgyFallback -Registry $registryHash -Override $env:ERA_AGY_FALLBACK -Exclude $fallbackExclude
+            $fallbackPreset = Resolve-EraAgyFallback -Registry $registryHash -Override $fallbackOverride -Exclude $fallbackExclude
             if ($fallbackPreset) {
                 # Price it. The fallback used to be dispatched with no costing at
                 # all: it never went through Invoke-CostPrompt, so it was an
@@ -2368,7 +2371,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 # In stream mode only the dead-transport seats are being
                 # replaced (the standard gate owns the void round, and the two
                 # gates are mutually exclusive), so name that subset.
-                $replacing = if ($streamFire) { @($streamFailed + $opencodeDead | Sort-Object -Unique) } else { $failedRecoverable }
+                $replacing = if ($streamFire) { @($streamFailed + $opencodeDead + $quotaDead | Sort-Object -Unique) } else { $failedRecoverable }
                 $why = @($replacing | ForEach-Object {
                     $e = if ($results[$_].Error) { $results[$_].Error } else { "exit $($results[$_].ExitCode)" }
                     "$_ ($e)"
@@ -2430,7 +2433,8 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 foreach ($k in $fbResults.Keys) { $results[$k] = $fbResults[$k] }
                 $approvedList = @($approvedList + $fallbackPreset)
             } else {
-                Write-Host "[era] recoverable failure(s) ($($failedRecoverable -join ', ')) but no fallback reviewer is available; leaving the result as-is."
+                $blocker = Get-EraFallbackBlocker -Registry $registryHash -Exclude $fallbackExclude
+                Write-Host "[era] recoverable failure(s) ($($failedRecoverable -join ', ')) but no fallback reviewer is available; leaving the result as-is. To unlock one: $blocker."
             }
         }
     }
@@ -2471,6 +2475,14 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     if (Test-Path -LiteralPath $manifestPath) {
         try { $bundleFileCount = @((Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json).sources).Count } catch {}
     }
+
+    # --- Backend health streaks (circuit breaker) ---------------------------
+    # Fold this round's FINAL results (fallback seats included) into the
+    # machine-scoped streak file: fatal seats increment their backend,
+    # anything else resets it. Best-effort inside (telemetry never fails a
+    # round); failures surface nowhere because there is nothing actionable --
+    # the next round simply re-reads whatever persisted.
+    Update-EraBackendHealth -Results $results -Registry $registryHash
 
     # --- Citation grounding (2026-09-01) -------------------------------------
     # A reviewer was measured citing line 5,891 of a 2,834-line file, twice, in
@@ -2629,6 +2641,12 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     if ($summaryLine) {
         Write-Host $summaryLine
     }
+    # Additive round-health line (one line joining per-seat state, usable
+    # count, and any fallback that ran). The assembled log lines above stay;
+    # this joins them for scanners. A fallback counts as ran when its preset
+    # key is present in the final results map.
+    $fbRan = if ($fallbackPreset -and $results.ContainsKey($fallbackPreset)) { $fallbackPreset } else { $null }
+    Write-Host (Format-EraRoundHealth -Results $results -ReviewerList @($reviewerList) -FallbackPreset $fbRan)
 
     # Reached only on a clean run. The finally block below keeps the repomix
     # config when this is not set, so a failed run leaves a receipt.

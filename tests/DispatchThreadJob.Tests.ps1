@@ -125,6 +125,36 @@ function $fn {
                 OutputTokens = 0; Warnings = @('child was killed'); TruncationWarning = `$null
             }
         }
+        'trailerkill' {
+            # Same shape as 'child', but the unwind returns a trailer-coded
+            # Stderr exactly like the opencode exit-fail path (zero stdout
+            # bytes, model never emitted). The abandon path must decode it
+            # in-band instead of synthesising a generic timeout.
+            `$p = Start-Process -FilePath (Get-Process -Id `$PID).Path ``
+                    -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 900' ``
+                    -PassThru -WindowStyle Hidden
+            if (`$PidFile) { "`$(`$p.Id)" | Set-Content -LiteralPath `$PidFile -Encoding ascii }
+            `$p.WaitForExit()
+            return @{
+                ExitCode = -1; Response = `$null
+                Error = 'fake run failed (exit=-1): boom'
+                ContentOk = `$false; CaptureMethod = 'fake'; WallClockSec = 1
+                OutputTokens = 0; Warnings = @('child was killed'); TruncationWarning = `$null
+                Stderr = 'boom [opencode-no-output stdout=0 delivery=read-tool]'
+            }
+        }
+        'slowtrailer' {
+            # Outlives a 30s budget by 2s, then returns trailer-coded. The
+            # budget abandon path must join (not reap) so this survives.
+            Start-Sleep -Seconds 32
+            return @{
+                ExitCode = -1; Response = `$null
+                Error = 'fake run failed (exit=-1): slow boom'
+                ContentOk = `$false; CaptureMethod = 'fake'; WallClockSec = 32
+                OutputTokens = 0; Warnings = @(); TruncationWarning = `$null
+                Stderr = 'slow boom [opencode-no-output stdout=0 delivery=read-tool]'
+            }
+        }
     }
     "## Issues``n- fake finding from `$(`$ModelInfo.preset)" | Set-Content -LiteralPath `$ResponsePath -Encoding utf8
     return @{
@@ -175,7 +205,8 @@ function $fn {
             [hashtable]$ModelOverrides = @{},
             [hashtable]$ProviderOverrides = @{},
             [hashtable]$AgyModelMap = @{},
-            [string]$ResolvedAgyModel
+            [string]$ResolvedAgyModel,
+            [string]$BackendHealthPath
         )
         $bundle = Join-Path $RootDir 'bundle.xml'; 'BUNDLE' | Set-Content -LiteralPath $bundle
         $prompt = Join-Path $RootDir 'prompt.md'; 'PROMPT' | Set-Content -LiteralPath $prompt
@@ -190,6 +221,7 @@ function $fn {
         }
         if ($SuffixReviewerList) { $splat.SuffixReviewerList = $SuffixReviewerList }
         if ($ResolvedAgyModel)   { $splat.ResolvedAgyModel   = $ResolvedAgyModel }
+        if ($BackendHealthPath)  { $splat.BackendHealthPath  = $BackendHealthPath }
         Invoke-ReviewerDispatch @splat
     }
 }
@@ -622,6 +654,114 @@ Describe 'Invoke-ReviewerDispatch — the straggler grace path, end to end' -Tag
     # dispatcher-level version would pass without exercising the guard, and a
     # faithful one would have to burn the full budget. It is covered directly in
     # StragglerGrace.Tests.ps1 ('never fires on a single-reviewer run').
+}
+
+Describe 'Invoke-ReviewerDispatch — abandon recovers the adapter record in-band (MS6)' -Tag Unit {
+    It 'decodes a trailer-coded failure on the grace path instead of synthesising timeout' {
+        $saved = $env:ERA_STRAGGLER_GRACE_SEC
+        $env:ERA_STRAGGLER_GRACE_SEC = '1'
+        $d = script:New-FakeSkillRoot -DeclarePidFile
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                quick  = @{ backend = 'fake' }
+                doomed = @{ backend = 'fake'; behavior = 'trailerkill' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('quick','doomed') -TimeoutSec 600
+            $res['doomed'].ExitCode | Should -Be -1
+            $res['doomed'].Error    | Should -Be 'opencode-no-output'
+            Test-Path -LiteralPath (Join-Path $d 'review/round-1-doomed-response.md') | Should -BeFalse
+        } finally {
+            $pf = Join-Path $d 'review/round-1-doomed-response.md.pid'
+            if (Test-Path -LiteralPath $pf) {
+                $stray = (Get-Content -Raw -LiteralPath $pf).Trim()
+                if ($stray -match '^\d+$') { Stop-Process -Id ([int]$stray) -Force -ErrorAction SilentlyContinue }
+            }
+            Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+            if ($null -eq $saved) { Remove-Item Env:\ERA_STRAGGLER_GRACE_SEC -ErrorAction SilentlyContinue }
+            else { $env:ERA_STRAGGLER_GRACE_SEC = $saved }
+        }
+    }
+
+    It 'joins before reaping on the budget path (kill, join, Receive, Stop)' {
+        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $join = $src.IndexOf('Wait-EraJobDone -Job $d.Job')
+        $recv = $src.IndexOf('Receive-Job -Job $d.Job', $join)
+        $stop = $src.IndexOf('Stop-Job -Job $d.Job', $recv)
+        $join | Should -BeGreaterThan 0
+        $recv | Should -BeGreaterThan $join
+        $stop | Should -BeGreaterThan $recv
+    }
+}
+
+Describe 'Invoke-ReviewerDispatch — the budget abandon path recovers in-band' -Tag Slow {
+    It 'decodes a trailer-coded failure that lands just past the budget' {
+        $d = script:New-FakeSkillRoot
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                slow = @{ backend = 'fake'; behavior = 'slowtrailer' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('slow') -TimeoutSec 0
+            $res['slow'].ExitCode | Should -Be -1
+            $res['slow'].Error    | Should -Be 'opencode-no-output'
+        } finally {
+            Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Invoke-ReviewerDispatch — circuit breaker skips streak-tripped seats' -Tag Unit {
+    BeforeAll {
+        function script:New-HealthFile {
+            param([hashtable]$Streaks)
+            $p = Join-Path ([System.IO.Path]::GetTempPath()) ("era-health-" + [guid]::NewGuid() + ".json")
+            $h = @{}
+            foreach ($k in $Streaks.Keys) {
+                $h[$k] = @{ consecutive_fatals = $Streaks[$k]
+                             last_ts = ([datetime]::UtcNow.ToString('o'))
+                             last_error = 'stall-or-timeout' }
+            }
+            $h | ConvertTo-Json -Compress | Set-Content -LiteralPath $p -NoNewline
+            return $p
+        }
+    }
+
+    It 'skips the tripped seat without dispatching it, records breaker-skip' {
+        $d = script:New-FakeSkillRoot -Backends @('fake', 'fake2')
+        $hp = script:New-HealthFile -Streaks @{ fake2 = 5 }
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                quick  = @{ backend = 'fake' }
+                doomed = @{ backend = 'fake2' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg `
+                -ReviewerList @('quick', 'doomed') -TimeoutSec 60 -BackendHealthPath $hp
+            $res['quick'].ExitCode  | Should -Be 0
+            $res['doomed'].ExitCode | Should -Be -1
+            $res['doomed'].Error    | Should -Be 'breaker-skip'
+            Test-Path -LiteralPath (Join-Path $d 'review/round-1-doomed-response.md') | Should -BeFalse
+        } finally {
+            Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $hp -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It 'never skips the last seat: dispatches the healthiest tripped backend' {
+        $d = script:New-FakeSkillRoot -Backends @('fake', 'fake2')
+        $hp = script:New-HealthFile -Streaks @{ fake = 9; fake2 = 4 }
+        try {
+            $reg = script:New-FakeRegistry -RecordDir (Join-Path $d 'record') -Presets @{
+                sicker = @{ backend = 'fake' }
+                sick   = @{ backend = 'fake2' }
+            }
+            $res = script:Invoke-FakeDispatch -RootDir $d -Registry $reg `
+                -ReviewerList @('sicker', 'sick') -TimeoutSec 60 -BackendHealthPath $hp
+            $res['sicker'].Error | Should -Be 'breaker-skip'
+            $res['sick'].ExitCode | Should -Be 0
+        } finally {
+            Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $hp -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe 'Invoke-ReviewerDispatch — the global timeout collection path' -Tag Slow {

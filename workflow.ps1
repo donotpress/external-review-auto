@@ -916,6 +916,32 @@ function Stop-EraAdapterChild {
     }
 }
 
+function Wait-EraJobDone {
+    <#
+    .SYNOPSIS
+        Wait, bounded, for a ThreadJob to reach a terminal state.
+    .DESCRIPTION
+        The abandon paths must JOIN before reaping: killing the native child
+        unblocks the adapter, but its finally (forensic snapshot + structured
+        throw/return) still needs a moment. Stop-Job first reaps a record
+        that names the failure precisely (measured 2026-09-11: the opencode
+        exit-fail trailer). Same 20s unwind the grace path already allowed.
+    .OUTPUTS
+        [bool] — $true if the job finished in time.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Job,
+        [int]$TimeoutSec = 20
+    )
+    $doneStates = @('Completed', 'Failed', 'Stopped')
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ($Job.State -notin $doneStates -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 200
+    }
+    return ($Job.State -in $doneStates)
+}
+
 function Get-EraHeartbeatSec {
     <#
     .SYNOPSIS
@@ -1731,6 +1757,62 @@ function Format-EraReviewerList {
     return ($lines -join "`n")
 }
 
+function Get-EraFallbackPresetOverride {
+    <#
+    .SYNOPSIS
+        Effective fallback-preset override: ERA_FALLBACK_PRESET wins, else
+        ERA_AGY_FALLBACK (legacy), else $null. Resolvers injectable for tests.
+    .DESCRIPTION
+        Alias-only by design: four order-sensitive assertions in
+        ResponseContract.Tests.ps1 pin the legacy string in era.ps1, so the
+        old name keeps working forever. New name wins when both are set;
+        blank/whitespace counts as unset. 'off'/'0' pass through untouched --
+        the disable path keys on the resolved value, and an explicit off in
+        either name must survive resolution.
+    #>
+    [CmdletBinding()]
+    param(
+        [scriptblock]$EnvValue = { param($n) [Environment]::GetEnvironmentVariable($n) }
+    )
+    foreach ($name in @('ERA_FALLBACK_PRESET', 'ERA_AGY_FALLBACK')) {
+        $v = & $EnvValue $name
+        if (-not [string]::IsNullOrWhiteSpace([string]$v)) { return ([string]$v).Trim() }
+    }
+    return $null
+}
+
+function Get-EraFallbackBlocker {
+    <#
+    .SYNOPSIS
+        What would unlock a fallback: first preference preset + requirement.
+    .DESCRIPTION
+        Called only when Resolve-EraAgyFallback returned $null, so this names
+        the unblock action instead of repeating the failure. Mirrors the
+        resolver's preference order and its non-agy rule; reports the first
+        preset's requirement (API-key env name, or which CLI must be on
+        PATH). When every preference preset is already in the run (or
+        agy-backed), no in-panel answer exists -- say out-of-panel explicitly
+        rather than naming a requirement the operator cannot satisfy.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][hashtable]$Registry,
+        [string[]]$Exclude = @(),
+        [string[]]$Preference = @('gemini-api', 'deepseek-http', 'sonnet', 'haiku', 'minimax-http', 'nvidia', 'gemini-api-pro')
+    )
+    $cliFor = @{ agy = 'agy'; claude = 'claude'; opencode = 'opencode' }
+    foreach ($p in $Preference) {
+        $e = $Registry[$p]
+        if (-not $e -or -not $e.backend) { continue }
+        if ($Exclude -contains $p) { continue }
+        if ($e.backend -eq 'agy') { continue }
+        if ($e.api_key_env) { return "'$p' needs `$env:$($e.api_key_env)" }
+        $cli = if ($cliFor.ContainsKey($e.backend)) { $cliFor[$e.backend] } else { $e.backend }
+        return "'$p' needs the $cli CLI"
+    }
+    return 'all built-in fallbacks are already in this panel (or agy-backed); pass an out-of-panel preset via ERA_FALLBACK_PRESET'
+}
+
 function Resolve-EraAgyFallback {
     <# Pick a non-agy fallback reviewer when an agy capture fails. Honors an explicit
        $env:ERA_AGY_FALLBACK preset if it is valid, non-agy, and available; otherwise
@@ -1910,6 +1992,40 @@ function Format-EraRoundSummary {
     if ($secs.Count -eq 0) { return $null }
     $max = ($secs | Measure-Object -Maximum).Maximum
     return "Done. Slowest seat: ${max}s | Tokens: $TokenCount"
+}
+
+function Format-EraRoundHealth {
+    <#
+    .SYNOPSIS
+        One round-health line: seats ok, per-seat cause, fallback if one ran.
+    .DESCRIPTION
+        ADDITIVE by design (muse-spark review): the six assembled log lines it
+        summarises stay exactly where they are until proven unparsed. "ok"
+        here means ExitCode 0 (the formal usable-count lives in the void
+        report, which keys on artifacts, not exit codes); anything else shows
+        the seat's Error, or 'unknown' when even that is absent.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][object]$Results,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ReviewerList,
+        [string]$FallbackPreset
+    )
+    $parts = foreach ($r in @($ReviewerList)) {
+        $res = $null
+        if ($Results -is [hashtable]) { $res = $Results[$r] }
+        $state = 'unknown'
+        if ($res) {
+            if ($res.ExitCode -eq 0) { $state = 'ok' }
+            elseif (-not [string]::IsNullOrWhiteSpace([string]$res.Error)) { $state = [string]$res.Error }
+        }
+        "${r}: $state"
+    }
+    $okCount = @(@($ReviewerList) | Where-Object {
+        ($Results -is [hashtable]) -and $Results[$_] -and $Results[$_].ExitCode -eq 0
+    }).Count
+    $fb = if ($FallbackPreset) { "; fallback: $FallbackPreset" } else { '' }
+    return "[era] Round health: $okCount/$(@($ReviewerList).Count) ok ($($parts -join '; '))$fb"
 }
 
 function Get-EraExposureReport {
@@ -2264,7 +2380,12 @@ function Invoke-ReviewerDispatch {
         # bundle on Pro `max` would be killed mid-think. Conservative formula:
         # 20ms per token => ~50 tok/sec, well below first-token rate for Flash
         # but realistic for max-variant reasoning models.
-        [int]$BundleTokens = 0
+        [int]$BundleTokens = 0,
+        # Breaker state file (test seam; production omits it and uses the
+        # machine-scoped default from Get-EraBackendHealthPath). Follows the
+        # injectable-resolver convention: hermetic tests must not read the
+        # operator's real streak file.
+        [string]$BackendHealthPath
     )
     Test-ThreadJobAvailable
 
@@ -2369,7 +2490,27 @@ function Invoke-ReviewerDispatch {
         $TimeoutSec = $effectiveTimeoutSec
     }
     $skillRoot = if ($SkillRootOverride) { $SkillRootOverride } else { $PSScriptRoot }
+    # Circuit breaker: skip seats whose backend is on a fatal streak instead
+    # of burning a full seat budget failing identically. The health file is
+    # machine-scoped (per-topic stores never see cross-topic streaks); a
+    # missing file means no history, i.e. dispatch everything. Skipped seats
+    # get synthetic records merged after collection -- no job, no spend. (The
+    # pre-dispatch cost estimate conservatively still covers them: consent
+    # overstates spend, never understates.)
+    $breakerSkipped = @{}
+    $breakerHealthPath = if ($BackendHealthPath) { $BackendHealthPath } else { Get-EraBackendHealthPath }
+    $breakerHealth = Read-EraBackendHealth -StatePath $breakerHealthPath
+    $breakerPick = Select-EraBreakerSkips -ReviewerList @($ReviewerList) -Registry $Registry -Health $breakerHealth -Threshold 3
+    foreach ($sr in @($breakerPick.Skipped)) {
+        Write-Host ("[dispatch] Skipping '{0}': {1}; not dispatching (no spend)." -f $sr, $breakerPick.Detail[$sr])
+        $breakerSkipped[$sr] = @{
+            Preset = $sr; ExitCode = -1; Response = $null
+            Warnings = @("Skipped by circuit breaker: $($breakerPick.Detail[$sr]). Backend streaks reset on the next success or after 24h.")
+            Error = 'breaker-skip'
+        }
+    }
     $dispatched = foreach ($r in $ReviewerList) {
+        if ($breakerSkipped.ContainsKey($r)) { continue }
         $modelInfo = @{} + $Registry[$r]
         $modelInfo.preset = $r
         # Apply model override if present
@@ -2660,7 +2801,29 @@ function Invoke-ReviewerDispatch {
                 # adapter's WaitForExit return, so Stop-Job has nothing to hang
                 # on. Harmless when there is no child: it returns $false.
                 $null = Stop-EraAdapterChild -PidFile $d.PidPath
+                # Join BEFORE reaping (MS6): the kill unblocks the adapter, but
+                # its finally (forensic snapshot + structured return carrying
+                # any coded trailer) still needs a moment. Reaping first
+                # discards a record that names the failure precisely and
+                # synthesises a generic timeout instead. Bounded by the same
+                # 20s unwind the grace path allows; on expiry fall through to
+                # the synthetic below, exactly as before.
+                $joined = Wait-EraJobDone -Job $d.Job -TimeoutSec 20
+                $abandoned = $null
+                if ($joined) {
+                    try {
+                        $abandoned = @(Receive-Job -Job $d.Job -ErrorAction Stop) |
+                            Where-Object { $_ -is [hashtable] -or $_ -is [System.Management.Automation.PSCustomObject] } |
+                            Select-Object -Last 1
+                    } catch { $abandoned = $null }
+                }
                 Stop-Job -Job $d.Job -ErrorAction SilentlyContinue
+                if ($abandoned) {
+                    $results[$d.Preset] = $abandoned
+                    $deadCode = Convert-EraAdapterResultError -Result $abandoned
+                    if ($deadCode) { $results[$d.Preset].Error = $deadCode }
+                    continue
+                }
                 $why = if ($stopReason -eq 'grace') {
                     "Abandoned after ${graceSec}s grace as the last outstanding reviewer" +
                     " (every other panel member had finished). Raise ERA_STRAGGLER_GRACE_SEC to wait longer."
@@ -2715,6 +2878,7 @@ function Invoke-ReviewerDispatch {
             Remove-Job -Job $d.Job -Force -ErrorAction SilentlyContinue
         }
     }
+    foreach ($sk in $breakerSkipped.Keys) { $results[$sk] = $breakerSkipped[$sk] }
     return $results
 }
 
@@ -2972,9 +3136,10 @@ function Test-EraStreamFallbackNeeded {
     param(
         [Parameter(Mandatory)][int]$StreamInterruptedCount,
         [int]$OpencodeNoOutputCount = 0,
+        [int]$QuotaExhaustedCount = 0,
         [Parameter(Mandatory)][int]$UsableCount
     )
-    $deadTransport = ($StreamInterruptedCount -gt 0) -or ($OpencodeNoOutputCount -gt 0)
+    $deadTransport = ($StreamInterruptedCount -gt 0) -or ($OpencodeNoOutputCount -gt 0) -or ($QuotaExhaustedCount -gt 0)
     return ($deadTransport -and ($UsableCount -gt 0))
 }
 
@@ -3042,6 +3207,170 @@ function Get-EraAnsweredBadlyCodes {
     return @('response-contract', 'agentic-narration-capture', 'prompt-echo')
 }
 
+function Test-EraFatalFailure {
+    <#
+    .SYNOPSIS
+        Did this seat fail in a way that indicts its BACKEND? Pure predicate.
+    .DESCRIPTION
+        The circuit breaker counts consecutive backend-fatal rounds per
+        backend. Fatal = the seat burned budget and returned nothing usable
+        for reasons OUTSIDE the answer: stalls, timeouts, crashes, empty
+        captures, dead-transport codes, quota. NOT fatal = the seat-level
+        flakiness in Get-EraAnsweredBadlyCodes (narration/contract/echo):
+        the backend answered, the seat misbehaved -- no streak.
+        Successes and non-fatal failures both BREAK a streak (the backend
+        demonstrably served or spoke).
+    .OUTPUTS
+        [bool].
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][object]$Result)
+    if (-not $Result -or $Result.ExitCode -eq 0) { return $false }
+    if ($Result.Error -and (Get-EraAnsweredBadlyCodes) -contains $Result.Error) { return $false }
+    return $true
+}
+
+function Get-EraBackendHealthPath {
+    <#
+    .SYNOPSIS
+        Default machine-scoped breaker state file. Single source so the
+        dispatcher and the updater cannot disagree on where streaks live.
+    .DESCRIPTION
+        Machine-scoped deliberately: the streaks that matter (a backend dying
+        once each across three topics) never survive in per-topic round
+        metadata. LOCALAPPDATA persists across reboots and processes;
+        per-entry 24h expiry (on read) bounds stale outages without a janitor.
+    #>
+    [CmdletBinding()]
+    param()
+    return (Join-Path $env:LOCALAPPDATA 'era-backend-health.json')
+}
+
+function Read-EraBackendHealth {
+    <#
+    .SYNOPSIS
+        Backend fatal-streaks, with entries older than 24h forgotten.
+    .DESCRIPTION
+        Fail-OPEN: missing/malformed state returns an empty map (old behavior:
+        dispatch everything). Module: dispatch (file I/O lives here, never in
+        recovery -- see the module-boundaries spec).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$StatePath)
+    $empty = @{}
+    try {
+        $raw = Get-Content -Raw -LiteralPath $StatePath -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+    } catch { return $empty }
+    $out = @{}
+    $cutoff = [datetime]::UtcNow.AddHours(-24)
+    foreach ($p in $raw.PSObject.Properties) {
+        try {
+            $ts = [datetime]$p.Value.last_ts
+            if ($ts -lt $cutoff) { continue }
+            $n = [int]$p.Value.consecutive_fatals
+            if ($n -le 0) { continue }
+            $out[$p.Name] = @{ consecutive_fatals = $n; last_ts = $p.Value.last_ts; last_error = [string]$p.Value.last_error }
+        } catch { continue }
+    }
+    return $out
+}
+
+function Update-EraBackendHealth {
+    <#
+    .SYNOPSIS
+        Fold one round's results into the machine-scoped streak file.
+    .DESCRIPTION
+        Fatal seats (Test-EraFatalFailure) increment their backend's streak;
+        anything else (success OR seat-level flakiness) resets it -- both
+        prove the backend served or spoke. Best-effort write: telemetry must
+        never fail a round, so all errors are swallowed after the attempt.
+        Module: dispatch.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][object]$Results,
+        [Parameter(Mandatory)][hashtable]$Registry,
+        [string]$StatePath = (Get-EraBackendHealthPath)
+    )
+    try {
+        $health = Read-EraBackendHealth -StatePath $StatePath
+        if ($null -eq $Results) { return }
+        $keys = if ($Results -is [hashtable]) { @($Results.Keys) } else { @() }
+        foreach ($k in $keys) {
+            # Registry entries arrive as hashtables or PSCustomObjects
+            # depending on the caller; read defensively either way.
+            $be = $null
+            if ($Registry[$k] -is [hashtable]) { $be = $Registry[$k].backend }
+            elseif ($null -ne $Registry[$k] -and $Registry[$k].PSObject.Properties['backend']) { $be = $Registry[$k].backend }
+            if (-not $be) { continue }
+            $res = $Results[$k]
+            if (Test-EraFatalFailure -Result $res) {
+                $prev = 0
+                if ($health.ContainsKey($be)) { $prev = [int]$health[$be].consecutive_fatals }
+                $health[$be] = @{ consecutive_fatals = ($prev + 1); last_ts = ([datetime]::UtcNow.ToString('o')); last_error = [string]$res.Error }
+            } else {
+                if ($health.ContainsKey($be)) { $health.Remove($be) }
+            }
+        }
+        $dir = Split-Path $StatePath -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop
+        }
+        $health | ConvertTo-Json -Compress -Depth 4 |
+            Set-Content -LiteralPath $StatePath -Encoding utf8 -ErrorAction Stop
+    } catch { }
+}
+
+function Select-EraBreakerSkips {
+    <#
+    .SYNOPSIS
+        Which requested reviewers to skip: backends on a fatal streak.
+    .DESCRIPTION
+        Pure selector (no file I/O; health passed in). Skips reviewers whose
+        backend shows >= Threshold consecutive fatal rounds. NEVER returns all
+        requested reviewers: if every backend tripped, the healthiest (lowest
+        streak, ties to earliest in list) is kept -- a skipped-everything
+        round would void for certainty, while dispatching the least-sick seat
+        can still deliver. Callers log Detail per skipped preset.
+    .OUTPUTS
+        Hashtable @{ Skipped=[string[]]; Detail=[hashtable] }.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$ReviewerList,
+        [Parameter(Mandatory)][hashtable]$Registry,
+        [Parameter(Mandatory)][AllowNull()][hashtable]$Health,
+        [int]$Threshold = 3
+    )
+    $skipped = [System.Collections.Generic.List[string]]::new()
+    $detail = @{}
+    if ($null -eq $Health) { $Health = @{} }
+    foreach ($r in $ReviewerList) {
+        $be = $null
+        if ($Registry[$r] -is [hashtable]) { $be = $Registry[$r].backend }
+        elseif ($null -ne $Registry[$r] -and $Registry[$r].PSObject.Properties['backend']) { $be = $Registry[$r].backend }
+        if (-not $be) { continue }
+        if ($Health.ContainsKey($be) -and [int]$Health[$be].consecutive_fatals -ge $Threshold) {
+            $skipped.Add($r)
+            $detail[$r] = "backend '$be' failed fatally $([int]$Health[$be].consecutive_fatals) consecutive rounds (last: $($Health[$be].last_error))"
+        }
+    }
+    # Never-zero: keep the healthiest tripped seat.
+    if (@($ReviewerList).Count -gt 0 -and @($skipped).Count -ge @($ReviewerList).Count) {
+        $best = $null; $bestStreak = [long]::MaxValue
+        foreach ($r in $ReviewerList) {
+            $be = $null
+            if ($Registry[$r] -is [hashtable]) { $be = $Registry[$r].backend }
+            elseif ($null -ne $Registry[$r] -and $Registry[$r].PSObject.Properties['backend']) { $be = $Registry[$r].backend }
+            $n = if ($be -and $Health.ContainsKey($be)) { [long]$Health[$be].consecutive_fatals } else { 0 }
+            if ($n -lt $bestStreak) { $bestStreak = $n; $best = $r }
+        }
+        if ($best -and $skipped.Contains($best)) { $skipped.Remove($best); $detail.Remove($best) }
+    }
+    return @{ Skipped = @($skipped); Detail = $detail }
+}
+
 function Get-EraRecoverableFailures {
     <#
     .SYNOPSIS
@@ -3098,8 +3427,12 @@ function Get-EraRecoverableFailures {
     #
     # The first three are Get-EraAnsweredBadlyCodes (referenced, not repeated):
     # a second literal here is how the two lists drifted apart in 2026-09-11.
+    # 'breaker-skip' is recoverable so a round voided by skips still gets its
+    # one REST fallback (usually a different pool than the skipped backend);
+    # in usable rounds the standard gate already owns the decision.
     $recoverable = @((Get-EraAnsweredBadlyCodes) +
                      @('empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated',
+                       'breaker-skip',
                        # 2026-09-11: an opencode seat that exited -1 with ZERO
                        # stdout bytes ran but returned no review -- the same
                        # deliberate-code criterion as the rest of this list.

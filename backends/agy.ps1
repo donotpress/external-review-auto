@@ -847,6 +847,36 @@ function Get-AgyBundleBytes {
     }
 }
 
+function Get-AgyQuotaState {
+    <#
+    .SYNOPSIS
+        Is the agy Gemini pool exhausted? Returns @{ Exhausted; RefreshUtc; Reason }.
+    .DESCRIPTION
+        Reads the quota flag file ($env:TEMP/era-agy-quota.json, written by hand
+        or by a /usage-screen probe): {"exhausted": true, "refresh_utc": "..."}.
+        Fail-OPEN throughout -- missing, malformed, non-exhausted, or EXPIRED
+        flags, and ERA_IGNORE_QUOTA_FLAG=1, all report Exhausted=$false and
+        behave exactly as if no flag existed. A corrupt flag must never
+        silently disable seats.
+    .OUTPUTS
+        Hashtable @{ Exhausted=[bool]; RefreshUtc=[object]; Reason=[string] }.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$FlagPath = (Join-Path ([System.IO.Path]::GetTempPath()) 'era-agy-quota.json')
+    )
+    $open = @{ Exhausted = $false; RefreshUtc = $null; Reason = 'no flag' }
+    if ($env:ERA_IGNORE_QUOTA_FLAG -eq '1') { $open.Reason = 'override'; return $open }
+    try {
+        $raw = Get-Content -Raw -LiteralPath $FlagPath -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        if (-not $raw.exhausted) { $open.Reason = 'pool available'; return $open }
+        $ref = [datetime]$raw.refresh_utc
+        if ($ref -le [datetime]::UtcNow) { $open.Reason = 'flag expired'; return $open }
+        return @{ Exhausted = $true; RefreshUtc = $ref; Reason = 'pool exhausted' }
+    } catch { $open.Reason = 'unreadable flag'; return $open }
+}
+
 function Invoke-AgyReview {
     [CmdletBinding()]
     param(
@@ -868,8 +898,46 @@ function Invoke-AgyReview {
         # dispatcher can tree-kill the process if this reviewer has to be
         # abandoned early. Optional: omitted by callers that never abandon.
         # See workflow.ps1 Stop-EraAdapterChild for why Stop-Job cannot do it.
-        [string]$PidFile
+        [string]$PidFile,
+        # Override for the quota flag path (test seam; production omits it and
+        # reads $env:TEMP/era-agy-quota.json). Follows this repo's injectable-
+        # resolver convention rather than touching the dispatcher contract.
+        [string]$QuotaFlagPath
     )
+
+    # --- Quota preflight: fail fast on an empty pool instead of burning a
+    # full stall budget. Scoped to gemini-family presets: the flag records
+    # the GEMINI pool, and a future agy preset serving other-model families
+    # draws on a different pool (the /usage screen groups them separately).
+    $agyFamily = "$($ModelInfo.agy_model_family)"
+    if ($agyFamily -like 'gemini*') {
+        $quotaArgs = @{}
+        if ($QuotaFlagPath) { $quotaArgs['FlagPath'] = $QuotaFlagPath }
+        $quota = Get-AgyQuotaState @quotaArgs
+        if ($quota.Exhausted) {
+            $qMsg = "agy Gemini pool exhausted until $($quota.RefreshUtc) -- skipping dispatch, not burning a ${TimeoutSec}s stall. Delete the flag file or set ERA_IGNORE_QUOTA_FLAG=1 to override."
+            Write-Host "[agy] $qMsg"
+            return @{
+                Response          = $null
+                ExitCode          = -1
+                Error             = 'agy-quota-exhausted'
+                CaptureMethod     = 'polling'
+                CaptureStrategy   = $null
+                ContentOk         = $false
+                RetryCount        = 0
+                RetryReason       = 'agy-quota-exhausted'
+                FirstAttempt      = $null
+                InputTokens       = $null
+                OutputTokens      = 0
+                # 0.0 is HONEST here (nothing was spent -- contrast the
+                # fabricated zero on hung seats that burned budgets).
+                WallClockSec      = 0.0
+                TruncationWarning = $null
+                Stderr            = ''
+                Warnings          = @($qMsg)
+            }
+        }
+    }
 
     # --- Per-session model selection (no settings.json swap, no mutex). ---
     $resolvedToken = $null
