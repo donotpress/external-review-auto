@@ -27,40 +27,52 @@ BeforeAll {
     }
 }
 
-Describe 'New-OpencodeIsolatedState' -Tag Unit {
-    It 'creates share/state dirs and a byte-identical auth copy' {
+Describe 'Get-OpencodeSeatState' -Tag Unit {
+    It 'creates persistent dirs and a byte-identical auth copy' {
         $auth = New-FakeAuth
+        $base = Join-Path $TestDrive 'opstate'
+        $map = Join-Path $TestDrive 'map.json'
         try {
-            $s = New-OpencodeIsolatedState -AuthSource $auth
-            $s.Isolated | Should -BeTrue
+            $s = Get-OpencodeSeatState -Preset 'deepseek-flash' -StateBase $base -AuthSource $auth -MapPath $map
+            $s.Mode | Should -Be 'persistent'
             Test-Path -LiteralPath (Join-Path $s.ShareDir 'opencode/auth.json') | Should -BeTrue
             Test-Path -LiteralPath $s.StateDir | Should -BeTrue
             $src = Get-Content -Raw -LiteralPath $auth
             $dst = Get-Content -Raw -LiteralPath (Join-Path $s.ShareDir 'opencode/auth.json')
             $dst | Should -Be $src
-        } finally {
-            Remove-OpencodeIsolatedState -State $s
-            Remove-Item -LiteralPath $auth -ErrorAction SilentlyContinue
-        }
+            $s.SessionId | Should -BeNullOrEmpty
+        } finally { Remove-Item -LiteralPath $auth -ErrorAction SilentlyContinue }
     }
 
-    It 'fails closed (shared dir) when the auth source is missing' {
-        $s = New-OpencodeIsolatedState -AuthSource (Join-Path $TestDrive 'absent.json')
-        $s.Isolated | Should -BeFalse
+    It 'fails closed to shared when the auth source is missing' {
+        $s = Get-OpencodeSeatState -Preset 'x' `
+            -StateBase (Join-Path $TestDrive 'opstate2') `
+            -AuthSource (Join-Path $TestDrive 'absent.json') `
+            -MapPath (Join-Path $TestDrive 'map2.json')
+        $s.Mode | Should -Be 'shared'
         $s.Reason | Should -Not -BeNullOrEmpty
     }
 
-    It 'removes the whole temp tree on cleanup, tolerates double-remove' {
+    It 'resumes the mapped session id' {
+        $map = Join-Path $TestDrive 'map3.json'
+        Set-OpencodeSessionMap -MapPath $map -Preset 'muse-spark' -SessionId 'ses_abc'
         $auth = New-FakeAuth
         try {
-            $s = New-OpencodeIsolatedState -AuthSource $auth
-            $root = $s.TempRoot
-            Test-Path -LiteralPath $root | Should -BeTrue
-            Remove-OpencodeIsolatedState -State $s
-            Test-Path -LiteralPath $root | Should -BeFalse
-            { Remove-OpencodeIsolatedState -State $s } | Should -Not -Throw
-            { Remove-OpencodeIsolatedState -State $null } | Should -Not -Throw
+            $s = Get-OpencodeSeatState -Preset 'muse-spark' `
+                -StateBase (Join-Path $TestDrive 'opstate3') `
+                -AuthSource $auth -MapPath $map
+            $s.Mode | Should -Be 'persistent'
+            $s.SessionId | Should -Be 'ses_abc'
         } finally { Remove-Item -LiteralPath $auth -ErrorAction SilentlyContinue }
+    }
+
+    It 'removes the whole temp tree on cleanup, tolerates double-remove' {
+        $d = Join-Path $TestDrive 'treegone'
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        Remove-OpencodeIsolatedState -State @{ TempRoot = $d }
+        Test-Path -LiteralPath $d | Should -BeFalse
+        { Remove-OpencodeIsolatedState -State @{ TempRoot = $d } } | Should -Not -Throw
+        { Remove-OpencodeIsolatedState -State $null } | Should -Not -Throw
     }
 }
 
@@ -72,11 +84,51 @@ Describe 'Invoke-OpencodeReview isolates and bypasses the queue' -Tag Unit {
         $script:AdapterSrc | Should -Match "Environment\['XDG_STATE_HOME'\]"
     }
 
-    It 'skips the run-mutex wait when isolated (nothing left to queue on)' {
-        $script:AdapterSrc | Should -Match 'Isolated'
+    It 'skips the run-mutex wait unless fully shared (nothing left to queue on)' {
+        $script:AdapterSrc | Should -Match "Mode -ne 'shared'"
     }
 
     It 'cleans the isolated tree in the existing finally' {
         $script:AdapterSrc | Should -Match 'Remove-OpencodeIsolatedState'
+    }
+}
+
+Describe 'persistent per-preset state (session reuse)' -Tag Unit {
+    It 'round-trips the session map and prunes history to 5' {
+        $map = Join-Path $TestDrive 'session-map.json'
+        Set-OpencodeSessionMap -MapPath $map -Preset 'deepseek-flash' -SessionId 'ses_aaa'
+        foreach ($i in 1..7) {
+            Set-OpencodeSessionMap -MapPath $map -Preset 'deepseek-flash' -SessionId ("ses_$i")
+        }
+        $m = Get-OpencodeSessionMap -MapPath $map
+        $m['deepseek-flash'].current | Should -Be 'ses_7'
+        @($m['deepseek-flash'].history).Count | Should -BeLessOrEqual 5
+    }
+
+    It 'reads empty for missing or malformed maps (cold start, not failure)' {
+        (Get-OpencodeSessionMap -MapPath (Join-Path $TestDrive 'absent.json')).Count | Should -Be 0
+        $bad = Join-Path $TestDrive 'bad.json'
+        '{{{nope' | Set-Content -LiteralPath $bad -NoNewline
+        (Get-OpencodeSessionMap -MapPath $bad).Count | Should -Be 0
+    }
+
+    It 'picks the newest session created after run start, else null' {
+        $json = @'
+[{"id":"ses_old","title":"t","updated":1000,"created":1000},
+ {"id":"ses_new","title":"t","updated":3000,"created":3000}]
+'@
+        Select-OpencodeNewestSession -SessionsJson $json -SinceMs 2000 | Should -Be 'ses_new'
+        Select-OpencodeNewestSession -SessionsJson $json -SinceMs 9999 | Should -BeNullOrEmpty
+        Select-OpencodeNewestSession -SessionsJson 'not json' -SinceMs 0 | Should -BeNullOrEmpty
+    }
+
+    It 'forks the mapped session (private copy, shared parent never mutates)' {
+        $src = Get-Content -Raw "$PSScriptRoot/../backends/opencode.ps1"
+        $src | Should -Match "'--fork'"
+    }
+
+    It 'falls back to a plain cold run when mapping fails' {
+        $src = Get-Content -Raw "$PSScriptRoot/../backends/opencode.ps1"
+        $src | Should -Match 'Get-OpencodeSessionMap'
     }
 }

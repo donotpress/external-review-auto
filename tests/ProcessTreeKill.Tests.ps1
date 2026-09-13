@@ -91,11 +91,17 @@ Describe 'one attempt gets ONE budget, not one budget twice' -Tag Unit {
         $claude = $script:Adapters['claude']
         $claude | Should -Match '\$attemptDeadline\s*=' -Because 'one deadline per attempt'
         $stdinWait = [regex]::Match($claude, '\$stdinCopyTask\.Wait\(([^)]*)\)')
-        $procWait  = [regex]::Match($claude, '\$claudeProc\.WaitForExit\(([^)]*)\)')
-        $stdinWait.Success | Should -BeTrue
-        $procWait.Success  | Should -BeTrue
         $stdinWait.Groups[1].Value | Should -Match 'attemptDeadline'
-        $procWait.Groups[1].Value  | Should -Match 'attemptDeadline'
+        # Every BLOCKING process wait draws from the deadline. A bare
+        # WaitForExit(0) is a non-blocking readiness poll (first-byte
+        # watcher), not a wait -- it spends no budget by construction.
+        $procWaits = [regex]::Matches($claude, '\$claudeProc\.WaitForExit\(([^)]*)\)') |
+            ForEach-Object { $_.Groups[1].Value }
+        @($procWaits).Count | Should -BeGreaterThan 0
+        foreach ($w in $procWaits) {
+            if ($w.Trim() -eq '0') { continue }
+            $w | Should -Match 'attemptDeadline'
+        }
     }
 }
 

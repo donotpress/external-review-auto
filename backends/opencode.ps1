@@ -671,39 +671,176 @@ function Get-OpencodeReviewPrompt {
     })
 }
 
-function New-OpencodeIsolatedState {
+function Get-OpencodeSessionMap {
     <#
     .SYNOPSIS
-        Per-seat opencode state dir (temp XDG_DATA_HOME/XDG_STATE_HOME + auth
-        copy). Returns @{ Isolated; ShareDir; StateDir; TempRoot; Reason }.
+        Preset -> {current, history[]} session map. Missing/malformed = @{}.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$MapPath)
+    try {
+        $raw = Get-Content -Raw -LiteralPath $MapPath -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $out = @{}
+        foreach ($p in $raw.PSObject.Properties) { $out[$p.Name] = $p.Value }
+        return $out
+    } catch { return @{} }
+}
+
+function Set-OpencodeSessionMap {
+    <#
+    .SYNOPSIS
+        Record a preset's current session; cap history at 5. Best-effort.
     .DESCRIPTION
-        Two opencode seats serialize behind Global\era-opencode-run-mutex
-        (measured 616s and 645s queue waits) because they share one SQLite
-        writer. The 2026-08-31 A/B that cleared concurrency tested ~13s runs;
-        long review runs holding the DB for minutes are a different regime
-        that test never covered -- so it does not refute this. Verified on
-        the Windows binary with zero spend: `opencode db path` follows
-        XDG_DATA_HOME elsewhere.
-        Fail-closed: any setup failure returns Isolated=$false and the
-        caller falls back to the shared dir (today's behavior, never a new
-        failure). Auth is copied by content (source may be a symlink) and the
-        whole tree is removed by Remove-OpencodeIsolatedState.
+        History is ids only (server holds the bodies). No CLI delete here:
+        pruning server-side sessions is future work once disk numbers exist;
+        map-only pruning bounds OUR state, and stale ids simply miss on
+        resume (fall back to a fresh session, never fail the round).
     #>
     [CmdletBinding()]
     param(
-        [string]$AuthSource = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.local/share/opencode/auth.json')
+        [Parameter(Mandatory)][string]$MapPath,
+        [Parameter(Mandatory)][string]$Preset,
+        [Parameter(Mandatory)][string]$SessionId
     )
-    $fail = { param($why) return @{ Isolated = $false; ShareDir = $null; StateDir = $null; TempRoot = $null; Reason = $why } }
     try {
-        if (-not (Test-Path -LiteralPath $AuthSource -PathType Leaf)) { return (& $fail 'no auth file') }
-        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("era-oc-" + [guid]::NewGuid().ToString('N'))
-        $share = Join-Path $tmp 'share/opencode'
-        $state = Join-Path $tmp 'state'
+        $map = Get-OpencodeSessionMap -MapPath $MapPath
+        $hist = @()
+        if ($map.ContainsKey($Preset) -and $map[$Preset].history) {
+            $hist = @($map[$Preset].history | Where-Object { $_ -and $_ -ne $SessionId })
+        }
+        $hist = @($SessionId) + @($hist | Select-Object -First 4)
+        $map[$Preset] = @{ current = $SessionId; history = $hist }
+        $dir = Split-Path $MapPath -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) {
+            $null = New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop
+        }
+        $map | ConvertTo-Json -Compress -Depth 4 |
+            Set-Content -LiteralPath $MapPath -Encoding utf8 -ErrorAction Stop
+    } catch { }
+}
+
+function Select-OpencodeNewestSession {
+    <#
+    .SYNOPSIS
+        Newest session id created at/after SinceMs from `session list` JSON.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$SessionsJson,
+        [Parameter(Mandatory)][long]$SinceMs
+    )
+    try {
+        $list = $SessionsJson | ConvertFrom-Json -ErrorAction Stop
+        $best = $null; $bestTs = -1
+        foreach ($s in @($list)) {
+            $ts = 0
+            try { $ts = [long]$s.created } catch { continue }
+            if ($ts -ge $SinceMs -and $ts -gt $bestTs -and $s.id) { $bestTs = $ts; $best = [string]$s.id }
+        }
+        return $best
+    } catch { return $null }
+}
+
+function Get-OpencodeSeatState {
+    <#
+    .SYNOPSIS
+        Where this seat runs: persistent per-preset dirs, else throwaway temp,
+        else shared. Returns @{ Mode; ShareDir; StateDir; TempRoot; SessionId; Reason }.
+    .DESCRIPTION
+        Persistent dirs (LOCALAPPDATA/era-opencode-state/<preset>/) give both
+        isolation (own SQLite writer -- the run-mutex wait is skipped either
+        way a private dir is used) AND continuity (sessions survive across
+        rounds for --fork/--session resume). The map supplies the resume id;
+        absence means cold start. Throwaway temp preserves the old isolation
+        semantics when persistence cannot be set up; shared preserves the old
+        everything. Order is fixed: persistent -> throwaway -> shared.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Preset,
+        [string]$StateBase,
+        [string]$AuthSource,
+        [string]$MapPath
+    )
+    if (-not $StateBase) {
+        $StateBase = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'era-opencode-state'
+    }
+    if (-not $AuthSource) {
+        $AuthSource = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.local/share/opencode/auth.json'
+    }
+    $setupDir = {
+        param($root)
+        $share = Join-Path $root 'share/opencode'
+        $state = Join-Path $root 'state'
         $null = New-Item -ItemType Directory -Path $share -Force -ErrorAction Stop
         $null = New-Item -ItemType Directory -Path $state -Force -ErrorAction Stop
         Copy-Item -LiteralPath $AuthSource -Destination (Join-Path $share 'auth.json') -ErrorAction Stop
-        return @{ Isolated = $true; ShareDir = (Join-Path $tmp 'share'); StateDir = $state; TempRoot = $tmp; Reason = 'ok' }
-    } catch { return (& $fail $_.Exception.Message) }
+        return @{ ShareDir = (Join-Path $root 'share'); StateDir = $state }
+    }
+    $safe = ($Preset -replace '[^A-Za-z0-9-]', '_')
+    try {
+        $proot = Join-Path $StateBase $safe
+        $d = & $setupDir $proot
+        $resume = $null
+        if ($MapPath) {
+            try {
+                $map = Get-OpencodeSessionMap -MapPath $MapPath
+                if ($map.ContainsKey($Preset) -and $map[$Preset].current) {
+                    $resume = [string]$map[$Preset].current
+                }
+            } catch { $resume = $null }
+        }
+        return @{ Mode = 'persistent'; ShareDir = $d.ShareDir; StateDir = $d.StateDir;
+                  TempRoot = $null; SessionId = $resume; Reason = 'ok' }
+    } catch { }
+    try {
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("era-oc-" + [guid]::NewGuid().ToString('N'))
+        $d = & $setupDir $tmp
+        return @{ Mode = 'throwaway'; ShareDir = $d.ShareDir; StateDir = $d.StateDir;
+                  TempRoot = $tmp; SessionId = $null; Reason = 'persistent setup failed; temp isolation' }
+    } catch { }
+    return @{ Mode = 'shared'; ShareDir = $null; StateDir = $null;
+              TempRoot = $null; SessionId = $null; Reason = 'isolation unavailable' }
+}
+
+function Update-OpencodeResumeSession {
+    <#
+    .SYNOPSIS
+        Record this run's session for the next round's --fork resume.
+    .DESCRIPTION
+        Lists sessions in OUR state dir (never the shared one -- XDG vars go
+        on this child's env block, not the process env, because ThreadJobs
+        share one process and $env: writes would leak across concurrent
+        seats), picks the newest created after run start, and updates the
+        topic session map. Best-effort throughout: mapping is an optimization,
+        and its absence just means the next round cold-starts (still isolated).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$OpencodeExe,
+        [Parameter(Mandatory)][AllowNull()][object]$IsoState,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$MapPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Preset,
+        [Parameter(Mandatory)][long]$SinceMs
+    )
+    try {
+        if (-not $IsoState -or -not $IsoState.ShareDir -or -not $IsoState.StateDir) { return }
+        if (-not $OpencodeExe -or -not $MapPath -or -not $Preset) { return }
+        $psi2 = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi2.FileName = $OpencodeExe
+        foreach ($a in @('session', 'list', '-n', '10', '--format', 'json')) { $psi2.ArgumentList.Add($a) }
+        $psi2.UseShellExecute = $false
+        $psi2.CreateNoWindow = $true
+        $psi2.RedirectStandardOutput = $true
+        $psi2.Environment['XDG_DATA_HOME'] = $IsoState.ShareDir
+        $psi2.Environment['XDG_STATE_HOME'] = $IsoState.StateDir
+        $p = [System.Diagnostics.Process]::Start($psi2)
+        if (-not $p.WaitForExit(15000)) { try { $p.Kill($true) } catch {}; return }
+        if ($p.ExitCode -ne 0) { return }
+        $id = Select-OpencodeNewestSession -SessionsJson $p.StandardOutput.ReadToEnd() -SinceMs $SinceMs
+        if ($id) { Set-OpencodeSessionMap -MapPath $MapPath -Preset $Preset -SessionId $id }
+    } catch { }
 }
 
 function Remove-OpencodeIsolatedState {
@@ -875,6 +1012,7 @@ function Invoke-OpencodeReview {
     }
     $prompt = Get-OpencodeReviewPrompt -Mode $(if ($useReadTool) { 'read-tool' } else { 'attach' }) -BundlePath $BundlePath
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $runStartMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $stdFile = [System.IO.Path]::GetTempFileName()
     $errFile = [System.IO.Path]::GetTempFileName()
     $modelId = if ($ModelOverride) { $ModelOverride } else { $ModelInfo.model_id }
@@ -1085,22 +1223,35 @@ function Invoke-OpencodeReview {
     # and be recorded as a plain global timeout. See Resolve-OpencodeRunBudget.
     $runMutex = $null
     $runMutexHeld = $false
-    # Per-seat state isolation: our own SQLite writer means the run lock
-    # below protects nothing for this seat, so an isolated seat skips the
-    # wait entirely (the 616s/645s queue waits this removes). Any setup
-    # failure falls back to the shared dir AND the shared wait -- never a
-    # new failure, always today's behavior. The XDG vars go on the CHILD
-    # env block only (set below at spawn); parent and siblings untouched.
-    $isoState = New-OpencodeIsolatedState
+    # Per-seat state: persistent per-preset dirs (isolation + session reuse),
+    # else throwaway temp dirs (isolation only), else shared (today's wait).
+    # A private SQLite writer means the run lock below protects nothing, so
+    # both private modes skip the wait entirely (the 616s/645s queue waits
+    # this removes). XDG vars go on the CHILD env block only (set below at
+    # spawn); parent and siblings untouched. Any setup failure lands on
+    # shared -- never a new failure, always today's behavior.
+    $seatMapPath = Join-Path (Split-Path $ResponsePath -Parent) 'session-map.json'
+    $seatPreset = if ($ModelInfo.preset) { [string]$ModelInfo.preset } else { 'opencode-seat' }
+    $isoState = Get-OpencodeSeatState -Preset $seatPreset -MapPath $seatMapPath
     $lockBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec -ElapsedSec $sw.Elapsed.TotalSeconds
     $lockWaitMs = $lockBudget.LockWaitMs
-    if ($isoState.Isolated) {
+    if ($isoState.Mode -ne 'shared') {
         # Own SQLite writer: point ONLY this child at it (parent process and
         # sibling seats keep the shared dir). $psi exists already (built
         # above); Environment is per-child.
         $psi.Environment['XDG_DATA_HOME'] = $isoState.ShareDir
         $psi.Environment['XDG_STATE_HOME'] = $isoState.StateDir
-        Write-Host "[opencode] isolated state ready; skipping the run-lock wait (own SQLite writer)."
+        if ($isoState.SessionId) {
+            # Fork, never continue in place: the new round gets the history
+            # as a private copy; concurrent same-preset rounds cannot
+            # interleave one shared session. Missing map = cold start.
+            $psi.ArgumentList.Add('--fork')
+            $psi.ArgumentList.Add('--session')
+            $psi.ArgumentList.Add($isoState.SessionId)
+            Write-Host "[opencode] resuming fork of session $($isoState.SessionId) in persistent state."
+        } else {
+            Write-Host "[opencode] isolated state ready ($($isoState.Mode)); skipping the run-lock wait (own SQLite writer)."
+        }
     } else {
         Write-Host "[opencode] WARNING: isolated-state setup failed ($($isoState.Reason)); sharing the database and waiting the run lock as before."
     try {
@@ -1561,6 +1712,16 @@ stderr bytes     : $($stderr.Length)
     }
 
     $clean | Set-Content -LiteralPath $ResponsePath -Encoding utf8
+    # Session pickup for the NEXT round's resume: newest session in OUR state
+    # dir created after this run started. Best-effort (map update never
+    # throws); skipped entirely on shared mode (no private dir to list).
+    # Runs here -- after success is certain, before return -- so failures
+    # never record a session that produced nothing.
+    if ($isoState.Mode -ne 'shared') {
+        Update-OpencodeResumeSession -OpencodeExe $opencodeExe -IsoState $isoState `
+            -MapPath (Join-Path (Split-Path $ResponsePath -Parent) 'session-map.json') `
+            -Preset $seatPreset -SinceMs $runStartMs
+    }
     return @{
         Response = $clean
         ExitCode = $exitCode
