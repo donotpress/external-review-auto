@@ -224,6 +224,14 @@ function $fn {
         }
         if ($SuffixReviewerList) { $splat.SuffixReviewerList = $SuffixReviewerList }
         if ($ResolvedAgyModel)   { $splat.ResolvedAgyModel   = $ResolvedAgyModel }
+        # Default isolation: the machine-scoped streak file is REAL production
+        # state. Fakes named after real backends ('agy') get skipped during a
+        # genuine outage (measured 2026-09-13: 4 quota fatals red two tests),
+        # and fatal-faking tests otherwise write 'fake' streaks into it for the
+        # 24h TTL to clean. A missing file fails open, and $TestDrive is shared
+        # across calls within one test, so in-test streak accumulation still
+        # works. Explicit -BackendHealthPath (breaker tests) wins.
+        if (-not $BackendHealthPath -and $TestDrive) { $BackendHealthPath = Join-Path $TestDrive 'health.json' }
         if ($BackendHealthPath)  { $splat.BackendHealthPath  = $BackendHealthPath }
         Invoke-ReviewerDispatch @splat
     }
@@ -589,12 +597,7 @@ Describe 'Invoke-ReviewerDispatch — optional params are splatted only when dec
                 'gemini-3.6-flash' = [pscustomobject]@{ high = [pscustomobject]@{ settings_value = 'Gemini 3.6 Flash (High)' } }
                 'gemini-3.1-pro'   = [pscustomobject]@{ low  = [pscustomobject]@{ settings_value = 'Gemini 3.1 Pro (Low)'   } }
             }
-            # Isolated breaker state: the fakes are named 'agy', and the
-            # machine-scoped streak file is real — a genuine agy outage (4
-            # quota fatals, 2026-09-13) skipped these seats and red both
-            # tests. A missing file fails open to empty streaks.
-            $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('flash','pro') -AgyModelMap $map `
-                -BackendHealthPath (Join-Path $d 'health.json')
+            $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('flash','pro') -AgyModelMap $map
             (script:Get-Record -RootDir $d -Preset 'flash').resolvedAgyModel | Should -Be 'Gemini 3.6 Flash (High)'
             (script:Get-Record -RootDir $d -Preset 'pro').resolvedAgyModel   | Should -Be 'Gemini 3.1 Pro (Low)'
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
@@ -608,7 +611,7 @@ Describe 'Invoke-ReviewerDispatch — optional params are splatted only when dec
                 pro   = @{ backend = 'agy'; agy_model_family = 'gemini-3.1-pro';   agy_model_tier = 'low'  }
             }
             $null = script:Invoke-FakeDispatch -RootDir $d -Registry $reg -ReviewerList @('flash','pro') `
-                -ResolvedAgyModel 'User Picked This' -BackendHealthPath (Join-Path $d 'health.json')
+                -ResolvedAgyModel 'User Picked This'
             (script:Get-Record -RootDir $d -Preset 'flash').resolvedAgyModel | Should -Be 'User Picked This'
             (script:Get-Record -RootDir $d -Preset 'pro').resolvedAgyModel   | Should -Be 'User Picked This'
         } finally { Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
