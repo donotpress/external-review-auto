@@ -118,11 +118,16 @@ Describe 'the bundle-size term' -Tag Unit {
 
     BeforeAll {
         $tokens = $null; $errors = $null
-        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-            (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1'), [ref]$tokens, [ref]$errors)
-        $script:SlopeAssign = $ast.FindAll({
-            param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                      $n.Left.Extent.Text -eq '$bundleTokenSlopeSec' }, $true) | Select-Object -First 1
+        $script:SlopeAssign = $null
+        foreach ($wfFile in @((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($wfFile, [ref]$tokens, [ref]$errors)
+            $hit = $ast.FindAll({
+                param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                          $n.Left.Extent.Text -eq '$bundleTokenSlopeSec' }, $true) | Select-Object -First 1
+            if ($hit) { $script:SlopeAssign = $hit; break }
+        }
         # era's rule, read off the source rather than reimplemented.
         function script:Budget { param([int]$Tok, [int]$Ask = 600)
             $floor = 700; $slope = [double]$script:SlopeAssign.Right.Extent.Text

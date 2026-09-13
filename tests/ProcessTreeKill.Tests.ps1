@@ -119,7 +119,7 @@ Describe 'the dispatcher never calls Stop-Job on a job that may be inside WaitFo
 
     BeforeAll { $script:Wf = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
         @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
-            ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
+            ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n" }
 
     It 'tree-kills the child before Stop-Job in the result-collection loop' {
         $loop = $script:Wf.IndexOf('foreach ($d in $dispatched)')
