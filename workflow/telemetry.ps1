@@ -42,7 +42,7 @@ function Resolve-EraAuthJsonKeys {
     # A corrupt file behaves like a missing one (skip), never fails the round:
     # ConvertFrom-Json throws terminating on malformed input, and this runs
     # pre-dispatch where there is nothing to recover with.
-    try { $auth = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction Stop | ConvertFrom-Json }
+    try { $auth = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
     catch { return }
     foreach ($envName in ($ApiKeyEnvs | Where-Object { $_ } | Select-Object -Unique)) {
         if ([Environment]::GetEnvironmentVariable($envName)) { continue }
