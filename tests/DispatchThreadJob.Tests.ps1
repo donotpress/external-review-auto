@@ -17,9 +17,12 @@
 # how the passthrough assertions below observe what the dispatcher actually sent
 # rather than what it looks like it sends.
 #
-# NOTE ON TIMING: one test here takes ~35s. $budgetSec is hardcoded
-# $TimeoutSec + 30, so the global-timeout path cannot be exercised faster than
-# 30s. It is the path that produced case (a); it is worth the wall clock. Every
+# NOTE ON TIMING: the two -Tag Slow tests take ~33s and ~750s respectively.
+# $budgetSec is $TimeoutSec + 30, and both pass -TimeoutSec 0 — which the
+# dispatcher floors to the 700s seat-budget floor, so the global-timeout path
+# runs a 730s budget and cannot be exercised faster (measured 749.97s
+# 2026-09-13; the "~35s" this note used to carry predates the floor). It is
+# the path that produced case (a); it is worth the wall clock. Every
 # other test in this file is sub-second.
 #
 # These are COVERAGE tests over existing behaviour, not TDD-red tests -- they
@@ -769,8 +772,9 @@ Describe 'Invoke-ReviewerDispatch — circuit breaker skips streak-tripped seats
 
 Describe 'Invoke-ReviewerDispatch — the global timeout collection path' -Tag Slow {
     It 'synthesises an honest timeout result for a job that never finishes' {
-        # ~35s: $budgetSec is hardcoded $TimeoutSec + 30, so this path cannot be
-        # exercised faster. It is the path that produced case (a) of the
+        # ~750s (measured 749.97s 2026-09-13): $budgetSec is $TimeoutSec + 30,
+        # but -TimeoutSec 0 floors to the 700s seat-budget floor, so the budget
+        # is 730s and this path cannot be exercised faster. It is the path that produced case (a) of the
         # 2026-08-09 void round -- opus "exceeded its 600s slice of the 600s
         # budget", no response file, and the round still exited 0.
         # No ERA_STRAGGLER_GRACE_SEC games needed: this is a solo run, and the
