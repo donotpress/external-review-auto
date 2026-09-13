@@ -54,7 +54,7 @@ BeforeAll {
     }
 }
 
-Describe 'The dirty-tree gate refuses by default' -Tag Integration {
+Describe 'The dirty-tree gate refuses by default' -Tag 'Integration','Slow' {
     It 'refuses when a tracked file is modified, and says why' {
         $repo = New-RealRepo 'dirty'
         try {
@@ -92,7 +92,7 @@ Describe 'The dirty-tree gate refuses by default' -Tag Integration {
     }
 }
 
-Describe 'The gate stands down when it should' -Tag Integration {
+Describe 'The gate stands down when it should' -Tag 'Integration','Slow' {
     It '-AllowDirtyTree proceeds past the gate' {
         $repo = New-RealRepo 'allow'
         try {
@@ -168,7 +168,7 @@ Describe 'The gate stands down when it should' -Tag Integration {
     }
 }
 
-Describe 'The gate ignores era-owned artifacts even when nothing gitignores them' -Tag Integration {
+Describe 'The gate ignores era-owned artifacts even when nothing gitignores them' -Tag 'Integration','Slow' {
     # 2026-09-08: a freshly staged copy has no .gitignore, so Get-EraGitState's
     # reliance on porcelain (which omits only IGNORED files) made a
     # -PreflightOnly run arm the gate against the next dispatch: era refused on
@@ -326,7 +326,7 @@ Describe 'staged rounds record and verify their origin' {
         } finally { Remove-Item -LiteralPath $r.Dir -Recurse -Force -ErrorAction SilentlyContinue }
     }
 
-    It 'a staged -PreflightOnly round says its origin out loud' -Tag Integration {
+    It 'a staged -PreflightOnly round says its origin out loud' -Tag 'Integration','Slow' {
         # The recipe gitignores .era-origin (it is provenance, not review
         # material), so mirror that here; the gate must stay silent on it.
         $r = New-StagedRepo 'sayit' -OriginHead 'REAL'

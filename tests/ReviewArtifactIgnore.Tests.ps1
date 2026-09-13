@@ -193,7 +193,7 @@ Describe 'The manifest layer agrees with the ignore layer about staging' -Tag Un
     }
 }
 
-Describe 'Bundle contents (real repomix measurement)' -Tag Integration -Skip:(-not $script:HasRepomix) {
+Describe 'Bundle contents (real repomix measurement)' -Tag 'Integration','Slow' -Skip:(-not $script:HasRepomix) {
     It 'default-glob bundle contains NO .external-reviews path' {
         $tmp = Join-Path $env:TEMP "era-ign-glob-$(New-Guid)"
         New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -231,7 +231,7 @@ Describe 'Bundle contents (real repomix measurement)' -Tag Integration -Skip:(-n
     }
 }
 
-Describe 'P6 staged files actually reach the bundle' -Tag Integration -Skip:(-not $script:HasRepomix) {
+Describe 'P6 staged files actually reach the bundle' -Tag 'Integration','Slow' -Skip:(-not $script:HasRepomix) {
     # Measured 2026-08-09: era printed "[era] Staged out-of-repo file for
     # bundling", wrote the staged copy to disk, passed path validation and
     # recorded the file in the manifest -- and the bundle did NOT contain it.

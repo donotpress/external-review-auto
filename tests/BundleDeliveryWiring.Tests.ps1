@@ -76,7 +76,7 @@ BeforeAll {
     }
 }
 
-Describe 'registry ceilings reach the real dispatch path' -Tag Unit {
+Describe 'registry ceilings reach the real dispatch path' -Tag 'Unit','Slow' {
 
     It 'honours max_bundle_bytes from the registry, end to end' {
         # THE REGRESSION TEST. Before the fix this printed the built-in ceiling and
