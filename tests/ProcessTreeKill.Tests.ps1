@@ -50,12 +50,14 @@ Describe 'one attempt gets ONE budget, not one budget twice' -Tag Unit {
         # This is the trap the clamp exists for: Task.Wait(int) and
         # Process.WaitForExit(int) both read a negative millisecond count as
         # Timeout.Infinite. An exhausted budget must fail fast, not hang.
-        Get-ClaudeRemainingMs -Deadline (Get-Date).AddSeconds(-30) | Should -Be 0
-        Get-ClaudeRemainingMs -Deadline (Get-Date).AddMilliseconds(-1) | Should -Be 0
+        # Deadlines are UTC (adapter contract since the 2026-09-13 clock fix:
+        # a local-kind deadline misreads by the whole zone offset).
+        Get-ClaudeRemainingMs -Deadline ([DateTime]::UtcNow.AddSeconds(-30)) | Should -Be 0
+        Get-ClaudeRemainingMs -Deadline ([DateTime]::UtcNow.AddMilliseconds(-1)) | Should -Be 0
     }
 
     It 'returns what is actually left, not the original budget' {
-        $deadline = (Get-Date).AddMilliseconds(2000)
+        $deadline = [DateTime]::UtcNow.AddMilliseconds(2000)
         Start-Sleep -Milliseconds 300
         $left = Get-ClaudeRemainingMs -Deadline $deadline
         $left | Should -BeGreaterThan 0
@@ -65,7 +67,7 @@ Describe 'one attempt gets ONE budget, not one budget twice' -Tag Unit {
     It 'two sequential waits from one deadline cannot exceed the budget' {
         # The invariant the fix encodes: spend it in two places, spend it once.
         $budgetMs = 1500
-        $deadline = (Get-Date).AddMilliseconds($budgetMs)
+        $deadline = [DateTime]::UtcNow.AddMilliseconds($budgetMs)
         $first = Get-ClaudeRemainingMs -Deadline $deadline
         Start-Sleep -Milliseconds 400
         $second = Get-ClaudeRemainingMs -Deadline $deadline
