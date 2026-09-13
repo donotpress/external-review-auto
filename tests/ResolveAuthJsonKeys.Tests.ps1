@@ -20,5 +20,13 @@ Describe 'Resolve-EraAuthJsonKeys' {
         Resolve-EraAuthJsonKeys -ApiKeyEnvs @('ANTHROPIC_API_KEY') -AuthPath $script:fake
         [Environment]::GetEnvironmentVariable('ANTHROPIC_API_KEY') | Should -BeNullOrEmpty
     }
+    It 'treats a malformed auth.json like a missing one (skip, never throw)' {
+        # Live finding, skill-self-review round 1: a corrupt auth.json
+        # propagated ConvertFrom-Json out of a pre-dispatch helper and failed
+        # the round, while a missing file silently skips. Same behavior both.
+        '{ not json' | Set-Content $script:fake
+        { Resolve-EraAuthJsonKeys -ApiKeyEnvs @('OPENCODE_API_KEY') -AuthPath $script:fake } | Should -Not -Throw
+        [Environment]::GetEnvironmentVariable('OPENCODE_API_KEY') | Should -BeNullOrEmpty
+    }
     AfterEach { [Environment]::SetEnvironmentVariable('OPENCODE_API_KEY', $null) }
 }

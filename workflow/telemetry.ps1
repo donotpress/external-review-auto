@@ -39,7 +39,11 @@ function Resolve-EraAuthJsonKeys {
     )
     $map = @{ 'OPENCODE_API_KEY' = 'opencode-go'; 'MINIMAX_API_KEY' = 'minimax'; 'NVIDIA_API_KEY' = 'nvidia' }
     if (-not (Test-Path -LiteralPath $AuthPath)) { return }
-    $auth = Get-Content -LiteralPath $AuthPath -Raw | ConvertFrom-Json
+    # A corrupt file behaves like a missing one (skip), never fails the round:
+    # ConvertFrom-Json throws terminating on malformed input, and this runs
+    # pre-dispatch where there is nothing to recover with.
+    try { $auth = Get-Content -LiteralPath $AuthPath -Raw -ErrorAction Stop | ConvertFrom-Json }
+    catch { return }
     foreach ($envName in ($ApiKeyEnvs | Where-Object { $_ } | Select-Object -Unique)) {
         if ([Environment]::GetEnvironmentVariable($envName)) { continue }
         $prov = $map[$envName]
