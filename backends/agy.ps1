@@ -984,9 +984,16 @@ function Invoke-AgyReview {
         [Math]::Round(($inTok / 1000000.0) * $inPerM + ($outTok / 1000000.0) * $outPerM, 4)
     }
 
-    # Each attempt's hard-deadline is capped to HALF the dispatcher budget so two
-    # attempts fit inside $TimeoutSec (the dispatcher's Wait-Job is TimeoutSec+30
-    # and would otherwise kill a retry mid-write). Floor at a sane minimum.
+    # Each attempt's hard-deadline is capped so the attempts fit inside the
+    # dispatcher budget (its Wait-Job is TimeoutSec+30 and would otherwise
+    # kill a retry mid-write). Attempt 1 takes HALF, unchanged; attempt 2
+    # takes what is actually LEFT (minus a 30s teardown margin, mirroring
+    # the dispatcher's +30): a fast-dying attempt 1 (bad auth, instant
+    # crash) no longer surrenders ~half the budget with it. Floored so a
+    # nearly-exhausted budget fails fast instead of pretending to try, and
+    # capped at TimeoutSec so a retry can never outlive the dispatcher's
+    # wait. The sidecar below still publishes the full TimeoutSec once.
+    $loopSw = [System.Diagnostics.Stopwatch]::StartNew()
     $perAttemptTimeoutSec = [Math]::Max(30, [int]($TimeoutSec / 2))
 
     # Deadline sidecar, ONCE per dispatch (not per attempt): our give-up is the
@@ -1016,6 +1023,14 @@ function Invoke-AgyReview {
         # retryable BAD attempt instead of propagating out of the loop -- the old
         # un-caught call meant the single retry healed empty/narration captures but
         # NOT stalls/timeouts, which are the most common historical failures.
+        # Attempt 2 gets the REMAINING budget (not another fixed half): see the
+        # $loopSw note above. Attempt 1 keeps the fixed half.
+        if ($attempt -gt 1) {
+            $remainingSec = [int]($TimeoutSec - $loopSw.Elapsed.TotalSeconds - 30)
+            if ($remainingSec -lt 30) { $remainingSec = 30 }
+            if ($remainingSec -gt $TimeoutSec) { $remainingSec = $TimeoutSec }
+            $perAttemptTimeoutSec = $remainingSec
+        }
         $threwError = $null
         # Attempt stopwatch: _SpawnAndCaptureOnce's own clock dies with its
         # throw, so without this every Tier-1/Tier-2 kill records

@@ -190,8 +190,22 @@ Describe 'Test-EraFallbackNeeded — recover only when the round would otherwise
     It 'era.ps1 gates the fallback on it, and counts usable the same way the void gate does' {
         $era = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'runtimes/era.ps1')
         $era | Should -Match 'Test-EraFallbackNeeded'
-        # One definition of "usable": the artifact-grounded count from the void report.
-        $gate = $era.IndexOf('Test-EraFallbackNeeded')
-        $era.Substring([Math]::Max(0,$gate-900), 1000) | Should -Match 'Get-EraVoidRoundReport'
+        # Line-anchored (not character-windowed: two comment insertions broke
+        # a 900-char window twice). From the gate call, the artifact-grounded
+        # usable computation must sit within the 40 lines above -- one
+        # definition of "usable" flowing into the gate, not a second one.
+        # (The void-report call itself spans two lines, so match the call,
+        # not a single line containing both halves.)
+        $lines = $era -split "`n"
+        $gateLine = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match 'Test-EraFallbackNeeded -RecoverableCount') { $gateLine = $i; break }
+        }
+        $gateLine | Should -BeGreaterThan 0
+        $found = $false
+        for ($j = [Math]::Max(0, $gateLine - 40); $j -lt $gateLine; $j++) {
+            if ($lines[$j] -match 'Get-EraVoidRoundReport') { $found = $true }
+        }
+        $found | Should -BeTrue
     }
 }

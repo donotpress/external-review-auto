@@ -202,6 +202,52 @@ Describe 'Invoke-AgyReview — a readable capture from a process that died is no
     }
 }
 
+Describe 'Invoke-AgyReview — attempt 2 gets the remaining budget (O5)' -Tag Unit {
+    It 'gives a fast-dying attempt 1''s leftover to the retry instead of another fixed half' {
+        $script:SeenTimeouts = @()
+        Mock _SpawnAndCaptureOnce {
+            param($BundlePath, $PromptPath, $ModelInfo, $TimeoutSec, $ResolvedModelToken, $PidFile)
+            $script:SeenTimeouts += $TimeoutSec
+            if (@($script:SeenTimeouts).Count -eq 1) {
+                Start-Sleep -Milliseconds 1200
+                throw 'agy stalled -- done.'
+            }
+            return @{ Response = $script:GoodReview; ExitCode = 0; Strategy = 'run-id-match'; Stderr = ''; WallClockSec = 1 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        try {
+            $r = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+                -ModelInfo $script:MiCheap -TimeoutSec 600 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+            $r.ContentOk | Should -BeTrue
+            @($script:SeenTimeouts).Count | Should -Be 2
+            $script:SeenTimeouts[0] | Should -Be 300
+            # ~600 - ~1.2 elapsed - 30 margin: far above the old fixed 300.
+            $script:SeenTimeouts[1] | Should -BeGreaterThan 500
+        } finally { Remove-Item -LiteralPath $bundle, $prompt, $resp -ErrorAction SilentlyContinue }
+    }
+
+    It 'floors a nearly-exhausted retry at 30s instead of pretending' {
+        $script:SeenTimeouts = @()
+        Mock _SpawnAndCaptureOnce {
+            param($BundlePath, $PromptPath, $ModelInfo, $TimeoutSec, $ResolvedModelToken, $PidFile)
+            $script:SeenTimeouts += $TimeoutSec
+            if (@($script:SeenTimeouts).Count -eq 1) {
+                Start-Sleep -Milliseconds 1200
+                throw 'agy stalled -- done.'
+            }
+            return @{ Response = $script:GoodReview; ExitCode = 0; Strategy = 'run-id-match'; Stderr = ''; WallClockSec = 1 }
+        }
+        $bundle = New-Bundle 1000; $prompt = New-Tmp; $resp = New-Tmp
+        try {
+            $null = Invoke-AgyReview -BundlePath $bundle -PromptPath $prompt -ResponsePath $resp `
+                -ModelInfo $script:MiCheap -TimeoutSec 40 -ResolvedAgyModel 'Gemini 3.1 Pro (Low)'
+            @($script:SeenTimeouts).Count | Should -Be 2
+            $script:SeenTimeouts[0] | Should -Be 30
+            $script:SeenTimeouts[1] | Should -Be 30
+        } finally { Remove-Item -LiteralPath $bundle, $prompt, $resp -ErrorAction SilentlyContinue }
+    }
+}
+
 AfterAll {
     if ($null -eq $script:SavedQuotaOverride) { Remove-Item Env:ERA_IGNORE_QUOTA_FLAG -ErrorAction SilentlyContinue }
     else { $env:ERA_IGNORE_QUOTA_FLAG = $script:SavedQuotaOverride }

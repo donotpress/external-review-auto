@@ -1259,6 +1259,13 @@ function Invoke-OpencodeReview {
             if ($planSilenceSec -gt $firstTokenSec) {
                 Write-Host "[opencode] First-token deadline raised ${firstTokenSec}s -> ${planSilenceSec}s to match the silence the stall plan already permits (variant=$chosenVariant). Set ERA_OPENCODE_FIRST_TOKEN_SEC to override."
                 $firstTokenSec = $planSilenceSec
+                # O6 DECIDED 2026-09-12: keep the raise. Deleting it would make
+                # Phase 1 strictly redundant with a worse kill label -- but the
+                # r3 forensic (860s silence, correctly attributed) proved the
+                # current labeling works in production, while the deletion's
+                # benefit is code-beauty. Revisit only with FirstByteSec data
+                # showing the raise masks real hangs (metadata now persists
+                # first_byte_sec per seat for exactly this calibration).
             }
         }
         # ...AND RECONCILED DOWNWARD TOO. The block above only ever RAISES
