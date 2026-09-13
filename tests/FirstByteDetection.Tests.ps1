@@ -86,3 +86,35 @@ Describe 'REST attempt timeouts are capped' -Tag Unit {
         }
     }
 }
+
+Describe 'metadata persists first-byte seconds' -Tag Unit {
+    BeforeAll { . "$PSScriptRoot/../workflow.ps1" }
+
+    It 'records first_byte_sec on success when the adapter reports it' {
+        $dir = Join-Path $TestDrive 'meta-fb'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $resp = Join-Path $dir 'round-1-opus-response.md'
+        '# R' | Set-Content -LiteralPath $resp -NoNewline
+        $reg = @{ opus = @{ backend = 'claude'; model_id = 'm'; pricing = @{ input_per_m = 1; output_per_m = 1 } } }
+        Write-ReviewMetadata -ReviewDir $dir -Round 1 -TopicSlug 't' -Mode 'assessment' -BundleTokens 10 `
+            -Results @{ opus = @{ ExitCode = 0; Response = '# R'; OutputTokens = 1; WallClockSec = 5;
+                                   CaptureMethod = 'direct'; FirstByteSec = 12.5 } } `
+            -Registry $reg -ModelOverrides @{} -DeliveryModes @{}
+        $j = Get-Content -Raw -LiteralPath (Join-Path $dir 'round-1-metadata.json') | ConvertFrom-Json
+        @($j.reviewers | Where-Object { $_.preset -eq 'opus' })[0].first_byte_sec | Should -Be 12.5
+    }
+
+    It 'records null when the adapter reports nothing (other backends)' {
+        $dir = Join-Path $TestDrive 'meta-fb2'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $resp = Join-Path $dir 'round-1-opus-response.md'
+        '# R' | Set-Content -LiteralPath $resp -NoNewline
+        $reg = @{ opus = @{ backend = 'claude'; model_id = 'm'; pricing = @{ input_per_m = 1; output_per_m = 1 } } }
+        Write-ReviewMetadata -ReviewDir $dir -Round 1 -TopicSlug 't' -Mode 'assessment' -BundleTokens 10 `
+            -Results @{ opus = @{ ExitCode = 0; Response = '# R'; OutputTokens = 1; WallClockSec = 5;
+                                   CaptureMethod = 'direct' } } `
+            -Registry $reg -ModelOverrides @{} -DeliveryModes @{}
+        $j = Get-Content -Raw -LiteralPath (Join-Path $dir 'round-1-metadata.json') | ConvertFrom-Json
+        @($j.reviewers | Where-Object { $_.preset -eq 'opus' })[0].first_byte_sec | Should -BeNullOrEmpty
+    }
+}
