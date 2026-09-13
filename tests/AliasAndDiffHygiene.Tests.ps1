@@ -102,7 +102,9 @@ Describe 'Canonical promotion follows the caller order, not a vendor name' -Tag 
     }
 
     It 'no longer hardcodes a gemini preference' {
-        $wf = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $wf = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Not -Match "ReviewerList -contains 'gemini'"
     }
 }

@@ -335,7 +335,9 @@ Describe 'Copy-PrimaryResponseAlias — a failed demote is never silent' -Tag Un
     # door and not a blocker -- but the whole point of the demote is that it is
     # the boundary keeping rejected content out of the next round.
     It 'the solo demote warns on failure, exactly as the panel demote does' {
-        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $src = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $i = $src.IndexOf('function Copy-PrimaryResponseAlias')
         $j = $src.IndexOf("`nfunction ", $i + 10)
         $body = $src.Substring($i, $j - $i)

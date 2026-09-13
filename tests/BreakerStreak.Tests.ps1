@@ -94,8 +94,7 @@ Describe 'Select-EraBreakerSkips' -Tag Unit {
         @($s.Skipped).Count | Should -Be 0
     }
 
-    It 'never skips the last seat (dispatches the healthiest instead)' {
-        $health = @{
+    It 'never skips the last seat (dispatches the healthiest instead)' {        $health = @{
             agy      = @{ consecutive_fatals = 9; last_ts = [datetime]::UtcNow.ToString('o'); last_error = 'x' }
             claude   = @{ consecutive_fatals = 5; last_ts = [datetime]::UtcNow.ToString('o'); last_error = 'y' }
             opencode = @{ consecutive_fatals = 3; last_ts = [datetime]::UtcNow.ToString('o'); last_error = 'z' }
@@ -148,5 +147,32 @@ Describe 'era.ps1 maintains streaks around dispatch' -Tag Unit {
     It 'updates health after dispatch returns' {
         $era = Get-Content -Raw "$PSScriptRoot/../runtimes/era.ps1"
         $era | Should -Match 'Update-EraBackendHealth'
+    }
+}
+
+Describe 'breaker output hygiene (2026-09-13 incident)' -Tag Unit {
+    BeforeAll {
+        $script:RegH = @{
+            gemini = @{ backend = 'agy' }
+            opus   = @{ backend = 'claude' }
+        }
+    }
+
+    It 'returns a single hashtable even when un-skipping the last seat' {
+        # List/Dictionary .Remove() return [bool]; uncast, the output rode
+        # the return stream, the caller got an array, and Detail[$null]
+        # crashed the dispatch instead of skipping a seat.
+        $health = @{
+            agy    = @{ consecutive_fatals = 3; last_ts = [datetime]::UtcNow.ToString('o'); last_error = 'x' }
+            claude = @{ consecutive_fatals = 7; last_ts = [datetime]::UtcNow.ToString('o'); last_error = 'y' }
+        }
+        $r = Select-EraBreakerSkips -ReviewerList @('gemini', 'opus') -Registry $script:RegH `
+            -Health $health -Threshold 3
+        $r.GetType().Name | Should -Be 'Hashtable'
+        @($r.Skipped).Count | Should -Be 1
+    }
+
+    It 'does not count a breaker skip as a fatal (a skip is no evidence)' {
+        Test-EraFatalFailure -Result @{ ExitCode = -1; Error = 'breaker-skip' } | Should -BeFalse
     }
 }

@@ -167,7 +167,9 @@ Describe 'era.ps1 passes the repomix patterns to both walks' -Tag Unit {
         $script:EraSrc | Should -Match 'Write-ReviewManifest[^\r\n]*[\s\S]{0,400}?-IgnorePatterns'
     }
     It 'Measure-EraBroadScope shares the extracted matcher rather than parsing patterns itself' {
-        $wf = Get-Content -Raw (Join-Path $script:Root 'workflow.ps1')
+        $wf = (@((Join-Path $script:Root 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $i = $wf.IndexOf('function Measure-EraBroadScope')
         $body = $wf.Substring($i, 4000)
         $body | Should -Match 'Get-EraIgnoreSets'
@@ -361,7 +363,9 @@ Describe 'Test-EraOwnReviewArtifact — one definition of "this is era output"' 
     }
 
     It 'is the only definition — both walks call it rather than inlining the regex' {
-        $wf = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $wf = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $calls = [regex]::Matches($wf, 'Test-EraOwnReviewArtifact -Path')
         $calls.Count | Should -BeGreaterOrEqual 2 -Because 'Get-ReviewDiff and Write-ReviewManifest both need it'
         # The inline copies are gone. Anchored on the guard shape, not on the

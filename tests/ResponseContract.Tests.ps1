@@ -150,9 +150,13 @@ Describe 'era.ps1 enforces the contract at the dispatcher layer' -Tag Unit {
     }
 
     It 'marks a contract failure the same way opencode marks a bad capture' {
-        # The marking lives in workflow.ps1's Assert-EraResponseContract, which
-        # era.ps1 calls at two points (see the fallback test below).
-        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        # The marking lives in Assert-EraResponseContract (now in
+        # workflow/recovery.ps1 post-split), which era.ps1 calls at two
+        # points (see the fallback test below). Read loader + modules.
+        $paths = @((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $wf = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Match "response-contract"
         $wf | Should -Match 'ExitCode\s*=\s*-1'
         $wf | Should -Match 'ContentOk\s*=\s*\$false'

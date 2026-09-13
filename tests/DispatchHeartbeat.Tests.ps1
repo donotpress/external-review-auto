@@ -100,7 +100,9 @@ Describe 'the loop actually calls the heartbeat' -Tag Unit {
     It 'wires both functions into the dispatch poll loop' {
         # The pure functions above are worthless if the loop still has its own
         # inline copy -- the standing hazard in this repo. Pin the call sites.
-        $src  = Get-Content -Raw (Join-Path $script:Root 'workflow.ps1')
+        $src  = (@((Join-Path $script:Root 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $code = [regex]::Replace($src, '(?s)<#.*?#>', '')
         $code | Should -Match 'Get-EraHeartbeatSec\s+-EnvValue\s+\$env:ERA_HEARTBEAT_SEC'
         $code | Should -Match 'Test-EraHeartbeatDue\s+-ElapsedSec'
@@ -113,7 +115,9 @@ Describe 'the loop actually calls the heartbeat' -Tag Unit {
     It 'names which seats are outstanding, not just how many' {
         # "2 running" does not tell a post-mortem whether the expensive seat was
         # one of them. The seat names are the part worth having.
-        $src  = Get-Content -Raw (Join-Path $script:Root 'workflow.ps1')
+        $src  = (@((Join-Path $script:Root 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $code = [regex]::Replace($src, '(?s)<#.*?#>', '')
         $code | Should -Match 'still running: \{4\}'
         $code | Should -Match '\$_\.Preset'

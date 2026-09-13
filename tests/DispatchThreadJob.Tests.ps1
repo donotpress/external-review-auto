@@ -683,7 +683,10 @@ Describe 'Invoke-ReviewerDispatch — abandon recovers the adapter record in-ban
     }
 
     It 'joins before reaping on the budget path (kill, join, Receive, Stop)' {
-        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $paths = @((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $join = $src.IndexOf('Wait-EraJobDone -Job $d.Job')
         $recv = $src.IndexOf('Receive-Job -Job $d.Job', $join)
         $stop = $src.IndexOf('Stop-Job -Job $d.Job', $recv)

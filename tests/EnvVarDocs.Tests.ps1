@@ -20,9 +20,13 @@
 BeforeAll {
     $script:SkillRoot = Split-Path $PSScriptRoot -Parent
 
-    # Every ERA_* var the shipped code actually reads.
+    # Every ERA_* var the shipped code actually reads: the loader plus every
+    # module (post-split functions live in workflow/*.ps1 -- scanning only
+    # workflow.ps1 would blind the lock to every moved read).
     $script:CodeVars = @(
         @('workflow.ps1') +
+        (Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+            ForEach-Object { "workflow/$($_.Name)" }) +
         (Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'runtimes') -Filter '*.ps1' -File |
             ForEach-Object { "runtimes/$($_.Name)" }) +
         (Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'backends') -Filter '*.ps1' -File |

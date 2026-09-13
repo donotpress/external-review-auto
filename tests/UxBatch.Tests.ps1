@@ -103,7 +103,10 @@ Describe 'Get-EraFallbackBlocker' -Tag Unit {
 }
 Describe 'blocker mirrors the resolver preference order' -Tag Unit {
     It 'lists the same preference defaults (drift breaks the hint)' {
-        $src = Get-Content -Raw "$PSScriptRoot/../workflow.ps1"
+        $paths = @("$PSScriptRoot/../workflow.ps1") +
+            @(Get-ChildItem -LiteralPath "$PSScriptRoot/../workflow" -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $listOf = {
             param($fnName)
             $start = $src.IndexOf("function $fnName")

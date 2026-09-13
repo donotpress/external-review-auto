@@ -105,7 +105,10 @@ Describe 'era.ps1 emits receipt, transitions, and ping' -Tag Unit {
     }
 
     It 'announces seat finishes from the dispatch poll loop' {
-        $wf = Get-Content -Raw "$PSScriptRoot/../workflow.ps1"
+        $paths = @("$PSScriptRoot/../workflow.ps1") +
+            @(Get-ChildItem -LiteralPath "$PSScriptRoot/../workflow" -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $wf = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Match 'Get-EraNewlyDone'
     }
 }

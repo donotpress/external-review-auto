@@ -282,7 +282,9 @@ Describe 'Get-EraPreviousRoundText — one definition of "the previous round"' -
 Describe 'both consumers share it' -Tag Unit {
     BeforeAll {
         $root = Split-Path $PSScriptRoot -Parent
-        $script:Wf  = Get-Content -Raw (Join-Path $root 'workflow.ps1')
+        $script:Wf  = (@((Join-Path $root 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $root 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $script:Era = Get-Content -Raw (Join-Path $root 'runtimes/era.ps1')
     }
 

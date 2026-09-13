@@ -275,7 +275,9 @@ Describe 'the delivery gate after the 2026-09-01 design panel' -Tag Unit {
         $p = Get-EraBundleDeliveryPlan -ReviewerList @('a') -Registry $reg -BundleBytes 99000000 -BundleTokens 20000000
         $p.OverCount | Should -Be 0
 
-        $src = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $src = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match "A DERIVED CEILING MAY NOT REFUSE"
         # Whitelist, not blacklist: `-eq 'derived'` let any future Kind refuse
         # while the comment promised it could not.
@@ -336,7 +338,9 @@ Describe 'the two claims the audit panel made that were not acted on at the time
 
     BeforeAll {
         $script:EraSrc4 = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
-        $script:WfSrc4  = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $script:WfSrc4  = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
     }
 
     It 'has no UNSORTED hashtable-key loop left in either agy resolver' {

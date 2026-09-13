@@ -35,17 +35,25 @@ BeforeAll {
     $script:Root = Split-Path $PSScriptRoot -Parent
     . (Join-Path $script:Root 'workflow.ps1')
     . (Join-Path $script:Root 'backends/opencode.ps1')
-    $script:Src = Get-Content -Raw (Join-Path $script:Root 'workflow.ps1')
+    $script:Src = (@((Join-Path $script:Root 'workflow.ps1')) +
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+            ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
 
     # The dispatcher's rule, read off the source it is implemented in rather than
     # reimplemented here -- the standing hazard in this repo is two copies of one
-    # rule, and this file would be the second.
+    # rule, and this file would be the second. Post-split the assignment lives
+    # in a module, so parse loader + modules and take the first hit.
     $tokens = $null; $errors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-        (Join-Path $script:Root 'workflow.ps1'), [ref]$tokens, [ref]$errors)
-    $script:FloorAssign = $ast.FindAll({
-        param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
-                  $n.Left.Extent.Text -eq '$seatBudgetFloorSec' }, $true) | Select-Object -First 1
+    $script:FloorAssign = $null
+    foreach ($wfFile in @((Join-Path $script:Root 'workflow.ps1')) +
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+            ForEach-Object { $_.FullName })) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($wfFile, [ref]$tokens, [ref]$errors)
+        $hit = $ast.FindAll({
+            param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and
+                      $n.Left.Extent.Text -eq '$seatBudgetFloorSec' }, $true) | Select-Object -First 1
+        if ($hit) { $script:FloorAssign = $hit; break }
+    }
 }
 
 Describe 'the seat budget floor' -Tag Unit {
@@ -176,7 +184,9 @@ Describe 'the bundle-size term' -Tag Unit {
     It 'does not announce itself on a round where the bundle bought nothing' {
         # Additive means every bundle raises the number, so an unconditional line
         # would print on every round.
-        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $src = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match 'if \(\$effectiveTimeoutSec -ge \(\$TimeoutSec \+ 60\)\)'
     }
 }

@@ -84,7 +84,10 @@ Describe 'claim-check receipt' -Tag Unit {
 
 Describe 'dispatcher runs claim-check per delivered seat' -Tag Unit {
     It 'poll loop invokes the probe for newly delivered seats' {
-        $src = Get-Content -Raw "$PSScriptRoot/../workflow.ps1"
+        $paths = @("$PSScriptRoot/../workflow.ps1") +
+            @(Get-ChildItem -LiteralPath "$PSScriptRoot/../workflow" -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match 'claim-check\.ps1'
     }
 }

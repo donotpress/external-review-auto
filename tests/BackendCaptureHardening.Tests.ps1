@@ -164,7 +164,9 @@ It 'Phase 1 throw message includes firstTokenSec and "possible limit/popup block
 
 Describe 'Convergence guardrail functions exist in workflow.ps1' {
     BeforeAll {
-        $script:WF = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $script:WF = (@((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
     }
 
     It 'Test-ConvergenceDivergence is defined' {

@@ -86,7 +86,9 @@ Describe 'Get-EraStragglerDeferral' -Tag Unit {
 }
 
 Describe 'dispatcher honors the sidecar on grace expiry' -Tag Unit {
-    BeforeAll { $script:DispatchSrc = Get-Content -Raw "$PSScriptRoot/../workflow.ps1" }
+    BeforeAll { $script:DispatchSrc = (@("$PSScriptRoot/../workflow.ps1") +
+        @(Get-ChildItem -LiteralPath "$PSScriptRoot/../workflow" -Filter '*.ps1' -File |
+            ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
 
     It 'consults Get-EraStragglerDeferral before tree-killing a lone straggler' {
         $script:DispatchSrc | Should -Match 'Get-EraStragglerDeferral'

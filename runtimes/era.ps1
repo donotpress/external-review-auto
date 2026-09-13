@@ -149,7 +149,15 @@ param(
     # NOTE: -Full was previously declared but never read by any code path.
     # Removed in 2026-05-27 cleanup. Use -Diff to opt into diff-bundling on
     # round 2+; absence of -Diff produces the full bundle (default behavior).
+    # SUPERSEDED 2026-09-12 for the default: round >= 2 with a usable prior
+    # goes differential automatically (see Test-EraFollowUpRound); -Diff is
+    # now redundant but accepted, -FullBundle forces full.
     [switch]$Diff,
+    # Differential follow-ups by default (2026-09-12): round >= 2 with a
+    # usable prior round goes differential unless this forces full. This is
+    # also the close-out mechanism: verdict rounds that must see everything
+    # pass -FullBundle. See Test-EraFollowUpRound for the truth table.
+    [switch]$FullBundle,
     # PR 4: -AutoDetect derives candidate -IncludeFiles from git status + HEAD~1.
     # Additive with -IncludeFiles: if both are passed, the resulting list is the
     # union. Intended for human callers; LLM callers should use -IncludeFiles
@@ -1323,7 +1331,9 @@ Be terse. If a section is empty, write "(none)".
     # coerce a System.Collections.Hashtable into the [switch] param type, producing
     # "Cannot convert 'System.Collections.Hashtable' to 'SwitchParameter'".
     # Use $diffResult for the local to preserve the param binding.
-    $isFollowUp = $priorRound -ge 1 -and $Diff.IsPresent
+    $isFollowUp = Test-EraFollowUpRound -Round $round `
+        -FullBundlePresent $FullBundle.IsPresent `
+        -PriorUsable (Test-EraPriorRoundUsable -ReviewDir $reviewDir -PriorRound $priorRound)
     # Does this round stage out-of-repo subjects? Needed BEFORE the -Diff branch,
     # because the deletions-only early return below is the very case where a
     # previous round's staged subjects silently vanish, and it returns before the
@@ -1356,10 +1366,11 @@ Be terse. If a section is empty, write "(none)".
                 $stagedWarning = Get-EraStagedSubjectWarning -DeletedPaths @($diffResult.Deleted) -StagingInPlay $stagingInPlay
                 if ($stagedWarning) { Write-Host $stagedWarning }
             }
-            Write-Host "[era] No files changed since round $priorRound. Omit -Diff to force a full re-bundle."
+            Write-Host "[era] No files changed since round $priorRound. Pass -FullBundle to force a full re-bundle."
             return
         }
         if ($diffResult) {
+            $fullIncludeForFallback = $effectiveInclude
             $effectiveInclude = [array]$diffResult.BundleFiles
             # Every reviewer, not just the promoted one. This used to read the
             # canonical alone, so a -Diff follow-up on the shipped three-model
@@ -1368,7 +1379,22 @@ Be terse. If a section is empty, write "(none)".
             # same aggregation {{PREVIOUS_ROUND}} uses, so the two cannot drift:
             # it is in-flight-aware, skips demoted *.rejected.md answers, and
             # honours ERA_PREVIOUS_ROUND_MAX_CHARS.
-            $priorResponse = Get-EraPreviousRoundText -ReviewDir $reviewDir -PreviousRound $priorRound
+            # Criticals-truncation guard: a differential round that cannot
+            # carry the prior round's critical findings would review blind
+            # (truncated findings read as converged). Fail closed to a full
+            # bundle -- fetched once here and reused below, so no double read
+            # and no duplicate truncation line.
+            $critDropped = $false
+            $priorResponseForDiff = Get-EraPreviousRoundText -ReviewDir $reviewDir `
+                -PreviousRound $priorRound -CriticalsDropped ([ref]$critDropped)
+            if ($critDropped) {
+                Write-Host "[era] Prior-round criticals exceed the carry cap; falling back to a full bundle for round $round."
+                $diffResult = $null
+                $effectiveInclude = $fullIncludeForFallback
+            }
+        }
+        if ($diffResult) {
+            $priorResponse = $priorResponseForDiff
             # Empty when the caller's own {{PREVIOUS_ROUND}} already put the panel
             # in the prompt -- otherwise Merge-EraDiffPrompt concatenates panel
             # onto panel, up to 160 KB of duplicated prior-round text per reviewer.
@@ -1679,7 +1705,7 @@ Be terse. If a section is empty, write "(none)".
         # bundle-relative line numbers on large bundles — observed on BOTH
         # correct and incorrect claims. True per-file numbers in the bundle +
         # the citation instruction in the prompt templates kill the artifact.
-        output = @{ filePath = $bundlePath; style = 'xml'; showLineNumbers = $true; instructionFilePath = $promptPath; headerText = if ($isFollowUp) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
+        output = @{ filePath = $bundlePath; style = 'xml'; showLineNumbers = $true; instructionFilePath = $promptPath; headerText = if ($isFollowUp -and $diffResult) { "Diff bundle for $TopicSlug round $round (delta from round $priorRound)" } else { "Full bundle for $TopicSlug round $round" } }
         include = $effectiveInclude
         ignore = @{
             useGitignore = $false
@@ -2123,7 +2149,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
 
     $approvedList = Invoke-CostPrompt -ReviewerList $reviewerList -PerReviewerCosts $perReviewerCosts -PerReviewerCaps $perReviewerCaps -AggregateCost $aggregateCost -AggregateCap 15.0
 
-    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns -ReviewersRequested $reviewerList
+    Write-ReviewManifest -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug -PreviousRound $(if ($isFollowUp -and $diffResult) { $priorRound } else { $null }) -Files @($bundlePath, $promptPath) -SourceFiles $effectiveInclude -RepoRoot $repoRoot -GitState $eraGitState -IgnorePatterns $repomixIgnorePatterns -ReviewersRequested $reviewerList
 
     Write-Host "Round $round. Reviewer(s): $($approvedList -join ', ')."
 

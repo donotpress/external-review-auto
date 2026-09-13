@@ -136,7 +136,12 @@ Describe 'The grace path never calls Stop-Job on a possibly-blocked job' -Tag Un
     # dispatcher; abandonment must go through the child kill, and must NOT
     # happen at all when there is no killable child.
     It 'abandons via Stop-EraAdapterChild, conditionally on the kill succeeding' {
-        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        # Post-split: dispatch logic lives in workflow/*.ps1 -- read loader
+        # plus modules, not the loader alone.
+        $paths = @((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match "if \(\`$straggler\) \{ \`$killed = Stop-EraAdapterChild -PidFile"
         $src | Should -Match 'if \(\$killed\) \{'
         # And when it cannot kill, it disables the grace rather than abandoning.
@@ -163,7 +168,10 @@ Describe 'The grace path never calls Stop-Job on a possibly-blocked job' -Tag Un
 
 Describe 'The dispatcher no longer hard-blocks on all jobs' -Tag Unit {
     It 'uses the poll loop rather than a blocking Wait-Job over the job array' {
-        $src = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')
+        $paths = @((Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         # The old shape held the round for the entire budget.
         $src | Should -Not -Match 'Wait-Job -Job \$allJobs -Timeout'
         $src | Should -Match 'Test-EraStragglerExpired -ElapsedSec'

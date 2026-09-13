@@ -101,7 +101,9 @@ Describe 'Get-EraFallbackBundleOverrides' -Tag Unit {
 
 Describe 'the dispatcher and era agree on how a seat picks its bundle' -Tag Unit {
 
-    BeforeAll { $script:WfSrc = Get-Content -Raw (Join-Path $script:Root 'workflow.ps1')
+    BeforeAll { $script:WfSrc = (@((Join-Path $script:Root 'workflow.ps1')) +
+                    @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+                        ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
                 $script:EraSrc = Get-Content -Raw (Join-Path $script:Root 'runtimes/era.ps1') }
 
     It 'has ONE implementation of the seat-bundle lookup' {

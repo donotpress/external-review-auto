@@ -131,7 +131,9 @@ Describe 'Pattern/parser contract' -Tag Unit {
         # era's artifact dir is always at the repo root, and the staging
         # carve-out enumerates root-relative siblings. Prefixing it would leave a
         # nested tree ignored with no staging exception.
-        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $wf = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Match "'\.external-reviews/\*\*'"
         $wf | Should -Not -Match "'\*\*/\.external-reviews/\*\*'"
     }

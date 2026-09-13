@@ -553,7 +553,10 @@ Describe 'Test-EraCaptureAcceptable rejects an empty capture' -Tag Unit {
     }
 
     It 'empty-capture is in the recoverable set, so the bounded fallback can fire' {
-        $src = Get-Content -Raw -LiteralPath (Join-Path $script:SkillRoot 'workflow.ps1')
+        $paths = @((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match "'empty-capture'"
     }
 

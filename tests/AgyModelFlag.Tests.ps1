@@ -5,7 +5,9 @@
 BeforeAll {
     $script:SkillRoot   = Split-Path $PSScriptRoot -Parent
     $script:AgySource   = Get-Content -Raw (Join-Path $script:SkillRoot 'backends/agy.ps1')
-    $script:WorkflowSrc = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+    $script:WorkflowSrc = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+        @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+            ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
     $script:EraSource   = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
 }
 

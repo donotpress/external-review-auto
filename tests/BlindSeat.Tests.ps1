@@ -122,7 +122,9 @@ Describe '-BlindSeat wiring' -Tag Unit {
 
     BeforeAll {
         $script:EraSrc = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
-        $script:WfSrc  = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $script:WfSrc  = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
     }
 
     It 'gives ONE seat an alternate bundle and leaves the others on the normal one' {

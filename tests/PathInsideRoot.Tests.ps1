@@ -68,7 +68,9 @@ Describe 'era.ps1 uses the predicate, not a bare StartsWith' -Tag Unit {
     }
 
     It 'has no boundary-less StartsWith($RepoRoot) left in workflow.ps1' {
-        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $wf = (@((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Not -Match 'StartsWith\(\$RepoRoot'
     }
 }

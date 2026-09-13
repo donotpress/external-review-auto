@@ -41,15 +41,23 @@ BeforeAll {
 
     # The try/catch that guards the CreateNew claim, from the AST rather than
     # from a regex over the source. A grep for the type name would pass against a
-    # clause in a comment, or one in an unrelated function.
+    # clause in a comment, or one in an unrelated function. Post-split the
+    # function lives in a module: parse loader + modules, first hit wins.
     $tokens = $null; $errors = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
-        $script:WorkflowPath, [ref]$tokens, [ref]$errors)
-    $script:ParseErrors = $errors
+    $script:ParseErrors = @()
+    $fn = $null
+    foreach ($wfFile in @($script:WorkflowPath) +
+        @(Get-ChildItem -LiteralPath (Join-Path $script:Root 'workflow') -Filter '*.ps1' -File |
+            ForEach-Object { $_.FullName })) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $wfFile, [ref]$tokens, [ref]$errors)
+        $script:ParseErrors += @($errors)
+        $hit = $ast.FindAll({
+            param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                      $n.Name -eq 'Reserve-ReviewRound' }, $true) | Select-Object -First 1
+        if ($hit) { $fn = $hit; break }
+    }
 
-    $fn = $ast.FindAll({
-        param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                  $n.Name -eq 'Reserve-ReviewRound' }, $true) | Select-Object -First 1
     $script:Fn = $fn
 
     $script:ClaimTry = if ($fn) {

@@ -146,7 +146,12 @@ Describe 'O7/MS1: answered codes single-sourced' -Tag Unit {
     }
 
     It 'both classifiers reference the single source' {
-        $src = Get-Content -Raw "$PSScriptRoot/../workflow.ps1"
+        # Post-split: the classifiers live in workflow/*.ps1, so read the
+        # loader plus every module, not the loader alone.
+        $paths = @("$PSScriptRoot/../workflow.ps1") +
+            @(Get-ChildItem -LiteralPath "$PSScriptRoot/../workflow" -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $src = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $src | Should -Match 'Get-EraAnsweredBadlyCodes'
         ([regex]::Matches($src, 'Get-EraAnsweredBadlyCodes')).Count | Should -BeGreaterThan 2
     }

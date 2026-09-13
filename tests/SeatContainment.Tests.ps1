@@ -204,7 +204,9 @@ Describe 'Compare-EraSeatContainment documents what it cannot see' -Tag Unit {
     # explanation, this fails and they have to decide deliberately.
     It 'says it sees writes only, and names reads as invisible' {
         $skillRoot = Split-Path $PSScriptRoot -Parent
-        $src = Get-Content -Raw -LiteralPath (Join-Path $skillRoot 'workflow.ps1')
+        $src = (@((Join-Path $skillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $skillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName }) | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $fn  = [regex]::Match($src, '(?s)function Compare-EraSeatContainment \{.*?\n\}').Value
         $fn | Should -Not -BeNullOrEmpty -Because 'the function must exist to be documented'
         $fn | Should -Match 'READING|reads'

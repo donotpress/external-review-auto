@@ -32,7 +32,7 @@ BeforeAll {
         $repo  = Join-Path $root 'repo'
         $null = New-Item -ItemType Directory -Path $skill, $repo -Force
 
-        foreach ($item in @('workflow.ps1','runtimes','backends','config')) {
+        foreach ($item in @('workflow.ps1','workflow','runtimes','backends','config')) {
             Copy-Item -LiteralPath (Join-Path $script:SkillRoot $item) -Destination $skill -Recurse -Force
         }
 

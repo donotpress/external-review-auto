@@ -99,7 +99,10 @@ Describe 'era.ps1 repomix guard' -Tag Unit {
         $src | Should -Match 'Invoke-EraRepomix'
         # The kill itself is Process.Kill($true) — the same invariant
         # tests/ProcessTreeKill.Tests.ps1 asserts for every backend adapter.
-        $wf = Get-Content -Raw (Join-Path $script:SkillRoot 'workflow.ps1')
+        $paths = @((Join-Path $script:SkillRoot 'workflow.ps1')) +
+            @(Get-ChildItem -LiteralPath (Join-Path $script:SkillRoot 'workflow') -Filter '*.ps1' -File |
+                ForEach-Object { $_.FullName })
+        $wf = ($paths | ForEach-Object { Get-Content -Raw -LiteralPath $_ }) -join "`n"
         $wf | Should -Match '\.Kill\(\$true\)'
         $wf | Should -Not -Match '(?m)^\s*\$proc\.Kill\(\)\s*$'
     }
