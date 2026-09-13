@@ -48,7 +48,14 @@ function Get-ClaudeRemainingMs {
     #>
     [CmdletBinding()]
     param([Parameter(Mandatory)][datetime]$Deadline)
-    $ms = ($Deadline - (Get-Date)).TotalMilliseconds
+    # UTC on both sides, deliberately. .NET DateTime relational operators and
+    # subtraction compare raw Ticks IGNORING Kind: on a UTC-5 box
+    # [DateTime]::UtcNow is 18,000s ahead of (Get-Date), so a (Get-Date) "now"
+    # against a UTC deadline (or vice versa) misreads the budget by the whole
+    # zone offset. Measured 2026-09-13: every claude seat died in ~1s labelled
+    # a 708s timeout, because Wait-ClaudeFirstByte compared UtcNow against a
+    # (Get-Date)-built deadline. All era deadlines in this adapter are UTC.
+    $ms = ($Deadline - [DateTime]::UtcNow).TotalMilliseconds
     if ($ms -lt 0) { return 0 }
     return [int][Math]::Ceiling($ms)
 }
@@ -259,7 +266,10 @@ function Invoke-ClaudeReview {
     # Get-ClaudeRemainingMs, so stdin drain + process wait share the budget
     # instead of each getting a full copy of it. See Get-ClaudeRemainingMs for
     # the 2.03x measurement that motivated this.
-    $attemptDeadline = (Get-Date).AddSeconds($attemptTimeoutSec)
+    # UTC, to match Wait-ClaudeFirstByte / Get-ClaudeRemainingMs (see the Kind
+    # note there): a (Get-Date) deadline compared against UtcNow reads expired
+    # by the whole zone offset on any non-UTC box and fake-times-out the seat.
+    $attemptDeadline = [DateTime]::UtcNow.AddSeconds($attemptTimeoutSec)
     $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
