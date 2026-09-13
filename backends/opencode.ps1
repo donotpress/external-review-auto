@@ -671,6 +671,55 @@ function Get-OpencodeReviewPrompt {
     })
 }
 
+function New-OpencodeIsolatedState {
+    <#
+    .SYNOPSIS
+        Per-seat opencode state dir (temp XDG_DATA_HOME/XDG_STATE_HOME + auth
+        copy). Returns @{ Isolated; ShareDir; StateDir; TempRoot; Reason }.
+    .DESCRIPTION
+        Two opencode seats serialize behind Global\era-opencode-run-mutex
+        (measured 616s and 645s queue waits) because they share one SQLite
+        writer. The 2026-08-31 A/B that cleared concurrency tested ~13s runs;
+        long review runs holding the DB for minutes are a different regime
+        that test never covered -- so it does not refute this. Verified on
+        the Windows binary with zero spend: `opencode db path` follows
+        XDG_DATA_HOME elsewhere.
+        Fail-closed: any setup failure returns Isolated=$false and the
+        caller falls back to the shared dir (today's behavior, never a new
+        failure). Auth is copied by content (source may be a symlink) and the
+        whole tree is removed by Remove-OpencodeIsolatedState.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$AuthSource = (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.local/share/opencode/auth.json')
+    )
+    $fail = { param($why) return @{ Isolated = $false; ShareDir = $null; StateDir = $null; TempRoot = $null; Reason = $why } }
+    try {
+        if (-not (Test-Path -LiteralPath $AuthSource -PathType Leaf)) { return (& $fail 'no auth file') }
+        $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("era-oc-" + [guid]::NewGuid().ToString('N'))
+        $share = Join-Path $tmp 'share/opencode'
+        $state = Join-Path $tmp 'state'
+        $null = New-Item -ItemType Directory -Path $share -Force -ErrorAction Stop
+        $null = New-Item -ItemType Directory -Path $state -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $AuthSource -Destination (Join-Path $share 'auth.json') -ErrorAction Stop
+        return @{ Isolated = $true; ShareDir = (Join-Path $tmp 'share'); StateDir = $state; TempRoot = $tmp; Reason = 'ok' }
+    } catch { return (& $fail $_.Exception.Message) }
+}
+
+function Remove-OpencodeIsolatedState {
+    <#
+    .SYNOPSIS
+        Best-effort removal of the isolated tree. Never throws.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowNull()][object]$State)
+    try {
+        if ($State -and $State.TempRoot -and (Test-Path -LiteralPath $State.TempRoot)) {
+            Remove-Item -LiteralPath $State.TempRoot -Recurse -Force -ErrorAction Stop
+        }
+    } catch { }
+}
+
 function Invoke-OpencodeReview {
     [CmdletBinding()]
     param(
@@ -1036,8 +1085,24 @@ function Invoke-OpencodeReview {
     # and be recorded as a plain global timeout. See Resolve-OpencodeRunBudget.
     $runMutex = $null
     $runMutexHeld = $false
+    # Per-seat state isolation: our own SQLite writer means the run lock
+    # below protects nothing for this seat, so an isolated seat skips the
+    # wait entirely (the 616s/645s queue waits this removes). Any setup
+    # failure falls back to the shared dir AND the shared wait -- never a
+    # new failure, always today's behavior. The XDG vars go on the CHILD
+    # env block only (set below at spawn); parent and siblings untouched.
+    $isoState = New-OpencodeIsolatedState
     $lockBudget = Resolve-OpencodeRunBudget -TimeoutSec $TimeoutSec -ElapsedSec $sw.Elapsed.TotalSeconds
     $lockWaitMs = $lockBudget.LockWaitMs
+    if ($isoState.Isolated) {
+        # Own SQLite writer: point ONLY this child at it (parent process and
+        # sibling seats keep the shared dir). $psi exists already (built
+        # above); Environment is per-child.
+        $psi.Environment['XDG_DATA_HOME'] = $isoState.ShareDir
+        $psi.Environment['XDG_STATE_HOME'] = $isoState.StateDir
+        Write-Host "[opencode] isolated state ready; skipping the run-lock wait (own SQLite writer)."
+    } else {
+        Write-Host "[opencode] WARNING: isolated-state setup failed ($($isoState.Reason)); sharing the database and waiting the run lock as before."
     try {
         $runMutex = [System.Threading.Mutex]::new($false, 'Global\era-opencode-run-mutex')
         try { $runMutexHeld = $runMutex.WaitOne($lockWaitMs) }
@@ -1064,6 +1129,7 @@ function Invoke-OpencodeReview {
     } catch {
         Write-Host "[opencode] WARNING: could not create the run mutex ($($_.Exception.Message)); starting unserialised."
     }
+    }  # end shared-dir mutex wait (isolated seats skip the block above)
 
     # WHAT IS LEFT AFTER THE QUEUE, not a fresh copy of the original budget.
     # $deadline below is started at process launch -- i.e. after the wait above --
@@ -1355,6 +1421,10 @@ function Invoke-OpencodeReview {
             if ($runMutexHeld) { try { $runMutex.ReleaseMutex() } catch {} }
             try { $runMutex.Dispose() } catch {}
         }
+        # Isolated tree removal belongs with the mutex release: both are
+        # per-seat resources held across the run. Best-effort; a leftover
+        # temp dir costs disk, never correctness (fresh GUID per seat).
+        Remove-OpencodeIsolatedState -State $isoState
     }
 
     if ($exitCode -ne 0 -or -not $clean) {

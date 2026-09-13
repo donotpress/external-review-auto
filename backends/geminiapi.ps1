@@ -88,8 +88,15 @@ function Invoke-GeminiapiReview {
     $captureError = $null
 
     try {
+        # Per-attempt ceiling: REST endpoints answer in seconds (measured:
+        # gemini-api fallback delivered in 32.5s on a 179k-token bundle), so
+        # an endpoint silent past 180s is hung, not thinking. Without the cap
+        # a hung endpoint burns the whole seat TimeoutSec per attempt times
+        # MaximumRetryCount below. Floor at 60s so small explicit budgets are
+        # still honored rather than silently raised.
+        $attemptTimeoutSec = [Math]::Max(60, [Math]::Min($TimeoutSec, 180))
         $resp = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers `
-                                  -TimeoutSec $TimeoutSec -MaximumRetryCount 2 `
+                                  -TimeoutSec $attemptTimeoutSec -MaximumRetryCount 2 `
                                   -RetryIntervalSec 3 -ErrorAction Stop
 
         # --- Extract text response ---

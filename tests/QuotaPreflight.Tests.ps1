@@ -118,15 +118,8 @@ Describe 'quota-exhausted joins the dead-transport gate' -Tag Unit {
             Should -Be 'not-delivered'
     }
 
-    It 'fires the targeted fallback inside an otherwise usable round' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -OpencodeNoOutputCount 0 `
-            -QuotaExhaustedCount 1 -UsableCount 2 | Should -BeTrue
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -OpencodeNoOutputCount 0 `
-            -QuotaExhaustedCount 0 -UsableCount 2 | Should -BeFalse
-    }
-
-    It 'era.ps1 passes the quota count' {
+    It 'era.ps1 counts quota deaths for the dead-transport gate' {
         $era = Get-Content -Raw "$PSScriptRoot/../runtimes/era.ps1"
-        $era | Should -Match 'QuotaExhaustedCount'
+        $era | Should -Match "'agy-quota-exhausted'"
     }
 }

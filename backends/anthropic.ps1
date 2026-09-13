@@ -80,8 +80,14 @@ function Invoke-AnthropicReview {
     $captureError = $null
 
     try {
+        # Per-attempt ceiling: REST endpoints answer in seconds, so an endpoint
+        # silent past 180s is hung, not thinking (same rationale as
+        # geminiapi.ps1: without the cap a hung endpoint burns the whole seat
+        # TimeoutSec per attempt times MaximumRetryCount below). Floor at 60s
+        # so small explicit budgets are honored rather than silently raised.
+        $attemptTimeoutSec = [Math]::Max(60, [Math]::Min($TimeoutSec, 180))
         $resp = Invoke-RestMethod -Uri $url -Method Post -Body $body -Headers $headers `
-                                  -TimeoutSec $TimeoutSec -MaximumRetryCount 2 `
+                                  -TimeoutSec $attemptTimeoutSec -MaximumRetryCount 2 `
                                   -RetryIntervalSec 3 -ErrorAction Stop
 
         # Capture real usage metrics

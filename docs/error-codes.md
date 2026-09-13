@@ -15,6 +15,7 @@ are NOT catalogued: they are diagnostics, not decisions.
 | `stall-or-timeout` | No usable transcript; process stalled or budget spent | Fallback when round void (agy) / retry inside adapter | adapter throw |
 | `agy-stream-interrupted` | Model stream died interrupted on every attempt (transcript forensics) | Dead-transport fallback (REST), even in usable rounds | `Get-AgyStreamInterruption` + throw trailer |
 | `opencode-no-output` | Exit -1 with zero stdout bytes (model never emitted) | Dead-transport fallback (REST), even in usable rounds | Stderr trailer → `Convert-EraAdapterResultError` at collection |
+| `claude-no-output` | First-byte deadline tripped with zero stdout bytes (model never emitted) | Dead-transport fallback (REST), even in usable rounds | Stderr trailer → `Convert-EraAdapterResultError` at collection |
 | `agy-quota-exhausted` | Gemini pool flag says empty; never dispatched | Dead-transport fallback (REST), even in usable rounds | `Get-AgyQuotaState` at adapter entry |
 | `breaker-skip` | Backend on fatal streak; never dispatched | Fallback when round void | `Select-EraBreakerSkips` at dispatch |
 | `timeout` | Abandoned at grace/budget with no adapter record | Not recoverable (nothing to re-run differently) | dispatcher synthetic |

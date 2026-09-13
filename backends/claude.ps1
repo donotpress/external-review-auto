@@ -84,6 +84,75 @@ function Test-ClaudeTruncation {
     return ($Text -match $regex)
 }
 
+function Wait-ClaudeFirstByte {
+    <#
+    .SYNOPSIS
+        Wait for process exit, first stdout byte, or deadline -- whichever first.
+    .DESCRIPTION
+        Replaces a blind WaitForExit with a poll that sees startup. Returns
+        @{ Outcome; FirstByteSec }: 'exited' (process done -- caller handles
+        exit codes as before), 'first-byte-timeout' (nothing arrived in
+        FirstByteTimeoutSec -- caller kills and codes the death), 'timeout'
+        (attempt deadline hit first -- caller takes the existing timeout path).
+        Growth stalls AFTER the first byte are LOGGED, never enforced: the
+        only productive-silence datum (opus, 374s, pre/post-byte unknown)
+        cannot tell them apart yet, so enforcement waits on the
+        spawn-to-byte instrumentation this helper's FirstByteSec feeds.
+        The attempt deadline always wins (clamp invariant): every return path
+        re-checks it first.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Process,
+        [Parameter(Mandatory)][string]$StdFile,
+        [int]$FirstByteTimeoutSec = 300,
+        [int]$StallObserveSec = 300,
+        [Parameter(Mandatory)][datetime]$Deadline,
+        [int]$PollMs = 500
+    )
+    $start = [DateTime]::UtcNow
+    $firstByteAt = $null
+    $lastGrowthAt = $start
+    $lastSize = 0
+    $observeAnnounced = $false
+    while ($true) {
+        if ($Process.HasExited) {
+            # Final read: a byte written in the same poll window as death
+            # would otherwise be missed (exit wins the race). Attributed at
+            # exit time -- a slight overestimate, documented, never inventing
+            # bytes that are not there.
+            try {
+                if ($null -eq $firstByteAt -and (Get-Item -LiteralPath $StdFile -ErrorAction Stop).Length -gt 0) {
+                    $firstByteAt = ([DateTime]::UtcNow - $start).TotalSeconds
+                }
+            } catch {}
+            break
+        }
+        $now = [DateTime]::UtcNow
+        if ($now -ge $Deadline) {
+            return @{ Outcome = 'timeout'; FirstByteSec = $firstByteAt }
+        }
+        $size = 0
+        try { $size = (Get-Item -LiteralPath $StdFile -ErrorAction Stop).Length } catch { $size = 0 }
+        if ($size -gt 0 -and $null -eq $firstByteAt) {
+            $firstByteAt = ($now - $start).TotalSeconds
+            $lastGrowthAt = $now
+        } elseif ($size -gt $lastSize) {
+            $lastGrowthAt = $now
+        }
+        $lastSize = $size
+        if ($null -eq $firstByteAt -and ($now - $start).TotalSeconds -gt $FirstByteTimeoutSec) {
+            return @{ Outcome = 'first-byte-timeout'; FirstByteSec = $null }
+        }
+        if ($null -ne $firstByteAt -and -not $observeAnnounced -and ($now - $lastGrowthAt).TotalSeconds -gt $StallObserveSec) {
+            $observeAnnounced = $true
+            Write-Host "[claude] no output growth for ${StallObserveSec}s after first byte (observing only -- growth stalls are not yet enforced)."
+        }
+        Start-Sleep -Milliseconds $PollMs
+    }
+    return @{ Outcome = 'exited'; FirstByteSec = $firstByteAt }
+}
+
 function Invoke-ClaudeReview {
     [CmdletBinding()]
     param(
@@ -169,6 +238,8 @@ function Invoke-ClaudeReview {
     $clean = $null
     $detectorNote = $null
     $captureError = $null
+    $firstByteSec = $null
+    $firstByteTimeout = $false
     $stderr = ''
     $stdoutSink = $null
     $stderrSink = $null
@@ -225,7 +296,27 @@ function Invoke-ClaudeReview {
             $claudeProc.StandardInput.Close()
         }
 
-        if (-not $claudeProc.WaitForExit((Get-ClaudeRemainingMs -Deadline $attemptDeadline))) {
+        if (-not $claudeProc.WaitForExit(0)) {
+            # Poll for exit, first byte, or deadline -- never blind-wait. The
+            # attempt deadline still wins every branch (clamp invariant above).
+            $firstWait = Wait-ClaudeFirstByte -Process $claudeProc -StdFile $stdFile `
+                -FirstByteTimeoutSec 300 -StallObserveSec 300 -Deadline $attemptDeadline
+            $firstByteSec = $firstWait.FirstByteSec
+            if ($firstWait.Outcome -eq 'timeout') {
+                # Kill($true): tear down the whole tree. claude is a shim (cmd -> node);
+                # a bare Kill() would orphan the node child.
+                try { $claudeProc.Kill($true) } catch {}
+                throw "claude CLI exceeded its ${attemptTimeoutSec}s slice of the ${TimeoutSec}s budget (model=$modelId, launcher=$usedKind)"
+            }
+            if ($firstWait.Outcome -eq 'first-byte-timeout') {
+                try { $claudeProc.Kill($true) } catch {}
+                $firstByteTimeout = $true
+            }
+            if (-not $claudeProc.HasExited) {
+                $null = $claudeProc.WaitForExit((Get-ClaudeRemainingMs -Deadline $attemptDeadline))
+            }
+        }
+        if (-not $claudeProc.HasExited) {
             # Kill($true): tear down the whole tree. claude is a shim (cmd -> node);
             # a bare Kill() would orphan the node child.
             try { $claudeProc.Kill($true) } catch {}
@@ -287,6 +378,13 @@ function Invoke-ClaudeReview {
     if ($stderr.Trim()) { $parts += 'stderr: ' + $(if ($stderr.Trim().Length -gt 300) { $stderr.Trim().Substring(0,300) + '...' } else { $stderr.Trim() }) }
     if ($clean.Trim())  { $parts += 'stdout: ' + $(if ($clean.Trim().Length  -gt 300) { $clean.Trim().Substring(0,300)  + '...' } else { $clean.Trim() }) }
     $why = if ($parts) { $parts -join ' || ' } else { '<both stdout and stderr were empty>' }
+    # Zero-output death with a tripped first-byte deadline: the model never
+    # emitted, same dead-transport class as the opencode trailer. A fast
+    # crash with output keeps its free-text cause -- only the empty case
+    # codes. The trailer rides the message to the parent-side decoder
+    # (Convert-EraAdapterResultError); the WSL credential retry above is
+    # untouched (auth failures always print text, never trip this).
+    $noOutputDeath = $firstByteTimeout -and -not $stderr.Trim() -and -not $clean.Trim()
 
     # Retry on a DIFFERENT CREDENTIAL STORE, and only for failures a different store could fix.
     # A bad model id, a network fault or a real API error must NOT be retried: that would double
@@ -306,7 +404,11 @@ function Invoke-ClaudeReview {
             continue
         }
     }
-    throw "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
+    throw $(if ($noOutputDeath) {
+        "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why [claude-no-output stdout=0]"
+    } else {
+        "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
+    })
     }
     # Honest content validation. Judged on the PRE-BANNER text: the truncation
     # banner adds ~190 characters, which would push a short non-answer over the
@@ -336,6 +438,9 @@ function Invoke-ClaudeReview {
         InputTokens = $null
         OutputTokens = [Math]::Ceiling($clean.Length / 4)
         WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
+        # Spawn-to-first-byte seconds (null when nothing arrived): feeds the
+        # calibration that will tighten the provisional 300s first-byte bound.
+        FirstByteSec = $firstByteSec
         TruncationWarning = $truncationWarning
         Stderr = $stderr
         # A silent launcher switch would be the same defect class as the blank error string above:

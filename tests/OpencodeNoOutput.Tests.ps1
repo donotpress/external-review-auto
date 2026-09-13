@@ -70,30 +70,12 @@ Describe 'Get-EraRecoverableFailures admits the deliberate dead-seat code' -Tag 
     }
 }
 
-Describe 'Test-EraStreamFallbackNeeded covers both dead transports' -Tag Unit {
-    It 'fires for a dead opencode seat inside a usable round' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -OpencodeNoOutputCount 1 -UsableCount 1 |
-            Should -BeTrue
-    }
-
-    It 'still fires for the agy stream case' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 1 -OpencodeNoOutputCount 0 -UsableCount 2 |
-            Should -BeTrue
-    }
-
-    It 'stays shut without any dead-transport seat' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -OpencodeNoOutputCount 0 -UsableCount 1 |
-            Should -BeFalse
-    }
-
-    It 'stays shut for a void round (standard gate owns that)' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -OpencodeNoOutputCount 1 -UsableCount 0 |
-            Should -BeFalse
-    }
-
-    It 'era.ps1 passes the opencode count and still dispatches at most once' {
+Describe 'era.ps1 counts opencode deaths for the dead-transport gate' -Tag Unit {
+    # Gate truth table lives in FirstByteDetection.Tests.ps1 (single map
+    # signature since the fourth code); this pins opencode's membership.
+    It 'counts opencode-no-output seats and still dispatches at most once' {
         $era = Get-Content -Raw "$PSScriptRoot/../runtimes/era.ps1"
-        $era | Should -Match 'OpencodeNoOutputCount'
+        $era | Should -Match "'opencode-no-output'"
         ([regex]::Matches($era, '=\s*Invoke-ReviewerDispatch')).Count | Should -Be 2
     }
 

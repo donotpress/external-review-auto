@@ -561,9 +561,15 @@ Describe 'Test-EraCaptureAcceptable rejects an empty capture' -Tag Unit {
         # A seat that burned its whole budget must not be handed another whole
         # budget. The tmux design fixed exactly this once already, in its own
         # terminal conditions; the recoverable list must not reintroduce it.
-        $src = Get-Content -Raw -LiteralPath (Join-Path $script:SkillRoot 'workflow.ps1')
-        $recoverableLine = ([regex]::Match($src, '\$recoverable = @\([^)]*\)')).Value
-        $recoverableLine | Should -Not -Match 'tmux-seat-timeout'
-        $recoverableLine | Should -Match 'tmux-seat-exited'
+        # Behavioral (not textual): the recoverable list is now composed from
+        # Get-EraAnsweredBadlyCodes, so no source-text shape is asserted.
+        . (Join-Path $script:SkillRoot 'workflow.ps1')
+        $reg = @{ tmuxseat = @{ backend = 'tmux' } }
+        $r = Get-EraRecoverableFailures -ReviewerList @('tmuxseat') `
+            -Results @{ tmuxseat = @{ ExitCode = -1; Error = 'tmux-seat-timeout' } } -Registry $reg
+        @($r) | Should -Not -Contain 'tmuxseat'
+        $r2 = Get-EraRecoverableFailures -ReviewerList @('tmuxseat') `
+            -Results @{ tmuxseat = @{ ExitCode = -1; Error = 'tmux-seat-exited' } } -Registry $reg
+        @($r2) | Should -Contain 'tmuxseat'
     }
 }

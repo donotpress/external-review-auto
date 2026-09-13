@@ -222,23 +222,10 @@ Describe 'Get-EraRecoverableFailures pins the new code recoverable' -Tag Unit {
     }
 }
 
-Describe 'Test-EraStreamFallbackNeeded — one targeted re-dispatch for a dead agy transport' -Tag Unit {
-    It 'fires when a stream-interrupted seat died inside an otherwise usable round' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 1 -UsableCount 2 | Should -BeTrue
-    }
-
-    It 'does not fire without a stream-interrupted seat' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -UsableCount 0 | Should -BeFalse
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 0 -UsableCount 2 | Should -BeFalse
-    }
-
-    It 'does not fire for a fully void round (the standard empty-round gate owns that)' {
-        Test-EraStreamFallbackNeeded -StreamInterruptedCount 1 -UsableCount 0 | Should -BeFalse
-    }
-
-    It 'era.ps1 consults it next to the standard gate without adding a dispatch' {
+Describe 'era.ps1 consults the dead-transport gate without adding a dispatch' -Tag Unit {
+    It 'references Test-EraDeadTransportFallback and still dispatches at most once' {
         $era = Get-Content -Raw (Join-Path $script:SkillRoot 'runtimes/era.ps1')
-        $era | Should -Match 'Test-EraStreamFallbackNeeded'
+        $era | Should -Match 'Test-EraDeadTransportFallback'
         ([regex]::Matches($era, '=\s*Invoke-ReviewerDispatch')).Count | Should -Be 2
     }
 }

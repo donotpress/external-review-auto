@@ -1031,6 +1031,110 @@ function Test-EraStragglerExpired {
     return ''
 }
 
+function Get-EraNewlyDone {
+    <#
+    .SYNOPSIS
+        Dispatched entries whose job newly reached a terminal state. Pure.
+    .DESCRIPTION
+        The poll loop calls this every iteration with the seen-set it keeps;
+        newly finished seats get one log line each (delivered vs. finished
+        without artifact, via the response file -- never by Receiving the
+        job early, which would steal the collection path's result). Callers
+        add the returned presets to their seen-set.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()][AllowEmptyCollection()][object[]]$Dispatched,
+        [string[]]$Seen = @()
+    )
+    $doneStates = @('Completed', 'Failed', 'Stopped')
+    $out = [System.Collections.Generic.List[object]]::new()
+    foreach ($d in @($Dispatched)) {
+        if (-not $d -or -not $d.Job) { continue }
+        if ($Seen -contains $d.Preset) { continue }
+        try { $st = $d.Job.State } catch { continue }
+        if ($st -in $doneStates) { $out.Add($d) }
+    }
+    return @($out)
+}
+
+function Write-EraCompletionReceipt {
+    <#
+    .SYNOPSIS
+        One machine-readable receipt per round, on EVERY exit path.
+    .DESCRIPTION
+        `round-N-done.json`: tool, round, topic, timestamp, exit code,
+        usable/requested counts, per-seat preset/exit/error/chars, duration.
+        Response TEXT never lands here (chars only) -- this file is for
+        watchers, and a 16KB review does not belong in a ping payload.
+        Best-effort throughout: telemetry must never fail a round, so all
+        errors are swallowed. Module: bundle (telemetry writer).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ReviewDir,
+        [Parameter(Mandatory)][int]$Round,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$TopicSlug,
+        [Parameter(Mandatory)][AllowNull()][object]$Results,
+        [Parameter(Mandatory)][int]$ExitCode,
+        [double]$DurationSec = 0
+    )
+    try {
+        $seats = [System.Collections.Generic.List[object]]::new()
+        $usable = 0
+        $keys = @()
+        if ($Results -is [hashtable]) { $keys = @($Results.Keys) }
+        foreach ($k in ($keys | Sort-Object)) {
+            $res = $Results[$k]
+            $ex = 0
+            try { $ex = [int]$res.ExitCode } catch { $ex = -1 }
+            if ($ex -eq 0) { $usable++ }
+            $chars = 0
+            try { if ($null -ne $res.Response) { $chars = ([string]$res.Response).Length } } catch {}
+            $seats.Add([ordered]@{
+                preset = [string]$k
+                exit   = $ex
+                error  = [string]$res.Error
+                chars  = $chars
+            })
+        }
+        $receipt = [ordered]@{
+            tool      = 'era'
+            round     = $Round
+            topic     = [string]$TopicSlug
+            timestamp = ([datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))
+            exit_code = $ExitCode
+            usable    = $usable
+            requested = @($keys).Count
+            seats     = @($seats)
+            duration_s = $DurationSec
+        }
+        $receipt | ConvertTo-Json -Compress -Depth 4 |
+            Set-Content -LiteralPath (Join-Path $ReviewDir "round-$Round-done.json") -Encoding utf8 -ErrorAction Stop
+    } catch { }
+}
+
+function Send-EraCompletionPing {
+    <#
+    .SYNOPSIS
+        Best-effort human ping on round end. Never throws, never blocks.
+    .DESCRIPTION
+        Toast via BurntToast when the module is present, else a console
+        beep attempt. Headless/redirected hosts fail either path silently --
+        the receipt file above is the reliable channel, this is a courtesy.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Round, [Parameter(Mandatory)][int]$ExitCode)
+    try {
+        if (Get-Module -ListAvailable -Name BurntToast -ErrorAction SilentlyContinue) {
+            Import-Module BurntToast -ErrorAction SilentlyContinue
+            New-BurntToastNotification -Text "era round $Round finished", "exit $ExitCode" -ErrorAction SilentlyContinue
+        } else {
+            [Console]::Beep(880, 300)
+        }
+    } catch { }
+}
+
 function Get-EraStragglerDeferral {
     <#
     .SYNOPSIS
@@ -2385,7 +2489,11 @@ function Invoke-ReviewerDispatch {
         # machine-scoped default from Get-EraBackendHealthPath). Follows the
         # injectable-resolver convention: hermetic tests must not read the
         # operator's real streak file.
-        [string]$BackendHealthPath
+        [string]$BackendHealthPath,
+        # Repo root for the claim-check probe's disk frame (agentic seats
+        # cite files on disk, not the bundle subset). Optional: without it
+        # the probe checks the bundle frame only.
+        [string]$RepoRoot
     )
     Test-ThreadJobAvailable
 
@@ -2686,6 +2794,8 @@ function Invoke-ReviewerDispatch {
     # an absolute clock; the stopwatch only gives elapsed).
     $loopStartEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     $loneSince  = -1
+    # Presets already announced as finished (per-seat transition log below).
+    $seenDone   = @()
     $stopReason = ''
     $doneStates = @('Completed', 'Failed', 'Stopped')
 
@@ -2733,6 +2843,30 @@ function Invoke-ReviewerDispatch {
         if ($outstanding -eq 1 -and $loneSince -lt 0 -and @($allJobs).Count -ge 2) {
             $loneSince = $elapsed
             Write-Host "[dispatch] One reviewer still running at ${elapsed}s; allowing ${graceSec}s grace before abandoning it (ERA_STRAGGLER_GRACE_SEC)."
+        }
+        # Per-seat finishes, announced once each as they happen (not just in
+        # aggregate at the end). Artifact-checked, never Received: pulling the
+        # job's output here would steal the collection path's result.
+        foreach ($nd in @(Get-EraNewlyDone -Dispatched $dispatched -Seen $seenDone)) {
+            $art = if ($nd.ResponsePath -and (Test-Path -LiteralPath $nd.ResponsePath)) { 'delivered' }
+                   else { 'finished, no artifact yet' }
+            Write-Host "[dispatch] Seat '$($nd.Preset)' $art."
+            $seenDone += @($nd.Preset)
+            # Streaming claim-check: validate each delivered seat while the
+            # rest still run. Only when >1 seat remains outstanding (never on
+            # the lone straggler -- grace timing is sacred) and only once per
+            # seat (receipt presence). Advisory only: probe failures log and
+            # the post-round synthesis covers the seat regardless.
+            if ($outstanding -gt 1 -and $art -eq 'delivered') {
+                $checkReceipt = "$($nd.ResponsePath).check.json"
+                if (-not (Test-Path -LiteralPath $checkReceipt)) {
+                    try {
+                        $probeArgs = @{ ResponsePath = $nd.ResponsePath }
+                        if ($RepoRoot) { $probeArgs['RepoRoot'] = $RepoRoot }
+                        & (Join-Path $skillRoot 'tools/probes/claim-check.ps1') @probeArgs
+                    } catch { Write-Host "[dispatch] claim-check for '$($nd.Preset)' failed to run; synthesis covers it post-round." }
+                }
+            }
         }
         $stopReason = Test-EraStragglerExpired -ElapsedSec $elapsed -Outstanding $outstanding `
             -Total @($allJobs).Count -BudgetSec $budgetSec -GraceSec $graceSec -LoneSinceSec $loneSince
@@ -3104,43 +3238,46 @@ function Test-EraFallbackNeeded {
     return (($RecoverableCount -gt 0) -and ($UsableCount -eq 0))
 }
 
-function Test-EraStreamFallbackNeeded {
+function Test-EraDeadTransportFallback {
     <#
     .SYNOPSIS
-        Should the one bounded fallback re-dispatch run for a dead-transport
-        seat even though the round already has usable reviews?
+        Should the one bounded fallback re-dispatch run for dead-transport
+        seats even though the round already has usable reviews?
     .DESCRIPTION
-        MEASURED 2026-09-11: an agy seat can die -- both in-adapter attempts
-        returning empty MODEL answers behind "stream was interrupted" SYSTEM
-        entries -- while the rest of the panel succeeds. The standard gate
-        above then (correctly, by its own rationale) refuses the fallback and
-        the panel silently shrinks. Same day, same round: an opencode seat
-        can exit -1 with zero stdout bytes (one Read, then silence) -- the
-        same dead-transport class on a different backend.
+        MEASURED 2026-09-11/12: a seat can die with its model never emitting
+        -- agy stream interruptions, opencode zero-stdout exits, agy quota
+        wall, claude first-byte death -- while the rest of the panel
+        succeeds. The standard gate above then (correctly, by its own
+        rationale) refuses the fallback and the panel silently shrinks.
 
-        This gate covers exactly these cases, and ONLY these: at least one
-        seat failed with a dead-transport code -- `agy-stream-interrupted`
-        (agy backend) or `opencode-no-output` (opencode backend) -- AND the
-        round is otherwise usable. A void round stays owned by the standard
-        gate (which fires on any recoverable failure); any other failure mix
-        without a dead-transport code behaves exactly as before.
+        This gate covers exactly those cases, and ONLY those: at least one
+        seat failed with a dead-transport code in $DeadTransport (counts per
+        code; absent counts as zero) AND the round is otherwise usable. A
+        void round stays owned by the standard gate (which fires on any
+        recoverable failure); any other failure mix behaves exactly as
+        before. The map form (not one param per code) is deliberate: the
+        fourth code already strained per-code params, and the next dead
+        transport must not require a signature change.
 
         The bounds are inherited, not widened: still ONE fallback dispatch per
         round, still priced against the fallback preset's per-reviewer cap,
-        still delivery-checked, still disabled by ERA_AGY_FALLBACK=off (the
-        outer gate in era.ps1), and the fallback still runs on the REST
-        transport -- which is the entire point, since the agy transport is the
-        thing that is down.
+        still delivery-checked, still disabled by the fallback override
+        (outer gate in era.ps1), and the fallback still runs on the REST
+        transport -- which is the entire point, since the dead transport is
+        the thing that is down.
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][int]$StreamInterruptedCount,
-        [int]$OpencodeNoOutputCount = 0,
-        [int]$QuotaExhaustedCount = 0,
+        [Parameter(Mandatory)][AllowNull()][hashtable]$DeadTransport,
         [Parameter(Mandatory)][int]$UsableCount
     )
-    $deadTransport = ($StreamInterruptedCount -gt 0) -or ($OpencodeNoOutputCount -gt 0) -or ($QuotaExhaustedCount -gt 0)
-    return ($deadTransport -and ($UsableCount -gt 0))
+    $any = $false
+    if ($DeadTransport) {
+        foreach ($v in @($DeadTransport.Values)) {
+            if ([int]$v -gt 0) { $any = $true; break }
+        }
+    }
+    return ($any -and ($UsableCount -gt 0))
 }
 
 function Convert-EraAdapterResultError {
@@ -3151,17 +3288,19 @@ function Convert-EraAdapterResultError {
     .DESCRIPTION
         Most adapter exceptions stay free-text (network, auth, bad model id
         -- things a re-dispatch cannot fix, deliberately excluded from
-        recovery). But an adapter can append a parseable trailer naming a
-        failure whose recovery IS known. Currently one trailer exists:
+        recovery).         But an adapter can append a parseable trailer naming a
+        failure whose recovery IS known. Two trailers exist (one concept:
+        "dead transport -> REST fallback", see Test-EraDeadTransportFallback):
 
           [opencode-no-output stdout=N delivery=D]  (opencode.ps1 exit-fail)
+          [claude-no-output stdout=N]               (claude.ps1 first-byte death)
 
         stdout=0 means the model never emitted anything -- the dead-transport
         class, recoverable via a REST re-dispatch. stdout>0 (died mid-answer)
         keeps its free-text error: different fact, different recovery.
 
         Two channels carry one concept ("dead transport -> REST fallback",
-        see Test-EraStreamFallbackNeeded), and they differ on purpose -- do
+        see Test-EraDeadTransportFallback), and they differ on purpose -- do
         not unify them: opencode throws, so the Stderr trailer is its only
         channel out; agy returns structured results, so it upgrades its
         reason in-adapter. A future trailer author registers here, in
@@ -3183,6 +3322,9 @@ function Convert-EraAdapterResultError {
     if ([string]::IsNullOrEmpty($text)) { return $null }
     if ($text -match '\[opencode-no-output stdout=(\d+) delivery=([^\]]+)\]\s*$') {
         if ([int]$Matches[1] -eq 0) { return 'opencode-no-output' }
+    }
+    if ($text -match '\[claude-no-output stdout=(\d+)\]\s*$') {
+        if ([int]$Matches[1] -eq 0) { return 'claude-no-output' }
     }
     return $null
 }
@@ -3433,13 +3575,13 @@ function Get-EraRecoverableFailures {
     $recoverable = @((Get-EraAnsweredBadlyCodes) +
                      @('empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated',
                        'breaker-skip',
-                       # 2026-09-11: an opencode seat that exited -1 with ZERO
-                       # stdout bytes ran but returned no review -- the same
-                       # deliberate-code criterion as the rest of this list.
-                       # Decoded from the adapter's trailer by
-                       # Convert-EraAdapterResultError at result collection;
-                       # free-text opencode exceptions stay excluded.
-                       'opencode-no-output'))
+                       # Dead-transport zero-output deaths (each decoded from
+                       # its adapter's trailer by Convert-EraAdapterResultError
+                       # at result collection; free-text exceptions stay
+                       # excluded): opencode exit -1, claude first-byte death.
+                       # (Agy's stream/interruption/quota codes ride the
+                       # $isAgy branch below, not this list.)
+                       'opencode-no-output', 'claude-no-output'))
 
     $out = [System.Collections.Generic.List[string]]::new()
     foreach ($r in $ReviewerList) {

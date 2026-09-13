@@ -258,6 +258,11 @@ if ($script:UserSuppliedIncludeFiles -and @($IncludeFiles).Count -eq 0) {
 # today because there is no Set-StrictMode in this repo, but both exit-2 paths
 # now DEPEND on it being falsy, so leaving it unset is no longer merely untidy.
 $runSucceeded = $false
+# Completion receipt inputs: exit code tracked explicitly (void 2 vs success
+# 0 vs abort 1 -- see the exits below) and a round-start instant, so the
+# finally block can write round-N-done.json on EVERY path including throws.
+$eraExitCode = 1
+$eraStartUtc = [datetime]::UtcNow
 
 # .ProviderPath, NOT .Path. For a UNC working directory PowerShell's .Path is
 # PROVIDER-QUALIFIED - measured 2026-09-04 in
@@ -2180,6 +2185,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         Write-Host "[era] ERROR: round $round produced no usable review."
         foreach ($line in $voidReport.Lines) { Write-Host $line }
         Write-Host "Artifacts kept in $reviewDir for diagnosis."
+        $eraExitCode = 2
         exit 2
     }
 
@@ -2236,7 +2242,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         -AgyModelMap $agyModelMap `
         -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
         -BundleOverrides $bundleOverrides `
-        -BundleTokens $tokenCount
+        -BundleTokens $tokenCount -RepoRoot $repoRoot
 
     # --- Response contract (P1) ---------------------------------------------
     # Nothing verified that an answer matched the request: adapters check
@@ -2314,15 +2320,15 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
         # Copy-PrimaryResponseAlias.
         $usableSoFar = (Get-EraVoidRoundReport -ReviewDir $reviewDir -Round $round `
             -Results $results -RequestedCount @($reviewerList).Count).UsableCount
-        # Dead-transport seats (Test-EraStreamFallbackNeeded): stream-interrupted
-        # agy or zero-output opencode dying inside an otherwise usable round.
-        # The two gates are mutually exclusive (usable==0 vs usable>0).
-        $streamFailed = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'agy-stream-interrupted' })
-        $opencodeDead = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'opencode-no-output' })
-        $quotaDead = @($failedRecoverable | Where-Object { $results[$_].Error -eq 'agy-quota-exhausted' })
+        # Dead-transport counts as a map (see Test-EraDeadTransportFallback):
+        # the fourth code already strained per-code plumbing.
+        $deadCodes = @('agy-stream-interrupted', 'opencode-no-output', 'agy-quota-exhausted', 'claude-no-output')
+        $deadTransport = @{}
+        foreach ($code in $deadCodes) {
+            $deadTransport[$code] = @($failedRecoverable | Where-Object { $results[$_].Error -eq $code }).Count
+        }
         $standardFire = Test-EraFallbackNeeded -RecoverableCount $failedRecoverable.Count -UsableCount $usableSoFar
-        $streamFire = Test-EraStreamFallbackNeeded -StreamInterruptedCount $streamFailed.Count `
-            -OpencodeNoOutputCount $opencodeDead.Count -QuotaExhaustedCount $quotaDead.Count -UsableCount $usableSoFar
+        $streamFire = Test-EraDeadTransportFallback -DeadTransport $deadTransport -UsableCount $usableSoFar
         if (-not ($standardFire -or $streamFire)) {
             if ($failedRecoverable.Count -gt 0) {
                 Write-Host ("[era] {0} reviewer(s) failed recoverably ({1}), but the round already has {2} usable review(s); skipping the fallback." -f `
@@ -2371,7 +2377,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                 # In stream mode only the dead-transport seats are being
                 # replaced (the standard gate owns the void round, and the two
                 # gates are mutually exclusive), so name that subset.
-                $replacing = if ($streamFire) { @($streamFailed + $opencodeDead + $quotaDead | Sort-Object -Unique) } else { $failedRecoverable }
+                $replacing = if ($streamFire) { @($failedRecoverable | Where-Object { $deadCodes -contains $results[$_].Error } | Sort-Object -Unique) } else { $failedRecoverable }
                 $why = @($replacing | ForEach-Object {
                     $e = if ($results[$_].Error) { $results[$_].Error } else { "exit $($results[$_].ExitCode)" }
                     "$_ ($e)"
@@ -2427,7 +2433,7 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
                     -BundleOverrides $fbOverride.Overrides `
                     -ReviewDir $reviewDir -Round $round -AgyModelMap $agyModelMap `
                     -ModelOverrides $modelOverrides -ProviderOverrides $providerOverrides `
-                    -BundleTokens $tokenCount
+                    -BundleTokens $tokenCount -RepoRoot $repoRoot
                 # Add the fallback under its OWN preset key (correct backend/pricing in
                 # metadata); keep the failed agy entry for honest failure telemetry.
                 foreach ($k in $fbResults.Keys) { $results[$k] = $fbResults[$k] }
@@ -2651,8 +2657,22 @@ Do not pad this section. Three grounded answers beat twelve speculative ones.
     # Reached only on a clean run. The finally block below keeps the repomix
     # config when this is not set, so a failed run leaves a receipt.
     $runSucceeded = $true
+    $eraExitCode = 0
 
 } finally {
+    # Completion signal: one machine-readable receipt on EVERY exit path
+    # (usable, void, preflight refusal, abort) so callers -- human or watcher
+    # -- never poll a log to learn a round ended. Best-effort inside (a
+    # receipt must never fail a round); with no review dir there is nowhere
+    # to write, so early pre-round exits skip quietly.
+    try {
+        if ($reviewDir -and $round) {
+            $eraSecs = ([datetime]::UtcNow - $eraStartUtc).TotalSeconds
+            Write-EraCompletionReceipt -ReviewDir $reviewDir -Round $round -TopicSlug $TopicSlug `
+                -Results $results -ExitCode $eraExitCode -DurationSec ([math]::Round($eraSecs, 1))
+        }
+    } catch { }
+    try { Send-EraCompletionPing -Round $round -ExitCode $eraExitCode } catch { }
     # Clean up the round-claim file regardless of dispatch outcome. Previously
     # this delete lived inside the try block at the end, so if Invoke-ReviewerDispatch
     # or any earlier step threw, the claim file persisted and permanently

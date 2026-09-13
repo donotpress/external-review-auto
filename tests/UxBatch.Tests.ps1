@@ -151,7 +151,7 @@ Describe 'docs/error-codes.md covers every deliberate code' -Tag Unit {
         foreach ($c in @('response-contract', 'agentic-narration-capture', 'prompt-echo',
                          'empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated',
                          'stall-or-timeout', 'agy-stream-interrupted', 'opencode-no-output',
-                         'agy-quota-exhausted', 'breaker-skip', 'timeout', 'no-structured-output',
+                         'claude-no-output', 'agy-quota-exhausted', 'breaker-skip', 'timeout', 'no-structured-output',
                          'answered-badly', 'not-delivered')) {
             $doc | Should -Match ([regex]::Escape($c))
         }
