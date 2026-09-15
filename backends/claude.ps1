@@ -520,12 +520,16 @@ function Invoke-ClaudeReview {
     if ($stderr.Trim()) { $parts += 'stderr: ' + $(if ($stderr.Trim().Length -gt 300) { $stderr.Trim().Substring(0,300) + '...' } else { $stderr.Trim() }) }
     if ($clean.Trim())  { $parts += 'stdout: ' + $(if ($clean.Trim().Length  -gt 300) { $clean.Trim().Substring(0,300)  + '...' } else { $clean.Trim() }) }
     $why = if ($parts) { $parts -join ' || ' } else { '<both stdout and stderr were empty>' }
-    # Zero-output death with a tripped first-byte deadline: the model never
-    # emitted, same dead-transport class as the opencode trailer. A fast
-    # crash with output keeps its free-text cause -- only the empty case
-    # codes. The trailer rides the message to the parent-side decoder
-    # (Convert-EraAdapterResultError); the WSL credential retry above is
-    # untouched (auth failures always print text, never trip this).
+    # Zero-output death with a tripped first-byte deadline: the bound elapsed
+    # with the model never emitting. This is its OWN code
+    # (claude-first-byte-timeout), deliberately NOT the dead-transport class:
+    # in text mode first-byte means completion, so this is usually a healthy
+    # but slow review the bound killed -- recoverable in a void round, but no
+    # extra REST re-dispatch in a usable one. A fast crash (quick exit, empty
+    # output, deadline never tripped) keeps its free-text cause -- only the
+    # slow case codes. The trailer rides the message to the parent-side
+    # decoder (Convert-EraAdapterResultError); the WSL credential retry above
+    # is untouched (auth failures always print text, never trip this).
     $noOutputDeath = $firstByteTimeout -and -not $stderr.Trim() -and -not $clean.Trim()
 
     # Retry on a DIFFERENT CREDENTIAL STORE, and only for failures a different store could fix.
@@ -547,7 +551,7 @@ function Invoke-ClaudeReview {
         }
     }
     throw $(if ($noOutputDeath) {
-        "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why [claude-no-output stdout=0]"
+        "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why [claude-first-byte-timeout stdout=0 after=${firstBytePlanSec}s]"
     } else {
         "claude CLI failed (exit=$exitCode, model=$modelId, launcher=$usedKind): $why"
     })

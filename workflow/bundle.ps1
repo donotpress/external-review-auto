@@ -2650,6 +2650,7 @@ function Write-ReviewMetadata {
                 exit_code = $r.ExitCode
                 wall_clock_sec = $r.WallClockSec
                 first_byte_sec = $r.FirstByteSec
+                first_byte_plan_sec = $r.FirstBytePlanSec
                 response_chars = if ($r.Response) { $r.Response.Length } else { 0 }
                 bundle_tokens = $BundleTokens
                 delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })
@@ -2701,6 +2702,7 @@ function Write-ReviewMetadata {
                 exit_code = $r.ExitCode
                 wall_clock_sec = if ($null -ne $r.WallClockSec) { $r.WallClockSec } else { 0 }
                 first_byte_sec = $r.FirstByteSec
+                first_byte_plan_sec = $r.FirstBytePlanSec
                 response_chars = $respLen
                 bundle_tokens = $BundleTokens
                 delivery_mode = $(if ($DeliveryModes.ContainsKey($preset)) { $DeliveryModes[$preset] } else { $null })

@@ -148,6 +148,29 @@ Describe 'Convert-ClaudeStreamJsonToText' -Tag Unit {
     }
 }
 
+Describe 'claude slow-kill splits from dead transport' -Tag Unit {
+    It 'decodes the slow-kill trailer to claude-first-byte-timeout' {
+        $r = Convert-EraAdapterResultError -Result @{
+            Stderr = 'claude CLI failed (exit=-1, model=m, launcher=windows): <both stdout and stderr were empty> [claude-first-byte-timeout stdout=0 after=1770s]'
+        }
+        $r | Should -BeExactly 'claude-first-byte-timeout'
+    }
+
+    It 'keeps the slow-kill code out of the dead-transport fallback set' {
+        $era = Get-Content -Raw "$PSScriptRoot/../runtimes/era.ps1"
+        $m = [regex]::Match($era, '\$deadCodes = @\(([^)]+)\)')
+        $m.Success | Should -BeTrue
+        $m.Groups[1].Value | Should -Not -Match 'claude-first-byte-timeout'
+    }
+
+    It 'still recovers the slow-kill code in a void round' {
+        $rec = Get-EraRecoverableFailures -ReviewerList @('opus') `
+            -Results @{ opus = @{ ExitCode = -1; Error = 'claude-first-byte-timeout' } } `
+            -Registry @{ opus = @{ backend = 'claude' } }
+        @($rec) | Should -Contain 'opus'
+    }
+}
+
 Describe 'metadata persists first-byte seconds' -Tag Unit {
     BeforeAll { . "$PSScriptRoot/../workflow.ps1" }
 
@@ -163,6 +186,20 @@ Describe 'metadata persists first-byte seconds' -Tag Unit {
             -Registry $reg -ModelOverrides @{} -DeliveryModes @{}
         $j = Get-Content -Raw -LiteralPath (Join-Path $dir 'round-1-metadata.json') | ConvertFrom-Json
         @($j.reviewers | Where-Object { $_.preset -eq 'opus' })[0].first_byte_sec | Should -Be 12.5
+    }
+
+    It 'records first_byte_plan_sec when the adapter reports it' {
+        $dir = Join-Path $TestDrive 'meta-fb3'
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        $resp = Join-Path $dir 'round-1-opus-response.md'
+        '# R' | Set-Content -LiteralPath $resp -NoNewline
+        $reg = @{ opus = @{ backend = 'claude'; model_id = 'm'; pricing = @{ input_per_m = 1; output_per_m = 1 } } }
+        Write-ReviewMetadata -ReviewDir $dir -Round 1 -TopicSlug 't' -Mode 'assessment' -BundleTokens 10 `
+            -Results @{ opus = @{ ExitCode = 0; Response = '# R'; OutputTokens = 1; WallClockSec = 490.6;
+                                   CaptureMethod = 'direct'; FirstByteSec = 487.4; FirstBytePlanSec = 1770 } } `
+            -Registry $reg -ModelOverrides @{} -DeliveryModes @{}
+        $j = Get-Content -Raw -LiteralPath (Join-Path $dir 'round-1-metadata.json') | ConvertFrom-Json
+        @($j.reviewers | Where-Object { $_.preset -eq 'opus' })[0].first_byte_plan_sec | Should -Be 1770
     }
 
     It 'records null when the adapter reports nothing (other backends)' {

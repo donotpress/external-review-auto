@@ -291,13 +291,17 @@ function Get-EraRecoverableFailures {
     $recoverable = @((Get-EraAnsweredBadlyCodes) +
                      @('empty-capture', 'tmux-seat-exited', 'tmux-seat-truncated',
                        'breaker-skip',
-                       # Dead-transport zero-output deaths (each decoded from
-                       # its adapter's trailer by Convert-EraAdapterResultError
-                       # at result collection; free-text exceptions stay
-                       # excluded): opencode exit -1, claude first-byte death.
-                       # (Agy's stream/interruption/quota codes ride the
-                       # $isAgy branch below, not this list.)
-                       'opencode-no-output', 'claude-no-output'))
+                        # Zero-output deaths (each decoded from its adapter's
+                        # trailer by Convert-EraAdapterResultError at result
+                        # collection; free-text exceptions stay excluded):
+                        # opencode exit -1, claude first-byte death (slow-kill;
+                        # recoverable here for void rounds but NOT a
+                        # dead-transport code, so usable rounds skip the extra
+                        # REST re-dispatch), legacy claude-no-output (pre-split
+                        # trailer; nothing emits it anymore, kept decoding).
+                        # (Agy's stream/interruption/quota codes ride the
+                        # $isAgy branch below, not this list.)
+                        'opencode-no-output', 'claude-no-output', 'claude-first-byte-timeout'))
 
     $out = [System.Collections.Generic.List[string]]::new()
     foreach ($r in $ReviewerList) {
@@ -491,15 +495,22 @@ function Convert-EraAdapterResultError {
         Most adapter exceptions stay free-text (network, auth, bad model id
         -- things a re-dispatch cannot fix, deliberately excluded from
         recovery).         But an adapter can append a parseable trailer naming a
-        failure whose recovery IS known. Two trailers exist (one concept:
-        "dead transport -> REST fallback", see Test-EraDeadTransportFallback):
+        failure whose recovery IS known. Three trailers exist:
 
           [opencode-no-output stdout=N delivery=D]  (opencode.ps1 exit-fail)
-          [claude-no-output stdout=N]               (claude.ps1 first-byte death)
+          [claude-no-output stdout=N]               (legacy claude.ps1 trailer)
+          [claude-first-byte-timeout stdout=N after=Ns]  (claude.ps1 slow-kill)
 
-        stdout=0 means the model never emitted anything -- the dead-transport
-        class, recoverable via a REST re-dispatch. stdout>0 (died mid-answer)
-        keeps its free-text error: different fact, different recovery.
+        stdout=0 means the model never emitted anything. opencode-no-output
+        and legacy claude-no-output are the dead-transport class, recoverable
+        via a REST re-dispatch ("dead transport -> REST fallback", see
+        Test-EraDeadTransportFallback). claude-first-byte-timeout is the
+        slow-kill class: recoverable in a void round via the standard gate,
+        but deliberately outside the dead-transport set -- in text mode the
+        bound is a total cap, so this usually killed a healthy slow review
+        and a usable round must not buy an extra upload over it. stdout>0
+        (died mid-answer) keeps its free-text error: different fact,
+        different recovery.
 
         Two channels carry one concept ("dead transport -> REST fallback",
         see Test-EraDeadTransportFallback), and they differ on purpose -- do
@@ -527,6 +538,9 @@ function Convert-EraAdapterResultError {
     }
     if ($text -match '\[claude-no-output stdout=(\d+)\]\s*$') {
         if ([int]$Matches[1] -eq 0) { return 'claude-no-output' }
+    }
+    if ($text -match '\[claude-first-byte-timeout stdout=(\d+) after=[^\]]+\]\s*$') {
+        if ([int]$Matches[1] -eq 0) { return 'claude-first-byte-timeout' }
     }
     return $null
 }
