@@ -579,4 +579,21 @@ Describe 'resolve.ps1 2026-06-10 hardening (P1)' {
         # EXPLICIT request — must stay 'gemini-pro-low', not the default panel.
         $r.Reviewer | Should -BeExactly 'gemini-pro-low'
     }
+
+    It '"default panel minus deepseek" is a topic, not set-default (awc 2026-09-15)' {
+        # The bare-"default" head used to feed ANY tail into reviewer
+        # resolution, so tail [panel, minus, deepseek] matched the deepseek
+        # branch and emitted {Command:set-default, Reviewer:deepseek-flash} --
+        # forwarding that would have CHANGED the persistent default.
+        $r = script:Invoke-Resolve 'default panel minus deepseek'
+        $r.TopicSlug | Should -BeExactly 'default-panel-minus-deepseek'
+        $r.Reviewer | Should -BeExactly $script:DefaultPanel
+        $r.PSObject.Properties.Name | Should -Not -Contain 'Command'
+    }
+
+    It 'bare "default <preset>" still sets the default' {
+        $r = script:Invoke-Resolve 'default opus'
+        $r.Command | Should -BeExactly 'set-default'
+        $r.Reviewer | Should -BeExactly 'opus'
+    }
 }

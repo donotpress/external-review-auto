@@ -432,6 +432,7 @@ function script:Try-SetDefault {
 
     $head = $clean[0].ToLower()
     $reviewerStart = 0
+    $bareDefaultHead = $false
 
     # "set default <reviewer>" or "set default to <reviewer>"
     if ($head -eq 'set') {
@@ -442,15 +443,25 @@ function script:Try-SetDefault {
         if ($reviewerStart -lt $clean.Count -and $clean[$reviewerStart].ToLower() -eq 'to') { $reviewerStart++ }
     }
     # "default <reviewer>" or "default to <reviewer>"
+    # The bare-"default" head is AMBIGUOUS with topics that start with the
+    # word (e.g. "default panel minus deepseek"): without a guard the tail
+    # feeds reviewer resolution and [panel, minus, deepseek] matches the
+    # deepseek branch, emitting set-default + deepseek-flash -- forwarding
+    # that would CHANGE the persistent default (measured 2026-09-15). So the
+    # bare form requires EVERY tail token to be a reviewer token; anything
+    # else falls through to the topic-slug path below. The explicit "set
+    # default" form keeps its lenient resolution (intent is unambiguous).
     elseif ($head -eq 'default') {
         $reviewerStart = 1
         if ($reviewerStart -lt $clean.Count -and $clean[$reviewerStart].ToLower() -eq 'to') { $reviewerStart++ }
+        $bareDefaultHead = $true
     }
     else { return $null }
 
     if ($reviewerStart -ge $clean.Count) { return $null }
 
     $reviewerTokens = @($clean[$reviewerStart..($clean.Count - 1)])
+    if ($bareDefaultHead -and -not (script:Test-AllReviewerTokens -Tokens $reviewerTokens)) { return $null }
     $spec = script:Resolve-ReviewerSpec -Tokens $reviewerTokens
     if ($null -eq $spec -or -not $spec.ContainsKey('Reviewer')) { return $null }
     return @{ Command = 'set-default'; Reviewer = $spec['Reviewer'] }
