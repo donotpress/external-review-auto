@@ -160,6 +160,119 @@ function Wait-ClaudeFirstByte {
     return @{ Outcome = 'exited'; FirstByteSec = $firstByteAt }
 }
 
+function Get-ClaudeFirstBytePlan {
+    <#
+    .SYNOPSIS
+        First-byte seconds for this attempt. Env override wins, else the
+        attempt budget minus margin, never exceeding the budget.
+    .DESCRIPTION
+        `claude --print` in text mode emits nothing until the answer is
+        complete (MEASURED 2026-09-15: haiku 600-word probe, 38 polls, 37 at
+        0B, first byte 19.0s = exit 19.0s; 11 instrumented opus successes all
+        land first-byte within ~2-6s of exit, incl. agent-inbox r4 at
+        299.37/300.0s, 0.6s from the old kill). So the "first-byte" deadline
+        is effectively a TOTAL-response cap and a flat 300s kills healthy
+        slow reviews (awc-system-audit round 2/3, wall 301.9s, first_byte
+        null, claude-no-output).
+
+        Same rule the opencode adapter enforces: an adapter cannot grant
+        itself time the dispatcher will not wait (TimeoutSec + 30), so the
+        threshold is clamped to fit inside the attempt budget. The 30s margin
+        leaves room for the kill + drain + throw to report cleanly before the
+        attempt deadline fires under the wrong headline.
+
+        Precedence: valid ERA_CLAUDE_FIRST_BYTE_SEC (>= 10) clamped to the
+        ceiling, else ceiling. Floor 300s only when the budget allows it;
+        tiny budgets clamp down to the ceiling itself.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$AttemptTimeoutSec)
+    $ceiling = [Math]::Max(1, $AttemptTimeoutSec - 30)
+    $wanted = [Math]::Max(300, $ceiling)
+    if ($env:ERA_CLAUDE_FIRST_BYTE_SEC) {
+        $parsed = 0
+        if ([int]::TryParse($env:ERA_CLAUDE_FIRST_BYTE_SEC, [ref]$parsed) -and $parsed -ge 10) {
+            $wanted = $parsed
+        } else {
+            Write-Host "[claude] ERA_CLAUDE_FIRST_BYTE_SEC='$($env:ERA_CLAUDE_FIRST_BYTE_SEC)' is not a positive integer >= 10; ignoring."
+        }
+    }
+    if ($wanted -gt $ceiling) { return [int]$ceiling }
+    return [int]$wanted
+}
+
+function Get-ClaudeOutputFormat {
+    <#
+    .SYNOPSIS
+        text (default) or stream-json, via ERA_CLAUDE_OUTPUT_FORMAT.
+    .DESCRIPTION
+        Text mode buffers the whole answer, so first-byte means completion.
+        stream-json streams partial messages, so first-byte really means
+        alive -- at the cost of a JSONL capture parse. Invalid values fall
+        back to text with a warning, never a throw (a typo must not void a
+        paid round).
+    #>
+    [CmdletBinding()]
+    param()
+    $raw = if ($env:ERA_CLAUDE_OUTPUT_FORMAT) { $env:ERA_CLAUDE_OUTPUT_FORMAT.Trim().ToLower() } else { '' }
+    if (-not $raw) { return 'text' }
+    if ($raw -in @('text', 'stream-json')) { return $raw }
+    Write-Host "[claude] ERA_CLAUDE_OUTPUT_FORMAT='$($env:ERA_CLAUDE_OUTPUT_FORMAT)' unknown; using 'text'."
+    return 'text'
+}
+
+function Convert-ClaudeStreamJsonToText {
+    <#
+    .SYNOPSIS
+        Reassemble --output-format stream-json JSONL into plain text.
+    .DESCRIPTION
+        The terminal result field wins alone when present (the CLI's own
+        final assembly); otherwise assistant message text plus
+        content_block_delta text_deltas are reassembled in line order.
+        Anything unparseable is skipped line-wise; when nothing extracts,
+        the raw input is returned so the non-review detector fails honestly
+        on what the model actually said instead of on an empty string this
+        helper invented.
+    #>
+    [CmdletBinding()]
+    param([string]$Raw)
+    if (-not $Raw) { return '' }
+    # The terminal result line is the CLI's own final assembly: when present
+    # it wins alone, so message + deltas + result are not triple-counted
+    # (which would also inflate the OutputTokens estimate downstream).
+    # Without it (crash, kill, truncation), the partials are the fallback.
+    $res = [System.Text.StringBuilder]::new()
+    $prt = [System.Text.StringBuilder]::new()
+    $anyRes = $false; $anyPrt = $false
+    foreach ($line in ($Raw -split "`n")) {
+        $t = $line.Trim()
+        if (-not $t) { continue }
+        try { $o = $t | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+        try {
+            if ($o.type -eq 'result' -and $null -ne $o.result -and $o.result -is [string]) {
+                $null = $res.Append([string]$o.result); $anyRes = $true; continue
+            }
+        } catch {}
+        try {
+            if ($null -ne $o.message -and $null -ne $o.message.content) {
+                foreach ($b in @($o.message.content)) {
+                    if ($null -ne $b -and $b.type -eq 'text' -and $null -ne $b.text) {
+                        $null = $prt.Append([string]$b.text); $anyPrt = $true
+                    }
+                }
+            }
+        } catch {}
+        try {
+            if ($null -ne $o.delta -and $o.delta.type -eq 'text_delta' -and $null -ne $o.delta.text) {
+                $null = $prt.Append([string]$o.delta.text); $anyPrt = $true
+            }
+        } catch {}
+    }
+    if ($anyRes) { return $res.ToString() }
+    if ($anyPrt) { return $prt.ToString() }
+    return $Raw
+}
+
 function Invoke-ClaudeReview {
     [CmdletBinding()]
     param(
@@ -220,9 +333,18 @@ function Invoke-ClaudeReview {
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $launcherFile
     foreach ($pre in $launcherPre) { $psi.ArgumentList.Add($pre) }
+    $outputFormat = Get-ClaudeOutputFormat
     $psi.ArgumentList.Add('--print')
     $psi.ArgumentList.Add('--model')
     $psi.ArgumentList.Add($modelId)
+    if ($outputFormat -eq 'stream-json') {
+        # --verbose is REQUIRED with --print + --output-format stream-json
+        # (measured: without it the CLI errors "requires --verbose").
+        $psi.ArgumentList.Add('--verbose')
+        $psi.ArgumentList.Add('--output-format')
+        $psi.ArgumentList.Add('stream-json')
+        $psi.ArgumentList.Add('--include-partial-messages')
+    }
     $psi.ArgumentList.Add('--allow-dangerously-skip-permissions')
     $psi.ArgumentList.Add($prompt)
     $psi.UseShellExecute        = $false
@@ -246,6 +368,7 @@ function Invoke-ClaudeReview {
     $detectorNote = $null
     $captureError = $null
     $firstByteSec = $null
+    $firstBytePlanSec = $null
     $firstByteTimeout = $false
     $stderr = ''
     $stdoutSink = $null
@@ -270,6 +393,8 @@ function Invoke-ClaudeReview {
     # note there): a (Get-Date) deadline compared against UtcNow reads expired
     # by the whole zone offset on any non-UTC box and fake-times-out the seat.
     $attemptDeadline = [DateTime]::UtcNow.AddSeconds($attemptTimeoutSec)
+    # Per-attempt bound (recomputed: the retry gets whatever budget is LEFT).
+    $firstBytePlanSec = Get-ClaudeFirstBytePlan -AttemptTimeoutSec $attemptTimeoutSec
     $sw.Start()   # resume: the finally below stops it, so WallClockSec spans BOTH attempts
     try {
         $claudeProc = [System.Diagnostics.Process]::Start($psi)
@@ -309,8 +434,12 @@ function Invoke-ClaudeReview {
         if (-not $claudeProc.WaitForExit(0)) {
             # Poll for exit, first byte, or deadline -- never blind-wait. The
             # attempt deadline still wins every branch (clamp invariant above).
+            # Text mode buffers the whole answer, so this bound is a total cap:
+            # $firstBytePlanSec (computed per attempt above) replaces the old
+            # flat 300s. Stream-json streams partials, so the same number
+            # there really means alive.
             $firstWait = Wait-ClaudeFirstByte -Process $claudeProc -StdFile $stdFile `
-                -FirstByteTimeoutSec 300 -StallObserveSec 300 -Deadline $attemptDeadline
+                -FirstByteTimeoutSec $firstBytePlanSec -StallObserveSec 300 -Deadline $attemptDeadline
             $firstByteSec = $firstWait.FirstByteSec
             if ($firstWait.Outcome -eq 'timeout') {
                 # Kill($true): tear down the whole tree. claude is a shim (cmd -> node);
@@ -347,6 +476,9 @@ function Invoke-ClaudeReview {
         if (-not $resultText) { $resultText = '' }
         $stderr = (Get-Content -Raw -LiteralPath $errFile -ErrorAction SilentlyContinue)
         if (-not $stderr) { $stderr = '' }
+        if ($outputFormat -eq 'stream-json' -and $resultText.Trim()) {
+            $resultText = Convert-ClaudeStreamJsonToText -Raw $resultText
+        }
         $clean = $resultText -replace '\x1b\[\??[0-9;]*[a-zA-Z]', '' -replace "\r", ''
 
         Remove-Item -LiteralPath $stdFile -ErrorAction SilentlyContinue
@@ -448,9 +580,15 @@ function Invoke-ClaudeReview {
         InputTokens = $null
         OutputTokens = [Math]::Ceiling($clean.Length / 4)
         WallClockSec = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-        # Spawn-to-first-byte seconds (null when nothing arrived): feeds the
-        # calibration that will tighten the provisional 300s first-byte bound.
+        # Spawn-to-first-byte seconds (null when nothing arrived). CALIBRATED
+        # 2026-09-15: text-mode first byte trails exit by ~2-6s (11 successes;
+        # agent-inbox r4 299.37/300.0s missed the old flat 300s by 0.6s), so the
+        # bound is now the attempt budget minus margin (Get-ClaudeFirstBytePlan),
+        # overridable via ERA_CLAUDE_FIRST_BYTE_SEC. FirstBytePlanSec records
+        # the bound this attempt used; OutputFormat records text/stream-json.
         FirstByteSec = $firstByteSec
+        FirstBytePlanSec = $firstBytePlanSec
+        OutputFormat = $outputFormat
         TruncationWarning = $truncationWarning
         Stderr = $stderr
         # A silent launcher switch would be the same defect class as the blank error string above:

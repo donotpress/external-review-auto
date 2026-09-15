@@ -670,6 +670,8 @@ real — and that verdict still says the finding may be.
 | `ERA_CONVERGENCE_WARNINGS` | (unset) | Set to `0` to suppress the convergence/anti-pattern warnings (e.g. slug-per-round detection). |
 | `ERA_OPENCODE_FIRST_TOKEN_SEC` | `120` | opencode first-token deadline. Must be an integer ≥ 10 (the poll interval); anything else warns and falls back to 120. |
 | `ERA_OPENCODE_VARIANT_STATE` | (unset) | Set to a truthy value (not `0`/`false`) to use per-variant opencode state when a non-`default` variant is selected. |
+| `ERA_CLAUDE_FIRST_BYTE_SEC` | (attempt budget − 30s) | claude first-byte deadline. `claude --print` in text mode emits nothing until the answer is complete (measured: first byte lands within ~2-6s of exit), so this bound is effectively a total-response cap — hence scaled with the attempt budget instead of a flat 300s, and always clamped inside it. Set to an integer ≥ 10 to pin it (also clamped); anything else warns and is ignored. |
+| `ERA_CLAUDE_OUTPUT_FORMAT` | `text` | Set to `stream-json` so the claude seat streams partial messages (first byte then really means alive) instead of buffering the whole answer. The adapter reassembles the JSONL into text; unparseable output falls back to raw. Anything else warns and uses `text`. |
 
 ## Prompt templates
 

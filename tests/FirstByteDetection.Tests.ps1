@@ -87,6 +87,67 @@ Describe 'REST attempt timeouts are capped' -Tag Unit {
     }
 }
 
+Describe 'Get-ClaudeFirstBytePlan scales with the attempt budget' -Tag Unit {
+    It 'grants attempt-minus-margin instead of a flat 300s' {
+        Get-ClaudeFirstBytePlan -AttemptTimeoutSec 600 | Should -Be 570
+        Get-ClaudeFirstBytePlan -AttemptTimeoutSec 1800 | Should -Be 1770
+    }
+
+    It 'never exceeds the attempt budget (clamp invariant)' {
+        foreach ($a in @(60, 120, 600, 1800)) {
+            $got = Get-ClaudeFirstBytePlan -AttemptTimeoutSec $a
+            $got | Should -BeLessThan $a
+        }
+    }
+
+    It 'honors ERA_CLAUDE_FIRST_BYTE_SEC, clamped to the budget' {
+        try {
+            $env:ERA_CLAUDE_FIRST_BYTE_SEC = '120'
+            Get-ClaudeFirstBytePlan -AttemptTimeoutSec 600 | Should -Be 120
+            $env:ERA_CLAUDE_FIRST_BYTE_SEC = '5000'
+            Get-ClaudeFirstBytePlan -AttemptTimeoutSec 600 | Should -Be 570
+        } finally { Remove-Item Env:ERA_CLAUDE_FIRST_BYTE_SEC -ErrorAction SilentlyContinue }
+    }
+
+    It 'ignores a non-numeric or too-small env override' {
+        try {
+            $env:ERA_CLAUDE_FIRST_BYTE_SEC = 'bogus'
+            Get-ClaudeFirstBytePlan -AttemptTimeoutSec 600 | Should -Be 570
+            $env:ERA_CLAUDE_FIRST_BYTE_SEC = '5'
+            Get-ClaudeFirstBytePlan -AttemptTimeoutSec 600 | Should -Be 570
+        } finally { Remove-Item Env:ERA_CLAUDE_FIRST_BYTE_SEC -ErrorAction SilentlyContinue }
+    }
+
+    It 'leaves no hardcoded 300s first-byte call site' {
+        $src = Get-Content -Raw "$PSScriptRoot/../backends/claude.ps1"
+        $src | Should -Not -Match '-FirstByteTimeoutSec 300'
+    }
+}
+
+Describe 'Convert-ClaudeStreamJsonToText' -Tag Unit {
+    It 'extracts text deltas from stream-json lines' {
+        $lines = @(
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello "}]}}',
+            '{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}'
+        ) -join "`n"
+        Convert-ClaudeStreamJsonToText -Raw $lines | Should -Be 'Hello world'
+    }
+
+    It 'prefers the terminal result over re-assembled deltas (no duplication)' {
+        $lines = @(
+            '{"type":"assistant","message":{"content":[{"type":"text","text":"Hello "}]}}',
+            '{"type":"content_block_delta","delta":{"type":"text_delta","text":"world"}}',
+            '{"type":"result","subtype":"success","result":"Hello world"}'
+        ) -join "`n"
+        Convert-ClaudeStreamJsonToText -Raw $lines | Should -Be 'Hello world'
+    }
+
+    It 'returns raw text when nothing parses' {
+        Convert-ClaudeStreamJsonToText -Raw 'plain text output' | Should -Be 'plain text output'
+        Convert-ClaudeStreamJsonToText -Raw '' | Should -Be ''
+    }
+}
+
 Describe 'metadata persists first-byte seconds' -Tag Unit {
     BeforeAll { . "$PSScriptRoot/../workflow.ps1" }
 
