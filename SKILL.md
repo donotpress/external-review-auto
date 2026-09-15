@@ -42,7 +42,7 @@ trigger: /external-review-auto
 | **anthropic** | `ANTHROPIC_API_KEY` (https://console.anthropic.com/) | `opus-api`, `sonnet-api`, `haiku-api` |
 | **openaicompat** | per-preset (`DEEPSEEK_API_KEY`, `MINIMAX_API_KEY`, …) | `deepseek-api`, `deepseek-reasoner-api`, `minimax-api`; extensible via `_registry.json` to Groq/Together/OpenRouter/any OpenAI-compatible endpoint |
 | **opencode (HTTP, v1.8)** | `OPENCODE_API_KEY` / `NVIDIA_API_KEY` — **auto-sourced from opencode `auth.json` if unset** | `deepseek-http`, `glm-http`, `minimax-http`, `kimi-http`, `nvidia` — opencode-go models + free NVIDIA NIM over **direct HTTP (no TUI)**. Set `ERA_USE_HTTP_OPENCODE=1` to route the `deepseek`/`minimax` aliases here automatically. |
-| **cmdc** (Command Code CLI) | none — runs on the cmdc subscription | `longcat`, `laguna-free` (both **$0/$0**), `qwen-flash`, `glm-flash`, `minimax-m3`, `glm`, `grok`, `qwen-max`, `kimi` — reaches vendor families era has no other subscription route to (xAI, Qwen, poolside). Process-spawn, headless; **WSL-only on this box**, so it crosses the WSL boundary (`references/wsl-argument-boundary.md`). |
+| **cmdc** (Command Code CLI) | none — runs on the cmdc subscription | `longcat`, `laguna-free` (both **USD 0 / USD 0**), `qwen-flash`, `glm-flash`, `minimax-m3`, `glm`, `grok`, `qwen-max`, `kimi` — reaches vendor families era has no other subscription route to (xAI, Qwen, poolside). Process-spawn, headless; **WSL-only on this box**, so it crosses the WSL boundary (`references/wsl-argument-boundary.md`). |
 
 REST adapters bypass the CLI entirely — no subprocess, no TTY exposure, no console pollution, no transcript-file polling. Use them if you want the strongest hermetic guarantees and/or you have direct API keys. Otherwise CLI adapters are fine and free.
 
@@ -78,7 +78,7 @@ Change it with `/era set default <names>` (accepts a panel), or edit the file.
 > Muse Spark 1.3 Contributor (opencode-go). Cross-vendor on purpose: in round 11 one
 > reviewer reviewed the wrong subject entirely while another found a real shipped
 > regression, so a single reviewer is a single point of failure whichever one you
-> pick. Cost is dominated by Opus (~$5/$25 per M vs ~$0.3, ~$0.14 and ~$0.10) — pass
+> pick. Cost is dominated by Opus (~USD 5 / USD 25 per M vs ~USD 0.3, ~USD 0.14 and ~USD 0.10) — pass
 > `-Reviewer gemini` for a cheap single run.
 >
 > The 4th seat was `ox-alpha` from 2026-08-22 until 2026-08-26, when opencode stopped
@@ -96,7 +96,7 @@ Change it with `/era set default <names>` (accepts a panel), or edit the file.
 > `ERA_DEFAULT_REVIEWER=haiku`), or pass `-Reviewer` explicitly (an explicit choice is
 > respected as-is and still errors if its backend is missing). If NO backend is
 > available, `/era` errors with install guidance and points to `-Doctor`.
-> **Cost note:** Pro (Low) is **$1.5 in / $5.0 out per M**; the cost-cap prompt still
+> **Cost note:** Pro (Low) is **USD 1.5 in / USD 5.0 out per M**; the cost-cap prompt still
 > fires (unless `-Force`).
 
 ## How it works
@@ -201,7 +201,7 @@ superset of tracked files, so git would under-report exactly the repo that hurts
 
 **Repo-root constraint:** All `-IncludeFiles` paths are resolved relative to the repo root. Files outside the repo (e.g., the SKILL.md itself at `~/.claude/skills/...`) cannot be included. To review external files, copy them into the repo first or reference them in the prompt text.
 
-**Cost guidance:** Every 10K bundle tokens costs ~$0.01-0.03 depending on backend. A 70K-token bundle costs ~$0.15-0.27. Curate aggressively for iterative rounds.
+**Cost guidance:** Every 10K bundle tokens costs ~USD 0.01-0.03 depending on backend. A 70K-token bundle costs ~USD 0.15-0.27. Curate aggressively for iterative rounds.
 
 ## Parsing natural-language input — call `resolve.ps1` (portable, deterministic)
 
@@ -663,7 +663,7 @@ real — and that verdict still says the finding may be.
 | `ERA_BROAD_MAX_BYTES` | `10MB` | Scale-gate byte ceiling, same gate. Non-numeric values warn and keep the default. |
 | `ERA_BROAD_FORCE` | (unset) | Set to `1` to consent to a broad bundle above the ceiling — the env-var equivalent of `-ForceBroadScope`. **`-Force` deliberately does NOT do this**; it only skips the cost prompt. |
 | `ERA_STRAGGLER_GRACE_SEC` | `300` | How long the dispatcher waits for the **last** outstanding reviewer once every other panel member has finished, before abandoning it. Sized from measured healthy spread (slowest trailed second-slowest by ≤136s across four real rounds), so it does not cut off a slow-but-working reviewer. Set `0` to wait out the full timeout instead. Only ever applies when exactly one reviewer is left. **Interaction:** an adapter that publishes a later self-deadline (`<pidfile>.deadline`, currently opencode + agy) defers the kill until min(self-deadline + 20s, budget end) — a lone read-tool seat waiting out designed silence is not tree-killed at lone+300. |
-| `ERA_PREFLIGHT_ONLY` | (unset) | Env equivalent of `-PreflightOnly`, and **only safe when set from inside PowerShell**. ⛔ **It does NOT cross the WSL boundary.** `ERA_PREFLIGHT_ONLY=1 pwsh … era.ps1` from a WSL shell sets a *Linux* variable; `pwsh` on a WSL PATH execs `pwsh.exe`; `ERA_*` is not in `WSLENV`, so it arrives **empty** and era dispatches a real round. Measured 2026-09-04, and it cost a caller $0.66 on a round they meant to price-check. **The direction of that failure is why the switch exists**: a dropped safety flag does not refuse, it spends. Use `-PreflightOnly`. |
+| `ERA_PREFLIGHT_ONLY` | (unset) | Env equivalent of `-PreflightOnly`, and **only safe when set from inside PowerShell**. ⛔ **It does NOT cross the WSL boundary.** `ERA_PREFLIGHT_ONLY=1 pwsh … era.ps1` from a WSL shell sets a *Linux* variable; `pwsh` on a WSL PATH execs `pwsh.exe`; `ERA_*` is not in `WSLENV`, so it arrives **empty** and era dispatches a real round. Measured 2026-09-04, and it cost a caller USD 0.66 on a round they meant to price-check. **The direction of that failure is why the switch exists**: a dropped safety flag does not refuse, it spends. Use `-PreflightOnly`. |
 | `ERA_HEARTBEAT_SEC` | `60` | How often the dispatch poll loop reports that it is still alive: elapsed, budget, how many seats are done, and **which seats are still running by name**. Set `0` to disable. Without it the log is silent from the `[dispatch] Scaled TimeoutSec` line until either a lone straggler appears or the budget expires — up to `TimeoutSec + 30`, i.e. 732 s on a 35k-token panel and 1830 s on a large one — and in that window nothing distinguishes "working" from "died ten minutes ago". That ambiguity cost two rounds: `bulk-refresh-vpn-headless` r1/r2, where the driver read the silence as death and re-dispatched while r1 was still running (both seats paid twice), and `direction-paths-2026-09-04` r1, where the dispatcher was reaped by its launcher's tool timeout and establishing merely *when* took process forensics. **A non-numeric value falls back to 60, never to 0** — silence is the failure this removes, so a typo must not quietly reinstate it. |
 | `ERA_PREVIOUS_ROUND_MAX_CHARS` | `80000` | Cap on the text `{{PREVIOUS_ROUND}}` expands to. Truncation keeps the head (grade/verdict/blockers) and says how much it dropped. The default is ~2x a measured three-reviewer round (40,400 chars), so a normal round is never truncated. |
 | `ERA_ALLOW_DIRTY` | (unset) | Set to `1` to dispatch even though the working tree has uncommitted changes — the env equivalent of `-AllowDirtyTree`. A review bundles the working TREE while the round is cited as covering commits, so on a dirty tree the reviewer sees code that never lands in the reviewed commit. Like `-ForceBroadScope`, deliberately **not** bypassed by `-Force`. Note `git status --porcelain` counts untracked-but-not-ignored files as dirt. |

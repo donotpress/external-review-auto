@@ -148,6 +148,17 @@ Describe 'era.ps1 wires the UX batch' -Tag Unit {    BeforeAll { $script:EraSrc 
     }
 }
 
+Describe 'SKILL.md has no dollar-digit tokens (Claude substitution)' -Tag Unit {
+    # MEASURED 2026-09-15: Claude Code substitutes positional $<digit> tokens
+    # in loaded skill text with invocation words, so cost figures like ~$5/$25
+    # rendered as '~awc-system-audit/$25'. Money is written USD-first.
+    It 'contains zero $[0-9] sequences' {
+        $lines = Get-Content -LiteralPath "$PSScriptRoot/../SKILL.md"
+        $bad = @($lines | Where-Object { $_ -match '\$[0-9]' } | ForEach-Object { $_.Trim() })
+        ($bad -join "`n") | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'docs/error-codes.md covers every deliberate code' -Tag Unit {
     It 'names each code the recovery paths key on (anti-drift)' {
         $doc = Get-Content -Raw "$PSScriptRoot/../docs/error-codes.md"
