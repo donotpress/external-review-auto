@@ -36,7 +36,9 @@
 
 # Last-resort default. Only used if the config file is missing or unreadable, so
 # /era can never end up with no reviewer at all.
-$script:EraShippedPanel = @('gemini', 'opus', 'deepseek-flash', 'muse-spark')
+$script:EraShippedPanel = @('opus', 'muse-spark')
+# 2026-09-23: 4 -> 2 at operator request (gemini/deepseek backends exhausted).
+# Lockstep with config/defaults.json.
 # 2026-08-22: 3 -> 4. The 4th seat buys redundancy: on the factor-conditioned-sharpe round
 # `deepseek-flash` errored and the panel silently degraded to two.
 #

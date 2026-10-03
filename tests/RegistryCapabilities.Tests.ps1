@@ -47,8 +47,8 @@ Describe 'The default panel pins current model IDs' -Tag Unit {
     # The shipped panel is the most expensive and most-used configuration, and a
     # stale model ID there is invisible: the CLI happily runs an older model and
     # nothing in the output says so. Pin it.
-    It 'the opus preset in the default panel resolves to Claude Opus 5' {
-        $script:Registry.opus.model_id | Should -Be 'claude-opus-5'
+    It 'the opus preset in the default panel resolves to Claude Opus 5.5' {
+        $script:Registry.opus.model_id | Should -Be 'claude-opus-5-5'
     }
 
     # --- the two-doors invariant -------------------------------------------
