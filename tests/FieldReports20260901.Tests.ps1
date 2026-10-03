@@ -195,7 +195,7 @@ Describe 'model-hint resolution is deterministic' -Tag Unit {
 
     It 'still resolves the ergonomic exact hints correctly' {
         # The exact pass runs first, so the fix must not disturb normal usage.
-        (Resolve-ModelFromHint -Hint 'opus'   -Registry $script:Reg).ModelId | Should -Be 'claude-opus-5'
+        (Resolve-ModelFromHint -Hint 'opus'   -Registry $script:Reg).ModelId | Should -Be 'claude-opus-5-5'
         (Resolve-ModelFromHint -Hint 'sonnet' -Registry $script:Reg).ModelId | Should -Be 'claude-sonnet-5'
         (Resolve-ModelFromHint -Hint 'gemini 3.1 pro low' -Registry $script:Reg).Provider | Should -Be 'agy'
     }

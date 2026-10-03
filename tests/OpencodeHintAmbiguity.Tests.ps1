@@ -124,6 +124,6 @@ Describe 'an ambiguous opencode hint resolves independently of registry order' -
         # invisible to every hint that names its model.
         (Resolve-ModelFromHint -Hint 'mimo-v2.5'     -Registry $script:Reg).ModelId | Should -BeExactly 'opencode-go/mimo-v2.5'
         (Resolve-ModelFromHint -Hint 'mimo-v2.5-pro' -Registry $script:Reg).ModelId | Should -BeExactly 'opencode-go/mimo-v2.5-pro'
-        (Resolve-ModelFromHint -Hint 'opus'          -Registry $script:Reg).ModelId | Should -Be 'claude-opus-5'
+        (Resolve-ModelFromHint -Hint 'opus'          -Registry $script:Reg).ModelId | Should -Be 'claude-opus-5-5'
     }
 }

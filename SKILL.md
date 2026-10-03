@@ -647,6 +647,8 @@ real — and that verdict still says the finding may be.
 
 ### Environment variables
 
+The opencode backend runs on opencode **v2** by default (`ERA_OPENCODE_CLI` unset or `v2`): the native 2.x binary, every invocation with `--standalone` (its background-service mode never starts on this host — measured 220 s timeout), variant joined as `-m model#variant` (v2 rejects `--variant`), and `OPENCODE_API_KEY` sourced from the shared v1 `auth.json` in the run child's env block (v2 ignores a copied `auth.json` — measured). Set `ERA_OPENCODE_CLI=v1` to roll back to the legacy v1 binary and argv byte for byte. `ERA_OPENCODE_V2_EXE` / `ERA_OPENCODE_V1_EXE` pin explicit binary paths when the default discovery (`%LOCALAPPDATA%\opencode-v2\bin\opencode.exe`, resp. `opencode` on PATH) does not fit. An unknown selector or a missing binary throws before dispatch — nothing is sent, nothing is spent.
+
 | Variable | Default | Purpose |
 |---|---|---|
 | `ERA_FORCE` | (unset) | Set to `1` to skip the cost confirmation prompt (non-interactive mode) |
@@ -670,6 +672,9 @@ real — and that verdict still says the finding may be.
 | `ERA_CONVERGENCE_WARNINGS` | (unset) | Set to `0` to suppress the convergence/anti-pattern warnings (e.g. slug-per-round detection). |
 | `ERA_OPENCODE_FIRST_TOKEN_SEC` | `120` | opencode first-token deadline. Must be an integer ≥ 10 (the poll interval); anything else warns and falls back to 120. |
 | `ERA_OPENCODE_VARIANT_STATE` | (unset) | Set to a truthy value (not `0`/`false`) to use per-variant opencode state when a non-`default` variant is selected. |
+| `ERA_OPENCODE_CLI` | `v2` | Selects which opencode binary the opencode backend runs: `v2` (default native 2.x binary, `--standalone`, `-m model#variant`, API key from the shared v1 `auth.json`) or `v1` (legacy npm 1.x shim, exact legacy argv). Anything else throws before dispatch — nothing is sent, nothing is spent. Rollback: `ERA_OPENCODE_CLI=v1` restores the legacy binary and argv byte for byte. |
+| `ERA_OPENCODE_V2_EXE` | (auto: `%LOCALAPPDATA%\opencode-v2\bin\opencode.exe`) | Explicit path to the opencode v2 binary (used when `ERA_OPENCODE_CLI` is `v2`). A missing binary throws before dispatch with the install-or-roll-back hint. |
+| `ERA_OPENCODE_V1_EXE` | (auto: `opencode` on PATH) | Explicit path to the legacy opencode v1 binary (used only with `ERA_OPENCODE_CLI=v1`). A nonexistent path throws before dispatch. |
 | `ERA_CLAUDE_FIRST_BYTE_SEC` | (attempt budget − 30s) | claude first-byte deadline. `claude --print` in text mode emits nothing until the answer is complete (measured: first byte lands within ~2-6s of exit), so this bound is effectively a total-response cap — hence scaled with the attempt budget instead of a flat 300s, and always clamped inside it. Set to an integer ≥ 10 to pin it (also clamped); anything else warns and is ignored. |
 | `ERA_CLAUDE_OUTPUT_FORMAT` | `text` | Set to `stream-json` so the claude seat streams partial messages (first byte then really means alive) instead of buffering the whole answer. The adapter reassembles the JSONL into text; unparseable output falls back to raw. Anything else warns and uses `text`. |
 

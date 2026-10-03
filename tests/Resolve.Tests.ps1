@@ -89,7 +89,7 @@ Describe 'Resolve-ModelFromHint (Layer-2 extraction, D.0)' {
         # hint door and the preset door must name the SAME model. The literal
         # is kept alongside it so both tables going stale together still fails.
         $r = Resolve-ModelFromHint -Hint 'opus' -Registry $script:Registry
-        $r.ModelId  | Should -BeExactly 'claude-opus-5'
+        $r.ModelId  | Should -BeExactly 'claude-opus-5-5'
         $r.ModelId  | Should -BeExactly $script:Registry.opus.model_id
         $r.Provider | Should -BeExactly 'claude'
     }

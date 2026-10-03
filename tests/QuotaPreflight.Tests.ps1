@@ -16,7 +16,7 @@ BeforeAll {
     . "$PSScriptRoot/../workflow.ps1"
 
     function New-QuotaFlag {
-        param([bool]$Exhausted = $true, [string]$RefreshUtc = '2026-09-15T04:56:05Z', [string]$Raw = $null)
+        param([bool]$Exhausted = $true, [string]$RefreshUtc = '2027-09-15T04:56:05Z', [string]$Raw = $null)
         $p = Join-Path ([System.IO.Path]::GetTempPath()) ("era-quota-" + [guid]::NewGuid() + ".json")
         if (-not [string]::IsNullOrEmpty($Raw)) { $Raw | Set-Content -LiteralPath $p -NoNewline -Encoding utf8 }
         else {
@@ -39,7 +39,7 @@ Describe 'Get-AgyQuotaState' -Tag Unit {
             $r = Get-AgyQuotaState -FlagPath $f
             $r.Exhausted | Should -BeTrue
             # Same instant, any Kind (Should -Be is Kind-strict on DateTimes).
-            $r.RefreshUtc.ToUniversalTime() | Should -Be ([datetime]'2026-09-15T04:56:05Z').ToUniversalTime()
+            $r.RefreshUtc.ToUniversalTime() | Should -Be ([datetime]'2027-09-15T04:56:05Z').ToUniversalTime()
         } finally { Remove-Item -LiteralPath $f -ErrorAction SilentlyContinue }
     }
 
