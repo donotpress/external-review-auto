@@ -79,6 +79,16 @@ Describe 'opencode attach limit' -Tag Unit {
     }
 
     It 'keeps -f attachment gated behind the not-read-tool branch' {
-        $script:Src | Should -Match "if \(-not \`$useReadTool\) \{[\s\S]{0,200}ArgumentList\.Add\('-f'\)"
+        # WAS a regex over the inline argv shape. The argv moved into
+        # Get-OpencodeRunArgs (v1/v2 spellings); assert the behaviour, which is
+        # what this was reaching for: -f+bundle present iff not the read path.
+        $attach = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $false -BundlePath 'b.xml'
+        ($attach -contains '-f') | Should -BeTrue
+        ($attach -contains 'b.xml') | Should -BeTrue
+        $read = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $true -BundlePath 'b.xml'
+        ($read -contains '-f') | Should -BeFalse
+        ($read -contains 'b.xml') | Should -BeFalse
     }
 }

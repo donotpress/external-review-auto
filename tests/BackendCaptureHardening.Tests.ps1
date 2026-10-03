@@ -65,15 +65,39 @@ Describe 'shared narration/refusal detector' {
 }
 
 Describe 'opencode attaches the bundle via -f by default (no Read-tool dependency)' {
-    BeforeAll { $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1') }
+    BeforeAll {
+        $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+    }
 
-    It 'adds -f <BundlePath> to the opencode ArgumentList' {
-        $script:OC | Should -Match "ArgumentList\.Add\('-f'\)"
-        $script:OC | Should -Match "ArgumentList\.Add\(\`$BundlePath\)"
+    It 'adds -f <BundlePath> to the opencode argv (and drops both on the Read-tool path)' {
+        # WAS a regex over the inline ArgumentList shape. The argv moved into
+        # Get-OpencodeRunArgs (v1/v2 spellings); assert the behaviour, both
+        # halves in one value: attach carries -f+bundle, read-tool carries
+        # neither.
+        $attach = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $false -BundlePath 'b.xml'
+        ($attach -contains '-f') | Should -BeTrue
+        ($attach -contains 'b.xml') | Should -BeTrue
+        $read = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $true -BundlePath 'b.xml'
+        ($read -contains '-f') | Should -BeFalse
+        ($read -contains 'b.xml') | Should -BeFalse
     }
     It 'passes the message BEFORE -m (so the greedy -f array cannot swallow the prompt)' {
-        # message positional must be added before the -m option in the arg list.
-        $script:OC | Should -Match "ArgumentList\.Add\(\`$prompt\)[\s\S]*?ArgumentList\.Add\('-m'\)"
+        # message positional must precede the -m option, and -f stays last, on
+        # both CLI spellings.
+        foreach ($ver in @('v1', 'v2')) {
+            $argv = Get-OpencodeRunArgs -CliVersion $ver -Prompt 'p' -ModelId 'm' `
+                -Variant 'default' -UseReadTool $false -BundlePath 'b.xml'
+            $argv[0] | Should -Be 'run'
+            $pi = [array]::IndexOf($argv, 'p')
+            $mi = [array]::IndexOf($argv, '-m')
+            $fi = [array]::IndexOf($argv, '-f')
+            $pi | Should -BeGreaterThan 0
+            $mi | Should -BeGreaterThan $pi
+            $fi | Should -BeGreaterThan $mi
+        }
     }
     It 'defaults to the attach prompt and gates the Read-tool path behind ERA_OPENCODE_READ_TOOL' {
         $script:OC | Should -Match 'Review the attached bundle file'
@@ -82,7 +106,10 @@ Describe 'opencode attaches the bundle via -f by default (no Read-tool dependenc
 }
 
 Describe 'opencode is stateless by default (opt-in variant-state insurance)' {
-    BeforeAll { $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1') }
+    BeforeAll {
+        $script:OC = Get-Content -Raw (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+        . (Join-Path (Split-Path $PSScriptRoot -Parent) 'backends/opencode.ps1')
+    }
 
     It 'removed the old always-on startup mutex + recent[] swap' {
         $script:OC | Should -Not -Match 'era-opencode-state-mutex'   # old always-on mutex name
@@ -92,8 +119,21 @@ Describe 'opencode is stateless by default (opt-in variant-state insurance)' {
         $script:OC | Should -Not -Match '\$newRecent'
     }
     It 'selects model + variant via CLI flags by default (Option A)' {
-        $script:OC | Should -Match "ArgumentList\.Add\('-m'\)"
-        $script:OC | Should -Match "ArgumentList\.Add\('--variant'\)"
+        # WAS a regex over the inline ArgumentList shape. The argv moved into
+        # Get-OpencodeRunArgs: v1 keeps -m/--variant, v2 folds the variant
+        # into -m model#variant (v2 rejects --variant outright).
+        $v1 = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' `
+            -ModelId 'opencode-go/deepseek-v4-flash' -Variant 'xhigh' `
+            -UseReadTool $false -BundlePath 'b.xml'
+        ($v1 -contains '-m') | Should -BeTrue
+        ($v1 -contains '--variant') | Should -BeTrue
+        ($v1 -contains 'opencode-go/deepseek-v4-flash') | Should -BeTrue
+        $v2 = Get-OpencodeRunArgs -CliVersion v2 -Prompt 'p' `
+            -ModelId 'opencode-go/deepseek-v4-flash' -Variant 'xhigh' `
+            -UseReadTool $false -BundlePath 'b.xml'
+        ($v2 -contains '-m') | Should -BeTrue
+        ($v2 -contains '--variant') | Should -BeFalse
+        ($v2 -contains 'opencode-go/deepseek-v4-flash#xhigh') | Should -BeTrue
     }
     It 'state.json variant write is OPT-IN (Option B) behind ERA_OPENCODE_VARIANT_STATE' {
         $script:OC | Should -Match 'ERA_OPENCODE_VARIANT_STATE'

@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
     opencode backend adapter for /external-review-auto. Invokes
-    `opencode run "<prompt>" -m <model_id> [--variant <v>] -f <bundle>`.
+    v1: `opencode run "<prompt>" -m <model_id> [--variant <v>] -f <bundle>`;
+    v2 (default since 2026-10-03): `opencode run --standalone "<prompt>"
+    -m [<model_id>#<v>] -f <bundle>` (see Resolve-OpencodeCli).
 .DESCRIPTION
     - Bundle delivery is SIZE-DEPENDENT. At or under 51,200 bytes it is ATTACHED
       via `-f` (fast, no tool calls). Above that opencode truncates an attached
@@ -9,15 +11,17 @@
       2026-08-31 with mid-bundle canaries up to 668,389 bytes on both default
       seats. Past 1,048,576 bytes, beyond anything measured, the adapter refuses.
       ERA_OPENCODE_READ_TOOL forces either mode (1 = read, 0 = attach).
-    - Model + variant are selected purely via the `-m` / `--variant` CLI flags.
+    - Model + variant are selected purely via CLI flags: v1 via `-m` /
+      `--variant`, v2 via `-m <model>#<variant>` (v2 rejects `--variant`).
       Probe-verified (2026-06-04): `opencode run -m <id>` overrides recent[0] and
       does NOT mutate ~/.local/state/opencode/model.json. The old state.json swap +
       Global startup mutex + multi-layer restore + era.ps1 crash-recovery existed
       only to protect/restore a file the run never touches, so they were removed —
       eliminating the mutex-abandonment / restore-race failure modes and letting
       concurrent opencode startups run in parallel.
-    - $chosenVariant is still resolved from the registry (passed via --variant and
-      used to widen the stall threshold for reasoning-heavy variants).
+    - $chosenVariant is still resolved from the registry (sent as --variant on
+      v1 / -m model#variant on v2, and used to widen the stall threshold for
+      reasoning-heavy variants).
     - Captured output is routed through the shared non-review detector so a clean
       exit-0 that is actually a refusal/narration fails honestly.
     - Used by presets: minimax, deepseek.
@@ -822,14 +826,21 @@ function Update-OpencodeResumeSession {
         [Parameter(Mandatory)][AllowNull()][object]$IsoState,
         [Parameter(Mandatory)][AllowEmptyString()][string]$MapPath,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Preset,
-        [Parameter(Mandatory)][long]$SinceMs
+        [Parameter(Mandatory)][long]$SinceMs,
+        # v2 needs --standalone here too: its background service never starts
+        # on this host (measured 2026-10-03), and without it this 15s-bounded
+        # `session list` would always time out. Default 'v1' keeps the legacy
+        # spelling for any caller that does not name a version.
+        [string]$CliVersion = 'v1'
     )
     try {
         if (-not $IsoState -or -not $IsoState.ShareDir -or -not $IsoState.StateDir) { return }
         if (-not $OpencodeExe -or -not $MapPath -or -not $Preset) { return }
         $psi2 = [System.Diagnostics.ProcessStartInfo]::new()
         $psi2.FileName = $OpencodeExe
-        foreach ($a in @('session', 'list', '-n', '10', '--format', 'json')) { $psi2.ArgumentList.Add($a) }
+        $listArgs = @('session', 'list', '-n', '10', '--format', 'json')
+        if ($CliVersion -eq 'v2') { $listArgs += '--standalone' }
+        foreach ($a in $listArgs) { $psi2.ArgumentList.Add($a) }
         $psi2.UseShellExecute = $false
         $psi2.CreateNoWindow = $true
         $psi2.RedirectStandardOutput = $true
@@ -855,6 +866,129 @@ function Remove-OpencodeIsolatedState {
             Remove-Item -LiteralPath $State.TempRoot -Recurse -Force -ErrorAction Stop
         }
     } catch { }
+}
+
+function Resolve-OpencodeCli {
+    <#
+    .SYNOPSIS
+        Which opencode binary this seat runs: v2 (default) or v1 (rollback).
+    .DESCRIPTION
+        v2 (opencode 2.x, native binary) is the default since 2026-10-03 at the
+        operator's request; v1 (the npm 1.x shim on PATH) stays selectable via
+        ERA_OPENCODE_CLI=v1. MEASURED 2026-10-03: v2's background-service mode
+        never starts on this host ("Timed out waiting for the background service
+        to start" after 220s), so every v2 invocation MUST pass --standalone
+        (private server); v2 keeps credentials in its sqlite db and does NOT
+        import the copied auth.json, so the run child gets OPENCODE_API_KEY
+        from it (see Get-OpencodeGoApiKey); v2 rejects `--variant` outright
+        ("Unrecognized flag"), so the variant joins the model after '#'
+        (see Get-OpencodeRunArgs). Missing v2 binary or an unknown selector
+        value THROWS (fail closed: silently running the wrong backend would
+        bill a round era did not mean to dispatch).
+    #>
+    [CmdletBinding()]
+    param()
+    $which = $env:ERA_OPENCODE_CLI
+    if (-not $which) { $which = 'v2' }
+    $which = $which.Trim().ToLowerInvariant()
+    if ($which -eq 'v2') {
+        $exe = $env:ERA_OPENCODE_V2_EXE
+        if (-not $exe) {
+            $exe = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'opencode-v2\bin\opencode.exe'
+        }
+        if (-not (Test-Path -LiteralPath $exe)) {
+            throw ("opencode v2 selected (ERA_OPENCODE_CLI=v2) but the binary is missing at $exe. " +
+                "Install it (https://opencode.ai/v2/docs) or roll back with ERA_OPENCODE_CLI=v1. " +
+                "Nothing was dispatched and nothing was spent.")
+        }
+        return @{ Exe = $exe; Version = 'v2' }
+    }
+    if ($which -eq 'v1') {
+        $override = $env:ERA_OPENCODE_V1_EXE
+        if ($override) {
+            if (-not (Test-Path -LiteralPath $override)) {
+                throw "ERA_OPENCODE_V1_EXE=$override does not exist. Nothing was dispatched and nothing was spent."
+            }
+            return @{ Exe = $override; Version = 'v1' }
+        }
+        # Legacy resolution: ProcessStartInfo (UseShellExecute=$false) does no
+        # PATHEXT search, so a .ps1 shim must be swapped for its .cmd sibling.
+        $opencodeCli = Get-Command opencode -ErrorAction Stop
+        $opencodeExe = if ($opencodeCli.Source -match '\.ps1$') {
+            $cmdPath = $opencodeCli.Source -replace '\.ps1$', '.cmd'
+            if (-not (Test-Path -LiteralPath $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
+            $cmdPath
+        } else { $opencodeCli.Source }
+        return @{ Exe = $opencodeExe; Version = 'v1' }
+    }
+    throw "ERA_OPENCODE_CLI='$($env:ERA_OPENCODE_CLI)' is not 'v1' or 'v2'. Nothing was dispatched and nothing was spent."
+}
+
+function Get-OpencodeRunArgs {
+    <#
+    .SYNOPSIS
+        Pure argv builder for `opencode run`: v1 vs v2 spellings in one place.
+    .DESCRIPTION
+        v1: run <prompt> -m <model> [--variant <v>] [-f <bundle>].
+        v2: run --standalone <prompt> -m [<model>#<v>] [-f <bundle>].
+        --standalone is REQUIRED on v2 (its background service never starts on
+        this host -- measured 2026-10-03). The message stays FIRST and -f LAST:
+        that order was probe-confirmed for v1's greedy -f, and v2 accepts it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('v1', 'v2')][string]$CliVersion,
+        [Parameter(Mandatory)][string]$Prompt,
+        [Parameter(Mandatory)][string]$ModelId,
+        [string]$Variant = 'default',
+        [bool]$UseReadTool = $false,
+        [string]$BundlePath
+    )
+    $argv = @('run')
+    if ($CliVersion -eq 'v2') { $argv += '--standalone' }
+    $argv += $Prompt
+    $argv += '-m'
+    if ($CliVersion -eq 'v2' -and $Variant -and $Variant -ne 'default') {
+        $argv += "$ModelId#$Variant"
+    } else {
+        $argv += $ModelId
+    }
+    if ($CliVersion -eq 'v1' -and $Variant -and $Variant -ne 'default') {
+        $argv += '--variant'
+        $argv += $Variant
+    }
+    if (-not $UseReadTool) {
+        $argv += '-f'
+        $argv += $BundlePath
+    }
+    return $argv
+}
+
+function Get-OpencodeGoApiKey {
+    <#
+    .SYNOPSIS
+        The opencode-go API key out of the shared v1 auth.json (or $null).
+    .DESCRIPTION
+        MEASURED 2026-10-03: v2 in an isolated XDG dir (auth.json copied, the
+        era isolation shape) lists NO file credentials -- only environment
+        ones -- while OPENCODE_API_KEY=dummy makes "OpenCode Go / environment"
+        appear. So the copied file alone leaves a v2 seat unauthenticated; the
+        run child needs OPENCODE_API_KEY in its env block (same per-child
+        pattern as the XDG vars, never the parent process). Best-effort:
+        $null means "proceed unauthenticated and fail honestly at the run".
+    #>
+    [CmdletBinding()]
+    param([string]$AuthSource)
+    if (-not $AuthSource) {
+        $AuthSource = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.local/share/opencode/auth.json'
+    }
+    try {
+        $auth = Get-Content -Raw -LiteralPath $AuthSource -ErrorAction Stop |
+            ConvertFrom-Json -ErrorAction Stop
+        $key = $auth.'opencode-go'.key
+        if ($key -is [string] -and $key.Length -gt 0) { return $key }
+        return $null
+    } catch { return $null }
 }
 
 function Invoke-OpencodeReview {
@@ -1017,6 +1151,13 @@ function Invoke-OpencodeReview {
     $errFile = [System.IO.Path]::GetTempFileName()
     $modelId = if ($ModelOverride) { $ModelOverride } else { $ModelInfo.model_id }
 
+    # Resolve the CLI first: v2 default, v1 rollback (see Resolve-OpencodeCli).
+    # Fails fast on a missing binary or unknown selector -- before any budget
+    # is spent and before the opt-in variant-state insurance below (v1-only).
+    $cli = Resolve-OpencodeCli
+    $opencodeExe = $cli.Exe
+    $cliVersion = $cli.Version
+
     # --- Phase 1: First-token deadline configuration ---
     # Default 120s; env var must be a positive integer >= 10 (poll interval = 10s).
     # Values 1-9 clamp to 10s; non-integer/empty/negative fall back to 120s.
@@ -1034,7 +1175,8 @@ function Invoke-OpencodeReview {
 
     # --- Variant resolution (registry-driven; NO state.json mutation) ---
     # Pick the strongest declared variant (max -> high -> medium -> low), else
-    # 'default'. Passed via --variant and used to tune the stall threshold below.
+    # 'default'. Sent as --variant on v1 / -m model#variant on v2, and used to
+    # tune the stall threshold below.
     # A slash-less / unknown model_id resolves to 'default' gracefully (no throw —
     # the old state-swap crashed on it).
     $providerID, $modelIDPart = $modelId -split '/', 2
@@ -1076,10 +1218,13 @@ function Invoke-OpencodeReview {
         if ($modelVariants -contains $preferred) { $chosenVariant = $preferred; break }
     }
 
-    # Option-B insurance (opt-in): in addition to the --variant flag, also write the
-    # variant into the user's state.json. Off by default -> fully stateless. The
-    # outer try/finally below guarantees the state entry is restored on every path.
-    $useVariantState = $env:ERA_OPENCODE_VARIANT_STATE -and $env:ERA_OPENCODE_VARIANT_STATE -ne '0' -and $env:ERA_OPENCODE_VARIANT_STATE -ne 'false' -and $chosenVariant -ne 'default'
+    # Option-B insurance (opt-in, v1 ONLY): in addition to the --variant flag,
+    # also write the variant into the user's v1 state.json. v2 does not read
+    # that file (the variant travels as -m model#variant), so on v2 this would
+    # be a pointless mutation of the operator's state -- skipped. Off by
+    # default -> fully stateless. The outer try/finally below guarantees the
+    # state entry is restored on every path.
+    $useVariantState = $env:ERA_OPENCODE_VARIANT_STATE -and $env:ERA_OPENCODE_VARIANT_STATE -ne '0' -and $env:ERA_OPENCODE_VARIANT_STATE -ne 'false' -and $chosenVariant -ne 'default' -and $cliVersion -eq 'v1'
     $variantStateInfo = if ($useVariantState) { Set-OpencodeVariantEntry -ModelId $modelId -Variant $chosenVariant } else { $null }
     if ($variantStateInfo) { Write-Host "[opencode] (insurance) wrote variant=$chosenVariant to state.json for $($variantStateInfo.key)" }
 
@@ -1087,33 +1232,16 @@ function Invoke-OpencodeReview {
 
     # Launch opencode with its own private hidden console. opencode is a TUI binary
     # (Bubble Tea); sharing the parent console lets mouse-tracking + direct console
-    # writes leak into the caller's terminal. Resolve to the actual executable:
-    # ProcessStartInfo (UseShellExecute=$false) does no PATHEXT search, so a .ps1
-    # shim must be swapped for its .cmd sibling.
-    $opencodeCli = Get-Command opencode -ErrorAction Stop
-    $opencodeExe = if ($opencodeCli.Source -match '\.ps1$') {
-        $cmdPath = $opencodeCli.Source -replace '\.ps1$', '.cmd'
-        if (-not (Test-Path -LiteralPath $cmdPath)) { throw "opencode.cmd not found at $cmdPath" }
-        $cmdPath
-    } else { $opencodeCli.Source }
-
+    # writes leak into the caller's terminal ($cli resolved above, next to
+    # $modelId, so a missing binary fails before any budget is spent).
     $psi = [System.Diagnostics.ProcessStartInfo]::new()
     $psi.FileName = $opencodeExe
-    # Arg order matters: `-f`/`--file` is a greedy yargs ARRAY, so the message must
-    # come FIRST (as the positional) and `-f <bundle>` LAST, or `-f` swallows the
-    # prompt as a second file path ("File not found: Review ...") — probe-confirmed.
-    $psi.ArgumentList.Add('run')
-    $psi.ArgumentList.Add($prompt)
-    $psi.ArgumentList.Add('-m')
-    $psi.ArgumentList.Add($modelId)
-    if ($chosenVariant -ne 'default') {
-        $psi.ArgumentList.Add('--variant')
-        $psi.ArgumentList.Add($chosenVariant)
-    }
-    if (-not $useReadTool) {
-        $psi.ArgumentList.Add('-f')
-        $psi.ArgumentList.Add($BundlePath)
-    }
+    # Arg order matters: the message comes FIRST (as the positional) and
+    # `-f <bundle>` LAST -- probe-confirmed on v1 (greedy -f swallowed the
+    # prompt as a second file path); v2 accepts the same order.
+    $runArgv = Get-OpencodeRunArgs -CliVersion $cliVersion -Prompt $prompt `
+        -ModelId $modelId -Variant $chosenVariant -UseReadTool $useReadTool -BundlePath $BundlePath
+    foreach ($a in $runArgv) { $psi.ArgumentList.Add($a) }
     $psi.UseShellExecute        = $false
     $psi.CreateNoWindow         = $true
     $psi.RedirectStandardInput  = $true
@@ -1173,8 +1301,10 @@ function Invoke-OpencodeReview {
     # case where the flag is NOT passed (see the omit branch above). A log that names
     # an argument the process did not receive is the same class of defect as a comment
     # asserting behaviour no code path has: it survives review because it reads true.
-    $variantEcho = if ($chosenVariant -eq 'default') { "(no --variant; opencode's own default)" } else { "--variant $chosenVariant" }
-    Write-Host "[opencode] run -m $modelId $variantEcho (attach=$([bool](-not $useReadTool)))"
+    $variantEcho = if ($cliVersion -eq 'v2') {
+        if ($chosenVariant -eq 'default') { "-m $modelId (no variant; opencode's own default)" } else { "-m $modelId#$chosenVariant" }
+    } elseif ($chosenVariant -eq 'default') { "(no --variant; opencode's own default)" } else { "--variant $chosenVariant" }
+    Write-Host "[opencode] [$cliVersion] run -m $modelId $variantEcho (attach=$([bool](-not $useReadTool)))"
 
     $exitCode = -1
     $clean = $null
@@ -1197,9 +1327,11 @@ function Invoke-OpencodeReview {
     # always with two opencode seats in flight, never otherwise.
     #
     # A named mutex is the smallest fix that actually prevents it. Isolating the
-    # data directory per child would preserve parallelism, but opencode has no
-    # data-dir override and its auth lives in that same directory, so a private
-    # dir means an unauthenticated reviewer.
+    # data directory per child via XDG vars preserves parallelism (the
+    # persistent/throwaway modes below do exactly this); a private dir on v2
+    # additionally needs OPENCODE_API_KEY (v2 ignores the copied auth.json --
+    # see Get-OpencodeGoApiKey), otherwise a private dir means an
+    # unauthenticated reviewer.
     #
     # Cost: the opencode seats run sequentially. On the round-5 panel that is
     # additive wall clock on two of four reviewers, against losing one outright.
@@ -1241,6 +1373,14 @@ function Invoke-OpencodeReview {
         # above); Environment is per-child.
         $psi.Environment['XDG_DATA_HOME'] = $isoState.ShareDir
         $psi.Environment['XDG_STATE_HOME'] = $isoState.StateDir
+        if ($cliVersion -eq 'v2' -and -not $psi.Environment.ContainsKey('OPENCODE_API_KEY')) {
+            # v2 does not import the copied auth.json (measured 2026-10-03:
+            # isolated `auth list` shows environment credentials only), so the
+            # opencode-go seat would run unauthenticated without this. Per-child
+            # env block only -- never the parent process (see Get-OpencodeGoApiKey).
+            $goKey = Get-OpencodeGoApiKey
+            if ($goKey) { $psi.Environment['OPENCODE_API_KEY'] = $goKey }
+        }
         if ($isoState.SessionId) {
             # Fork, never continue in place: the new round gets the history
             # as a private copy; concurrent same-preset rounds cannot
@@ -1720,7 +1860,7 @@ stderr bytes     : $($stderr.Length)
     if ($isoState.Mode -ne 'shared') {
         Update-OpencodeResumeSession -OpencodeExe $opencodeExe -IsoState $isoState `
             -MapPath (Join-Path (Split-Path $ResponsePath -Parent) 'session-map.json') `
-            -Preset $seatPreset -SinceMs $runStartMs
+            -Preset $seatPreset -SinceMs $runStartMs -CliVersion $cliVersion
     }
     return @{
         Response = $clean

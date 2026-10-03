@@ -134,8 +134,19 @@ Describe 'the Read-tool path carries bundles over the attach cap' -Tag Unit {
     }
 
     It 'still attaches a bundle under the cap' {
-        # The refusal must not have swallowed the working path.
-        $script:Src | Should -Match "if \(-not \`$useReadTool\) \{[\s\S]{0,200}ArgumentList\.Add\('-f'\)"
+        # The refusal must not have swallowed the working path. WAS a regex
+        # over the inline argv shape; the argv moved into Get-OpencodeRunArgs
+        # (v1/v2 spellings), so assert the behaviour: -f+bundle present iff
+        # not the read path.
+        . (Join-Path $script:SkillRoot 'backends/opencode.ps1')
+        $attach = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $false -BundlePath 'b.xml'
+        ($attach -contains '-f') | Should -BeTrue
+        ($attach -contains 'b.xml') | Should -BeTrue
+        $read = Get-OpencodeRunArgs -CliVersion v1 -Prompt 'p' -ModelId 'm' `
+            -Variant 'default' -UseReadTool $true -BundlePath 'b.xml'
+        ($read -contains '-f') | Should -BeFalse
+        ($read -contains 'b.xml') | Should -BeFalse
     }
 
     It 'records the canary measurements in the source, not just a commit message' {
