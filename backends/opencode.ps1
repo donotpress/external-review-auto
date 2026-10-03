@@ -1301,10 +1301,13 @@ function Invoke-OpencodeReview {
     # case where the flag is NOT passed (see the omit branch above). A log that names
     # an argument the process did not receive is the same class of defect as a comment
     # asserting behaviour no code path has: it survives review because it reads true.
-    $variantEcho = if ($cliVersion -eq 'v2') {
+    # v2 carries the variant inside the single -m value, so its echo IS the -m value
+    # (printing "-m <model>" first and then "-m <model>#<v>" named a second -m the
+    # process never received - seen 2026-10-03 in the first v2 panel round).
+    $modelEcho = if ($cliVersion -eq 'v2') {
         if ($chosenVariant -eq 'default') { "-m $modelId (no variant; opencode's own default)" } else { "-m $modelId#$chosenVariant" }
-    } elseif ($chosenVariant -eq 'default') { "(no --variant; opencode's own default)" } else { "--variant $chosenVariant" }
-    Write-Host "[opencode] [$cliVersion] run -m $modelId $variantEcho (attach=$([bool](-not $useReadTool)))"
+    } elseif ($chosenVariant -eq 'default') { "-m $modelId (no --variant; opencode's own default)" } else { "-m $modelId --variant $chosenVariant" }
+    Write-Host "[opencode] [$cliVersion] run $modelEcho (attach=$([bool](-not $useReadTool)))"
 
     $exitCode = -1
     $clean = $null
