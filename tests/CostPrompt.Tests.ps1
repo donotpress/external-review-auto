@@ -64,13 +64,30 @@ Describe 'Invoke-CostPrompt' {
             }
         }
 
-        It 'returns false when ERA_FORCE is not set' {
+        It 'returns false when ERA_FORCE is not set in an interactive console' {
             Remove-Item Env:\ERA_FORCE -ErrorAction SilentlyContinue
-            # In a test environment, $host.Name is typically 'ConsoleHost',
-            # and [Environment]::UserInteractive is $true, so Get-ForceMode
-            # should return $false when ERA_FORCE is unset.
-            $result = Get-ForceMode
-            $result | Should -BeFalse
+            # Session state is passed explicitly: a runner launched without an
+            # interactive console (CI, WSL interop) makes the live default $true.
+            Get-ForceMode -HostName 'ConsoleHost' -UserInteractive $true | Should -BeFalse
+        }
+
+        It 'returns true when the session is not interactive' {
+            Remove-Item Env:\ERA_FORCE -ErrorAction SilentlyContinue
+            Get-ForceMode -HostName 'ConsoleHost' -UserInteractive $false | Should -BeTrue
+        }
+
+        It 'returns true for a non-console host even when interactive' {
+            Remove-Item Env:\ERA_FORCE -ErrorAction SilentlyContinue
+            Get-ForceMode -HostName 'ServerRemoteHost' -UserInteractive $true | Should -BeTrue
+        }
+
+        It 'treats ERA_FORCE=0 as not forced in an interactive console' {
+            $env:ERA_FORCE = '0'
+            try {
+                Get-ForceMode -HostName 'ConsoleHost' -UserInteractive $true | Should -BeFalse
+            } finally {
+                Remove-Item Env:\ERA_FORCE -ErrorAction SilentlyContinue
+            }
         }
     }
 }

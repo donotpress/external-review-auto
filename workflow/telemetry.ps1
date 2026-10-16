@@ -5,12 +5,19 @@
 #>
 
 function Get-ForceMode {
+    # HostName / UserInteractive default to the live session; tests pass them
+    # explicitly so the result doesn't depend on how the test runner was launched
+    # (a non-interactive runner correctly yields $true here).
+    param(
+        [string]$HostName = $host.Name,
+        [bool]$UserInteractive = [Environment]::UserInteractive
+    )
     $force = $env:ERA_FORCE -and `
              $env:ERA_FORCE -ne '0' -and `
              $env:ERA_FORCE -ne 'false'
     return [bool]$force -or `
-           ($host.Name -notmatch 'ConsoleHost|Visual Studio') -or `
-           (-not [Environment]::UserInteractive)
+           ($HostName -notmatch 'ConsoleHost|Visual Studio') -or `
+           (-not $UserInteractive)
 }
 
 function ConvertTo-EraNativePath {
